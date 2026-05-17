@@ -76,7 +76,7 @@ func _respawn() -> void:
 	scale = _HIDDEN_SCALE
 	visible = true
 	health = max_health
-	collision_layer = 4
+	collision_layer = 5
 	mesh.set_surface_override_material(0, _base_mat)
 	_dead = false
 	_active_tween = create_tween()

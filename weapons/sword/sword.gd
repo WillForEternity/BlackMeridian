@@ -201,7 +201,14 @@ func _on_body_entered(body: Node) -> void:
 	var dir: Vector3 = Vector3.ZERO
 	if body3d != null:
 		dir = (body3d.global_position - player.global_position).normalized()
-	body.take_damage(_damage(), dir)
+	# Combo damage scaling: 1st = 1x, 2nd = 1.5x, 3rd = 2x (3x if dashing).
+	var mult: float = 1.0
+	if _combo_index == 1:
+		mult = 1.5
+	elif _combo_index == 2:
+		mult = 3.0 if player.dash_time_left > 0.0 else 2.0
+	var dmg: int = int(round(float(_damage()) * mult))
+	body.take_damage(dmg, dir)
 	if body3d != null:
 		Vfx.impact_burst(body3d.global_position + Vector3(0, 0.4, 0), 0.7, Color(0.5, 0.95, 1, 1))
 	player.register_hit(0.4)

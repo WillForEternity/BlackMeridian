@@ -100,18 +100,34 @@ func _physics_process(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= gravity * delta
 
-	if Input.is_action_just_pressed("jump") and is_on_floor():
+	var movement_locked: bool = current_weapon_node != null \
+		and current_weapon_node.has_method("locks_movement") \
+		and current_weapon_node.locks_movement()
+
+	if Input.is_action_just_pressed("jump") and is_on_floor() and not movement_locked:
 		velocity.y = jump_velocity
 
-	if Input.is_action_just_pressed("dash") and dash_cd_left <= 0.0:
+	if Input.is_action_just_pressed("dash") and dash_cd_left <= 0.0 and not movement_locked:
 		_start_dash()
 
 	if dash_time_left > 0.0:
-		dash_time_left -= delta
-		velocity.x = dash_dir.x * dash_speed
-		velocity.z = dash_dir.z * dash_speed
+		# Cancel the dash if we're about to plow into an enemy: keep at least
+		# half a sword-slice of space between the player capsule and the target.
+		var min_gap := SWORD_SLICE_DISTANCE * 0.5
+		var lookahead := dash_speed * delta + min_gap
+		var d := _dash_target_distance(lookahead)
+		if d >= 0.0 and d <= min_gap:
+			dash_time_left = 0.0
+			velocity.x = 0.0
+			velocity.z = 0.0
+		else:
+			dash_time_left -= delta
+			velocity.x = dash_dir.x * dash_speed
+			velocity.z = dash_dir.z * dash_speed
 	else:
 		var input_dir := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+		if movement_locked:
+			input_dir = Vector2.ZERO
 		var direction := transform.basis.x * input_dir.x + transform.basis.z * input_dir.y
 		direction.y = 0.0
 		if direction.length() > 0.0:
@@ -137,20 +153,36 @@ func _start_dash() -> void:
 	# the dash path so the player halts half a sword-slice in front of them.
 	var duration := dash_duration
 	var max_dist := dash_speed * dash_duration
-	var space := get_world_3d().direct_space_state
-	var from := global_position
-	var query := PhysicsRayQueryParameters3D.create(from, from + dash_dir * (max_dist + SWORD_SLICE_DISTANCE))
-	query.exclude = [self.get_rid()]
-	query.collision_mask = 4  # enemies
-	var hit := space.intersect_ray(query)
-	if not hit.is_empty():
-		var stop_dist := maxf((from.distance_to(hit.position)) - SWORD_SLICE_DISTANCE * 0.5, 0.0)
+	var hit_dist := _dash_target_distance(max_dist + SWORD_SLICE_DISTANCE)
+	if hit_dist >= 0.0:
+		var stop_dist := maxf(hit_dist - SWORD_SLICE_DISTANCE * 0.5, 0.0)
 		duration = clampf(stop_dist / dash_speed, 0.0, dash_duration)
 
 	dash_time_left = duration
 	dash_cd_left = dash_cooldown
 
 	_play_dash_animation(duration)
+
+# Returns the distance from the player to the nearest enemy obstruction along
+# the current dash direction, or -1.0 if the path is clear within max_dist.
+func _dash_target_distance(max_dist: float) -> float:
+	var space := get_world_3d().direct_space_state
+	var shape := CapsuleShape3D.new()
+	shape.radius = 0.4
+	shape.height = 1.6
+	var q := PhysicsShapeQueryParameters3D.new()
+	q.shape = shape
+	q.transform = Transform3D(Basis.IDENTITY, global_position)
+	q.motion = dash_dir * max_dist
+	q.exclude = [self.get_rid()]
+	q.collision_mask = 4  # enemies
+	var res := space.cast_motion(q)
+	if res.is_empty():
+		return -1.0
+	var unsafe_fraction: float = res[1]
+	if unsafe_fraction >= 1.0:
+		return -1.0
+	return unsafe_fraction * max_dist
 
 func _play_dash_animation(duration: float) -> void:
 	# Squash & stretch the body along the dash direction.

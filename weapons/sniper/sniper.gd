@@ -33,6 +33,10 @@ const CORE_PEAK_EMISSION := 12.0
 
 var _charging: bool = false
 var _charge_t: float = 0.0
+# Seconds remaining while the railgun tracer is still visible after firing.
+# Matches the longest beam-layer life in Vfx.tracer_beam (0.55s).
+const TRAIL_LIFE: float = 0.55
+var _trail_lock_left: float = 0.0
 var _core_mat: StandardMaterial3D
 var _laser_dot: MeshInstance3D
 
@@ -50,6 +54,7 @@ func equip() -> void:
 
 func unequip() -> void:
 	cancel_charge()
+	_trail_lock_left = 0.0
 	rig_tpv.visible = false
 	rig_fpv.visible = false
 	rig_tpv.rotation = Vector3.ZERO
@@ -67,6 +72,13 @@ func tick(delta: float) -> void:
 	if _charging:
 		_charge_t = minf(_charge_t + delta, charge_time)
 		_update_charge_visuals()
+	if _trail_lock_left > 0.0:
+		_trail_lock_left = maxf(_trail_lock_left - delta, 0.0)
+
+# Player consults this to freeze movement while charging or while the tracer
+# is still on-screen.
+func locks_movement() -> bool:
+	return _charging or _trail_lock_left > 0.0
 
 func on_attack_pressed() -> void:
 	if attack_cd > 0.0 or _charging:
@@ -140,6 +152,7 @@ func _fire(charge01: float) -> void:
 	if hit_body and hit_body.has_method("take_damage"):
 		hit_body.take_damage(dmg, dir)
 	Vfx.tracer_beam(spawn_marker.global_position, end, charge01)
+	_trail_lock_left = TRAIL_LIFE
 	Vfx.muzzle_flash(spawn_marker.global_position, 1.1 + charge01 * 0.4, Color(0.4, 0.95, 1, 1))
 	Vfx.impact_burst(end, 1.0 + charge01 * 0.6, Color(0.4, 0.95, 1, 1))
 	_recoil(rig_fpv)
