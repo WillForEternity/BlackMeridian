@@ -1,0 +1,52 @@
+[gd_scene load_steps=7 format=3 uid="uid://bproj1xqj0001"]
+
+[ext_resource type="Script" path="res://weapons/gun/projectile.gd" id="1_proj"]
+
+[sub_resource type="CapsuleMesh" id="Mesh_BulletCore"]
+radius = 0.022
+height = 0.3
+radial_segments = 10
+rings = 4
+
+[sub_resource type="CapsuleMesh" id="Mesh_BulletGlow"]
+radius = 0.05
+height = 0.48
+radial_segments = 10
+rings = 4
+
+[sub_resource type="SphereShape3D" id="SphereShape_1"]
+radius = 0.06
+
+[sub_resource type="StandardMaterial3D" id="Mat_BulletCore"]
+albedo_color = Color(1, 1, 1, 1)
+emission_enabled = true
+emission = Color(1, 0.95, 1, 1)
+emission_energy_multiplier = 14.0
+shading_mode = 2
+
+[sub_resource type="StandardMaterial3D" id="Mat_BulletGlow"]
+albedo_color = Color(1, 0.55, 0.95, 0.55)
+emission_enabled = true
+emission = Color(1, 0.35, 0.9, 1)
+emission_energy_multiplier = 6.0
+shading_mode = 2
+transparency = 1
+
+[node name="Projectile" type="Area3D"]
+collision_layer = 8
+collision_mask = 5
+script = ExtResource("1_proj")
+
+[node name="MeshOrient" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0, -1, 0, 1, 0, 0, 0, 0)
+
+[node name="Core" type="MeshInstance3D" parent="MeshOrient"]
+mesh = SubResource("Mesh_BulletCore")
+surface_material_override/0 = SubResource("Mat_BulletCore")
+
+[node name="Glow" type="MeshInstance3D" parent="MeshOrient"]
+mesh = SubResource("Mesh_BulletGlow")
+surface_material_override/0 = SubResource("Mat_BulletGlow")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource("SphereShape_1")

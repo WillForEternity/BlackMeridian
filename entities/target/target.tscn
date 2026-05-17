@@ -1,0 +1,32 @@
+[gd_scene load_steps=5 format=3 uid="uid://btarget0xq001"]
+
+[ext_resource type="Script" path="res://entities/target/target.gd" id="1_target"]
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_Target"]
+top_radius = 0.45
+bottom_radius = 0.45
+height = 1.6
+radial_segments = 16
+
+[sub_resource type="CylinderShape3D" id="CylinderShape_Target"]
+radius = 0.45
+height = 1.6
+
+[sub_resource type="StandardMaterial3D" id="Mat_Target"]
+albedo_color = Color(0.95, 0.55, 0.2, 1)
+roughness = 0.5
+emission_enabled = true
+emission = Color(1, 0.5, 0.15, 1)
+emission_energy_multiplier = 0.5
+
+[node name="Target" type="StaticBody3D"]
+collision_layer = 4
+collision_mask = 1
+script = ExtResource("1_target")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+mesh = SubResource("CylinderMesh_Target")
+surface_material_override/0 = SubResource("Mat_Target")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource("CylinderShape_Target")
