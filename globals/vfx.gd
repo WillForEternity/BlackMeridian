@@ -1,5 +1,11 @@
 extends Node
 
+# NOTE: These effects are intentionally built in code (meshes + tweens +
+# ImmediateMesh) rather than as GPUParticles3D scenes or shaders. I'll learn
+# the renderer properly later — for now I just wanted Claude to drop in some
+# placeholder VFX so the weapons feel alive. Plan to migrate to
+# scene + shader + pool based effects later. See chat for full refactor plan.
+
 func _attach(node: Node) -> void:
 	get_tree().current_scene.add_child(node)
 
@@ -251,6 +257,319 @@ func _helix_wrap(from: Vector3, dir: Vector3, dist: float, charge01: float, tint
 		mat.emission_energy_multiplier = v * (5.0 + 3.0 * charge01)
 	, 1.0, 0.0, life)
 	get_tree().create_timer(life + 0.05).timeout.connect(mi.queue_free)
+
+func swirl_pillar(at: Vector3, radius: float, duration: float, tint: Color) -> void:
+	var mi := MeshInstance3D.new()
+	var im := ImmediateMesh.new()
+	mi.mesh = im
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = tint
+	mat.emission_enabled = true
+	mat.emission = tint
+	mat.emission_energy_multiplier = 7.0
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_attach(mi)
+	mi.global_position = at
+
+	var height: float = 3.6
+	var turns: float = 3.0
+	var steps: int = 56
+
+	var light := OmniLight3D.new()
+	light.light_color = tint
+	light.light_energy = 6.0
+	light.omni_range = radius * 1.4
+	mi.add_child(light)
+
+	var t := mi.create_tween()
+	t.set_parallel(true)
+	t.tween_method(func(phase: float):
+		im.clear_surfaces()
+		var r: float = radius * lerpf(0.25, 1.0, clampf(phase * 1.4, 0.0, 1.0))
+		for strand in 3:
+			var off: float = float(strand) * TAU / 3.0
+			im.surface_begin(Mesh.PRIMITIVE_LINE_STRIP)
+			for i in range(steps + 1):
+				var u: float = float(i) / float(steps)
+				var ang: float = u * turns * TAU + phase * TAU * 2.0 + off
+				var y: float = u * height
+				var p: Vector3 = Vector3(cos(ang) * r, y, sin(ang) * r)
+				im.surface_add_vertex(p)
+			im.surface_end()
+	, 0.0, 1.0, duration)
+	t.tween_method(func(v: float):
+		mat.albedo_color.a = v
+		mat.emission_energy_multiplier = v * 7.0
+		light.light_energy = v * 6.0
+	, 1.0, 0.0, duration)
+	get_tree().create_timer(duration + 0.1).timeout.connect(mi.queue_free)
+
+func _emp_arc(a: Vector3, b: Vector3, tint: Color) -> void:
+	# Cleaner arc than arc_lightning: additive blend, soft falloff, subtle jitter.
+	# Reads as a wisp of EM discharge instead of a scribbled line.
+	var dir := b - a
+	var dlen := dir.length()
+	if dlen < 0.001:
+		return
+	var fwd := dir.normalized()
+	var up := Vector3.UP
+	if absf(fwd.dot(up)) > 0.99:
+		up = Vector3.FORWARD
+	var side := fwd.cross(up).normalized()
+	var up2 := side.cross(fwd).normalized()
+
+	var mi := MeshInstance3D.new()
+	var im := ImmediateMesh.new()
+	mi.mesh = im
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	mat.albedo_color = tint
+	mat.emission_enabled = true
+	mat.emission = tint
+	mat.emission_energy_multiplier = 5.0
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_attach(mi)
+
+	# Subtle sinusoidal sway + small noise → wisp, not zigzag scribble.
+	var steps := 14
+	var jitter: float = dlen * 0.02
+	var sway: float = dlen * 0.06
+	var phase: float = randf() * TAU
+	im.surface_begin(Mesh.PRIMITIVE_LINE_STRIP)
+	for i in range(steps + 1):
+		var t: float = float(i) / float(steps)
+		var envelope: float = sin(t * PI)
+		var s_off: float = sin(t * PI * 2.0 + phase) * sway * envelope + randf_range(-jitter, jitter) * envelope
+		var u_off: float = cos(t * PI * 2.0 + phase) * sway * envelope + randf_range(-jitter, jitter) * envelope
+		var p: Vector3 = a + dir * t + side * s_off + up2 * u_off
+		im.surface_add_vertex(p)
+	im.surface_end()
+
+	var life := 0.16
+	var tw := mi.create_tween()
+	tw.tween_method(func(v: float):
+		mat.albedo_color.a = v
+		mat.emission_energy_multiplier = v * 5.0
+	, 1.0, 0.0, life)
+	get_tree().create_timer(life + 0.02).timeout.connect(mi.queue_free)
+
+func _emp_arch_bolt(from: Vector3, to: Vector3, tint: Color) -> void:
+	# Rainbow-arched 3D bolt: a horizontal sweep from `from` to `to` with a
+	# sinusoidal vertical arch (peak at midpoint) plus per-segment jitter for
+	# chaos. Additive blend so overlapping bolts pile into glow, not paint.
+	var dir := to - from
+	var dist := dir.length()
+	if dist < 0.001:
+		return
+
+	var mi := MeshInstance3D.new()
+	var im := ImmediateMesh.new()
+	mi.mesh = im
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	mat.albedo_color = tint
+	mat.emission_enabled = true
+	mat.emission = tint
+	mat.emission_energy_multiplier = 6.0
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_attach(mi)
+
+	# Arch height scales with horizontal span — wider arcs go taller, like a
+	# rainbow. Side-axis perpendicular to the ground sweep gives jitter room.
+	var flat := Vector3(dir.x, 0, dir.z)
+	var flat_len: float = flat.length()
+	var fwd: Vector3 = flat.normalized() if flat_len > 0.01 else Vector3.FORWARD
+	var side: Vector3 = fwd.cross(Vector3.UP).normalized()
+	if side.length() < 0.5:
+		side = Vector3.RIGHT
+	var arch_height: float = lerpf(0.6, 2.2, clampf(dist / 9.0, 0.0, 1.0))
+	var jitter: float = 0.18
+
+	var steps: int = 14
+	im.surface_begin(Mesh.PRIMITIVE_LINE_STRIP)
+	for i in range(steps + 1):
+		var t: float = float(i) / float(steps)
+		var base: Vector3 = from.lerp(to, t)
+		var lift: float = sin(t * PI) * arch_height
+		var envelope: float = sin(t * PI)
+		var side_j: float = randf_range(-jitter, jitter) * envelope
+		var up_j: float = randf_range(-jitter * 0.5, jitter * 0.5) * envelope
+		var p: Vector3 = base + Vector3(0, lift + up_j, 0) + side * side_j
+		im.surface_add_vertex(p)
+	im.surface_end()
+
+	var life: float = 0.22
+	var tw := mi.create_tween()
+	tw.tween_method(func(v: float):
+		mat.albedo_color.a = v
+		mat.emission_energy_multiplier = v * 6.0
+	, 1.0, 0.0, life)
+	get_tree().create_timer(life + 0.02).timeout.connect(mi.queue_free)
+
+func emp_ground_wave(origin: Vector3, max_radius: float, duration: float, tint: Color) -> void:
+	# Flat expanding ring on the ground at `origin` — an annulus rendered with
+	# a triangle strip whose inner/outer radii both grow each frame, so it reads
+	# as a single shockwave traveling outward across the floor. Additive blend
+	# keeps it readable as light rather than paint. Crackles are scheduled
+	# separately along the wavefront so the EM discharge sweeps with the ring.
+	var mi := MeshInstance3D.new()
+	var im := ImmediateMesh.new()
+	mi.mesh = im
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	mat.albedo_color = tint
+	mat.emission_enabled = true
+	mat.emission = tint
+	mat.emission_energy_multiplier = 5.0
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_attach(mi)
+	mi.global_position = origin + Vector3(0, 0.04, 0)
+
+	var light := OmniLight3D.new()
+	light.light_color = tint
+	light.light_energy = 7.0
+	light.omni_range = max_radius * 1.1
+	light.position = Vector3(0, 0.6, 0)
+	mi.add_child(light)
+
+	var segs: int = 72
+	var thickness: float = max(0.6, max_radius * 0.18)
+	var t := mi.create_tween()
+	t.set_parallel(true)
+	t.tween_method(func(phase: float):
+		var outer_r: float = lerpf(0.1, max_radius, phase)
+		var inner_r: float = maxf(0.0, outer_r - thickness * (1.0 - phase * 0.4))
+		im.clear_surfaces()
+		im.surface_begin(Mesh.PRIMITIVE_TRIANGLE_STRIP)
+		for i in range(segs + 1):
+			var ang: float = float(i) / float(segs) * TAU
+			var c: float = cos(ang)
+			var s: float = sin(ang)
+			im.surface_add_vertex(Vector3(c * outer_r, 0, s * outer_r))
+			im.surface_add_vertex(Vector3(c * inner_r, 0, s * inner_r))
+		im.surface_end()
+	, 0.0, 1.0, duration).set_trans(Tween.TRANS_QUINT).set_ease(Tween.EASE_OUT)
+	t.tween_method(func(v: float):
+		mat.emission_energy_multiplier = v * 5.0
+		mat.albedo_color.a = v
+		light.light_energy = v * 7.0
+	, 1.0, 0.0, duration)
+	get_tree().create_timer(duration + 0.05).timeout.connect(mi.queue_free)
+
+	# Chaotic rainbow-arched bolts from the player out to the wavefront. Each
+	# tick spawns a clump of arcs landing at random points along the current
+	# ring radius, so the EM field reads as continuously discharging outward.
+	var arch_ticks: int = 16
+	for i in arch_ticks:
+		var tick_t: float = float(i) / float(arch_ticks) * duration
+		get_tree().create_timer(tick_t, true, false, true).timeout.connect(func():
+			var phase: float = tick_t / duration
+			var r: float = lerpf(0.6, max_radius, phase)
+			var arcs_this_tick: int = 3
+			for j in arcs_this_tick:
+				var ang: float = randf() * TAU
+				var radial_jitter: float = randf_range(-0.6, 0.6)
+				var landing := origin + Vector3(cos(ang) * (r + radial_jitter), 0.05, sin(ang) * (r + radial_jitter))
+				_emp_arch_bolt(origin + Vector3(0, 0.4, 0), landing, tint)
+		)
+
+	# Crackles riding the wavefront — each burst spawns at the ring's current
+	# radius and arcs tangentially along it. Many small bursts read as the
+	# pulse "frying" everything it passes over.
+	var burst_count: int = 18
+	for i in burst_count:
+		var burst_t: float = float(i) / float(burst_count) * duration
+		get_tree().create_timer(burst_t, true, false, true).timeout.connect(func():
+			var phase: float = burst_t / duration
+			var r: float = lerpf(0.1, max_radius, phase)
+			var arcs_per_burst: int = 4
+			for j in arcs_per_burst:
+				var ang: float = randf() * TAU
+				var dirn := Vector3(cos(ang), 0, sin(ang))
+				var tang := Vector3(-sin(ang), 0, cos(ang))
+				var a_pt: Vector3 = origin + dirn * r + Vector3(0, 0.05, 0)
+				var span: float = randf_range(0.5, 1.4)
+				var sign_t: float = 1.0 if randf() < 0.5 else -1.0
+				var b_pt: Vector3 = a_pt + tang * span * sign_t + Vector3(0, randf_range(0.05, 0.6), 0)
+				_emp_arc(a_pt, b_pt, tint)
+		)
+
+func emp_shockwave(origin: Vector3, max_radius: float, tint: Color) -> void:
+	# Expanding emissive sphere shell + crackling arcs sweeping outward along the
+	# wavefront. Reads as a single instantaneous EM blast — the shell does the
+	# "pulse" and the arcs do the "crackle". No persistent field; everything is
+	# gone by ~0.45s.
+	var pair := _spawn_emissive_sphere(origin, 1.0, 24, 12, tint, 2.2)
+	var mi: MeshInstance3D = pair[0]
+	var mat: StandardMaterial3D = pair[1]
+	mat.albedo_color.a = 0.18
+	mi.scale = Vector3.ONE * 0.15
+
+	var light := OmniLight3D.new()
+	light.light_color = tint
+	light.light_energy = 9.0
+	light.omni_range = max_radius * 1.2
+	mi.add_child(light)
+
+	var life: float = 0.5
+	var t := mi.create_tween()
+	t.set_parallel(true)
+	t.tween_property(mi, "scale", Vector3.ONE * max_radius, life).set_trans(Tween.TRANS_QUINT).set_ease(Tween.EASE_OUT)
+	t.tween_method(func(v: float):
+		mat.emission_energy_multiplier = v * 2.2
+		mat.albedo_color.a = v * 0.18
+		light.light_energy = v * 9.0
+	, 1.0, 0.0, life)
+	get_tree().create_timer(life + 0.05).timeout.connect(mi.queue_free)
+
+	# A handful of clean radial filaments streaking outward from the origin at
+	# t=0 — these read as the EM pulse itself. Followed by a small number of
+	# soft wispy arcs riding the wavefront and a couple inside, all using the
+	# additive _emp_arc style so they glow instead of looking like scribbles.
+	var filaments: int = 10
+	for i in filaments:
+		var yaw: float = randf() * TAU
+		var pitch: float = randf_range(-0.7, 0.7)
+		var n := Vector3(cos(yaw) * cos(pitch), sin(pitch), sin(yaw) * cos(pitch))
+		var end_r: float = randf_range(max_radius * 0.7, max_radius)
+		_emp_arc(origin, origin + n * end_r, tint)
+
+	var bursts: int = 4
+	for i in bursts:
+		var burst_t: float = float(i + 1) / float(bursts) * life * 0.7
+		get_tree().create_timer(burst_t, true, false, true).timeout.connect(func():
+			var phase: float = burst_t / life
+			var r: float = lerpf(0.3, 1.0, phase) * max_radius
+			var surface_count: int = 3
+			for j in surface_count:
+				var yaw: float = randf() * TAU
+				var pitch: float = randf_range(-0.5, 0.5)
+				var n := Vector3(cos(yaw) * cos(pitch), sin(pitch), sin(yaw) * cos(pitch))
+				var a_pt: Vector3 = origin + n * r
+				var tangent := n.cross(Vector3.UP)
+				if tangent.length() < 0.01:
+					tangent = Vector3.RIGHT
+				tangent = tangent.normalized()
+				var sign_t: float = 1.0 if randf() < 0.5 else -1.0
+				var b_pt: Vector3 = a_pt + tangent * randf_range(0.8, 1.8) * sign_t
+				_emp_arc(a_pt, b_pt, tint)
+		)
 
 func arc_lightning(a: Vector3, b: Vector3, charge01: float) -> void:
 	var mi := MeshInstance3D.new()

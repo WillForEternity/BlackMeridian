@@ -7,6 +7,7 @@ extends Area3D
 
 var direction: Vector3 = Vector3.FORWARD
 var shooter: Node = null
+var source_weapon: Node = null
 var pooled: bool = false
 var _despawning: bool = false
 var _age: float = 0.0
@@ -50,6 +51,7 @@ func reset_for_reuse() -> void:
 	_despawning = false
 	direction = Vector3.FORWARD
 	shooter = null
+	source_weapon = null
 	_trail_points.clear()
 	if _trail_im:
 		_trail_im.clear_surfaces()
@@ -95,6 +97,8 @@ func _on_body_entered(body: Node) -> void:
 		return
 	if body.has_method("take_damage"):
 		body.take_damage(damage, direction)
+		if source_weapon != null and is_instance_valid(source_weapon) and source_weapon.has_method("add_super_charge"):
+			source_weapon.add_super_charge(float(damage))
 	Vfx.impact_burst(global_position, 0.9, Color(1, 0.45, 0.95, 1))
 	_despawn()
 

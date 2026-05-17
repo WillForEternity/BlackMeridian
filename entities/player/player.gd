@@ -1,6 +1,6 @@
 extends CharacterBody3D
 
-enum WeaponSlot { SWORD, GUN, SNIPER }
+enum WeaponSlot { SWORD, GUN, SNIPER, PORTAL_LIGHT, PORTAL_DARK }
 enum ViewMode { THIRD_PERSON, FIRST_PERSON }
 
 signal weapon_changed(weapon: int)
@@ -8,6 +8,12 @@ signal charge_changed(value: float)
 
 @export var speed: float = 8.5
 @export var jump_velocity: float = 5.5
+# Jump feel — coyote grace after walking off a ledge, falling-gravity boost
+# for a less floaty arc, and an early-release cut so tapping jump produces a
+# shorter hop than holding it.
+const COYOTE_TIME: float = 0.12
+const FALL_GRAVITY_MULT: float = 1.65
+const JUMP_CUT_FACTOR: float = 0.45
 @export var dash_speed: float = 44.0
 @export var dash_duration: float = 0.18
 @export var dash_cooldown: float = 0.9
@@ -20,6 +26,8 @@ const SWORD_SLICE_DISTANCE: float = 1.45
 @export var sword_path: NodePath
 @export var gun_path: NodePath
 @export var sniper_path: NodePath
+@export var portal_light_path: NodePath
+@export var portal_dark_path: NodePath
 
 var gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity")
 var current_slot: WeaponSlot = WeaponSlot.SWORD
@@ -28,6 +36,8 @@ var view_mode: ViewMode = ViewMode.THIRD_PERSON
 var dash_time_left: float = 0.0
 var dash_cd_left: float = 0.0
 var dash_dir: Vector3 = Vector3.ZERO
+var lift_time_left: float = 0.0
+var lift_velocity_y: float = 0.0
 var camera_pitch: float = 0.0
 var base_fov: float = 75.0
 var _consume_next_click: bool = false
@@ -44,7 +54,14 @@ const CAM_POS_1P := Vector3(0.0, 0.0, 0.0)
 @onready var _sword: Node = get_node(sword_path)
 @onready var _gun: Node = get_node(gun_path)
 @onready var _sniper: Node = get_node(sniper_path)
-@onready var _weapons: Array[Node] = [_sword, _gun, _sniper]
+@onready var _portal_light: Node = get_node(portal_light_path)
+@onready var _portal_dark: Node = get_node(portal_dark_path)
+@onready var _weapons: Array[Node] = [_sword, _gun, _sniper, _portal_light, _portal_dark]
+
+# Tracks extra mid-air jumps consumed since last ground contact. Weapons can
+# report a higher allowance via `extra_air_jumps()`.
+var _air_jumps_used: int = 0
+var _coyote_left: float = 0.0
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -83,8 +100,14 @@ func _process(delta: float) -> void:
 		_equip(WeaponSlot.GUN)
 	if Input.is_action_just_pressed("equip_sniper"):
 		_equip(WeaponSlot.SNIPER)
+	if Input.is_action_just_pressed("equip_portal_light"):
+		_equip(WeaponSlot.PORTAL_LIGHT)
+	if Input.is_action_just_pressed("equip_portal_dark"):
+		_equip(WeaponSlot.PORTAL_DARK)
 	if Input.is_action_just_pressed("toggle_view"):
 		_toggle_view()
+	if Input.is_action_just_pressed("weapon_guide"):
+		EventBus.weapon_guide_toggled.emit(current_weapon_node.guide_text() if current_weapon_node else "")
 
 	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 		return
@@ -95,17 +118,43 @@ func _process(delta: float) -> void:
 			current_weapon_node.on_attack_pressed()
 	if Input.is_action_just_released("attack"):
 		current_weapon_node.on_attack_released()
+	if Input.is_action_just_pressed("super"):
+		current_weapon_node.on_super_pressed()
 
 func _physics_process(delta: float) -> void:
-	if not is_on_floor():
-		velocity.y -= gravity * delta
+	if lift_time_left > 0.0:
+		lift_time_left -= delta
+		velocity.y = lift_velocity_y
+	elif not is_on_floor():
+		# Heavier gravity on the way down — keeps the jump arc snappy rather
+		# than floaty without hurting the rising height.
+		var g_mult: float = FALL_GRAVITY_MULT if velocity.y < 0.0 else 1.0
+		velocity.y -= gravity * g_mult * delta
 
 	var movement_locked: bool = current_weapon_node != null \
 		and current_weapon_node.has_method("locks_movement") \
 		and current_weapon_node.locks_movement()
 
-	if Input.is_action_just_pressed("jump") and is_on_floor() and not movement_locked:
-		velocity.y = jump_velocity
+	if is_on_floor():
+		_air_jumps_used = 0
+		_coyote_left = COYOTE_TIME
+	else:
+		_coyote_left = maxf(_coyote_left - delta, 0.0)
+
+	if Input.is_action_just_pressed("jump") and not movement_locked:
+		if is_on_floor() or _coyote_left > 0.0:
+			velocity.y = jump_velocity
+			_coyote_left = 0.0
+		elif _air_jumps_used < _max_air_jumps():
+			# Reset rather than add so the second/third jump feels equally
+			# strong even if the disc was already falling.
+			velocity.y = jump_velocity
+			_air_jumps_used += 1
+
+	# Variable jump height: releasing jump early cuts upward momentum. Skip
+	# while a super is forcing a lift so the cut doesn't fight it.
+	if Input.is_action_just_released("jump") and velocity.y > 0.0 and lift_time_left <= 0.0:
+		velocity.y *= JUMP_CUT_FACTOR
 
 	if Input.is_action_just_pressed("dash") and dash_cd_left <= 0.0 and not movement_locked:
 		_start_dash()
@@ -132,8 +181,9 @@ func _physics_process(delta: float) -> void:
 		direction.y = 0.0
 		if direction.length() > 0.0:
 			direction = direction.normalized()
-			velocity.x = direction.x * speed
-			velocity.z = direction.z * speed
+			var s := speed * _speed_multiplier()
+			velocity.x = direction.x * s
+			velocity.z = direction.z * s
 		else:
 			velocity.x = move_toward(velocity.x, 0.0, speed)
 			velocity.z = move_toward(velocity.z, 0.0, speed)
@@ -159,7 +209,10 @@ func _start_dash() -> void:
 		duration = clampf(stop_dist / dash_speed, 0.0, dash_duration)
 
 	dash_time_left = duration
-	dash_cd_left = dash_cooldown
+	var cd_mult: float = 1.0
+	if current_weapon_node and current_weapon_node.has_method("dash_cooldown_mult"):
+		cd_mult = current_weapon_node.dash_cooldown_mult()
+	dash_cd_left = dash_cooldown * cd_mult
 
 	_play_dash_animation(duration)
 
@@ -225,6 +278,16 @@ func _spawn_dash_ghost() -> void:
 	tw.tween_property(mat, "albedo_color:a", 0.0, 0.28)
 	tw.tween_property(ghost, "scale", ghost.scale * 0.6, 0.28)
 	tw.chain().tween_callback(ghost.queue_free)
+
+func _max_air_jumps() -> int:
+	if current_weapon_node != null and current_weapon_node.has_method("extra_air_jumps"):
+		return current_weapon_node.extra_air_jumps()
+	return 0
+
+func _speed_multiplier() -> float:
+	if current_weapon_node != null and current_weapon_node.has_method("speed_multiplier"):
+		return current_weapon_node.speed_multiplier()
+	return 1.0
 
 func _toggle_view() -> void:
 	view_mode = ViewMode.FIRST_PERSON if view_mode == ViewMode.THIRD_PERSON else ViewMode.THIRD_PERSON

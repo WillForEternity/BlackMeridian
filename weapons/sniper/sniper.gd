@@ -33,6 +33,7 @@ const CORE_PEAK_EMISSION := 12.0
 
 var _charging: bool = false
 var _charge_t: float = 0.0
+var _slamming: bool = false
 # Seconds remaining while the railgun tracer is still visible after firing.
 # Matches the longest beam-layer life in Vfx.tracer_beam (0.55s).
 const TRAIL_LIFE: float = 0.55
@@ -48,6 +49,9 @@ func _ready() -> void:
 func cooldown() -> float:
 	return data.cooldown if data else 0.65
 
+func guide_text() -> String:
+	return "RAILGUN\n\nATTACK (Hold LMB to charge, release to fire)\n  Hitscan beam. Damage scales with charge time (35% -> 100%\n  over ~1.0s). Full-charge shots trigger heavy hitstop.\n  Movement is locked while charging AND while the tracer is\n  still visible after the shot.\n\nLASER DOT\n  A red dot shows your aim point while charging. It grows\n  with charge level so you can read how close to full you are.\n\nSUPER (Q, when bar is full) - EMP GROUND PULSE\n  The railgun slams muzzle-first into the ground at your\n  feet. A flat shockwave radiates across the floor over\n  ~0.55s, with chaotic rainbow-arched lightning bolts arcing\n  from you out to the expanding ring and tangential crackles\n  on the wavefront. Each target gets hit as the wave reaches\n  them (delay scales with distance).\n  Damage: 2 per target (same as one plasma bullet).\n  Push: each target is shoved ~3.2m outward and STAYS there.\n  The new spot becomes its rest position until it respawns.\n\nQUIRK\n  You cannot start a charge during the super slam animation,\n  and the super cannot be triggered mid-charge.\n\n[G] toggles this guide."
+
 func equip() -> void:
 	rig_tpv.visible = true
 	rig_fpv.visible = true
@@ -61,7 +65,7 @@ func unequip() -> void:
 	rig_fpv.rotation = Vector3.ZERO
 
 func tick(delta: float) -> void:
-	if not _is_fpv and rig_tpv.visible:
+	if not _is_fpv and rig_tpv.visible and not _slamming:
 		var aim: Vector3 = player.get_aim_point()
 		var to_aim := aim - rig_tpv.global_position
 		if to_aim.length_squared() > 0.04:
@@ -151,6 +155,7 @@ func _fire(charge01: float) -> void:
 	var dir := (end - spawn_marker.global_position).normalized()
 	if hit_body and hit_body.has_method("take_damage"):
 		hit_body.take_damage(dmg, dir)
+		add_super_charge(float(dmg))
 	Vfx.tracer_beam(spawn_marker.global_position, end, charge01)
 	_trail_lock_left = TRAIL_LIFE
 	Vfx.muzzle_flash(spawn_marker.global_position, 1.1 + charge01 * 0.4, Color(0.4, 0.95, 1, 1))
@@ -181,6 +186,106 @@ func _hitscan() -> Dictionary:
 	# world (1) | enemies (4) — must hit both terrain and targets.
 	query.collision_mask = 1 | 4
 	return space.intersect_ray(query)
+
+const SUPER_RADIUS: float = 9.0
+const SUPER_DAMAGE: int = 2  # matches one gun projectile hit
+const SUPER_PUSH_DIST: float = 3.2
+const SUPER_PUSH_TIME: float = 0.18
+const SUPER_TINT: Color = Color(0.4, 0.95, 1, 1)
+const SUPER_SLAM_DOWN: float = 0.14
+const SUPER_SLAM_UP: float = 0.32
+const SUPER_WAVE_DURATION: float = 0.55
+
+func on_super_pressed() -> void:
+	if _charging or not super_ready():
+		return
+	if not consume_super():
+		return
+	_do_super()
+
+func _do_super() -> void:
+	# Gun slams down at the player's feet; on impact, a flat EM shockwave
+	# radiates across the ground. Damage and push are applied per-target with a
+	# delay proportional to distance so the wave actually sweeps through them.
+	if player == null:
+		return
+	_slam_rigs()
+	get_tree().create_timer(SUPER_SLAM_DOWN, true, false, true).timeout.connect(_emp_detonate)
+
+func _emp_detonate() -> void:
+	if not is_instance_valid(self) or player == null:
+		return
+	var ground: Vector3 = _ground_point_under_player()
+
+	Vfx.emp_ground_wave(ground, SUPER_RADIUS, SUPER_WAVE_DURATION, SUPER_TINT)
+	Vfx.impact_burst(ground + Vector3(0, 0.1, 0), 1.4, SUPER_TINT)
+	player.punch_fov(8.0, 0.05, 0.32)
+	player.register_hit(0.5)
+
+	var space: PhysicsDirectSpaceState3D = player.get_world_3d().direct_space_state
+	var shape := SphereShape3D.new()
+	shape.radius = SUPER_RADIUS
+	var q := PhysicsShapeQueryParameters3D.new()
+	q.shape = shape
+	q.transform = Transform3D(Basis.IDENTITY, ground)
+	q.collision_mask = 4
+	var hits := space.intersect_shape(q, 64)
+	for h in hits:
+		var col: Object = h.collider
+		if col == player or not col.has_method("take_damage"):
+			continue
+		var n3d := col as Node3D
+		var dir: Vector3 = Vector3.FORWARD
+		var dist: float = 0.0
+		if n3d != null:
+			var d := n3d.global_position - ground
+			d.y = 0.0
+			dist = d.length()
+			if dist > 0.01:
+				dir = d.normalized()
+		var delay: float = clampf(dist / SUPER_RADIUS, 0.0, 1.0) * SUPER_WAVE_DURATION
+		# Captured locals so each timer closure hits the right target.
+		var col_c: Object = col
+		var dir_c: Vector3 = dir
+		get_tree().create_timer(delay, true, false, true).timeout.connect(func():
+			if not is_instance_valid(col_c):
+				return
+			col_c.take_damage(SUPER_DAMAGE, dir_c)
+			if col_c.has_method("push_back"):
+				col_c.push_back(dir_c, SUPER_PUSH_DIST, SUPER_PUSH_TIME)
+		)
+
+func _slam_rigs() -> void:
+	# Both rigs pivot downward as if driving the muzzle into the floor, hold
+	# briefly on impact, then ease back. tick() suspends rig_tpv aim-tracking
+	# while _slamming is true so it doesn't fight the tween.
+	_slamming = true
+	var down := Vector3(deg_to_rad(85.0), 0.0, 0.0)
+	for rig in [rig_fpv, rig_tpv]:
+		var base_rot: Vector3 = rig.rotation
+		var base_pos: Vector3 = rig.position
+		var t := create_tween()
+		t.set_parallel(true)
+		t.tween_property(rig, "rotation", down, SUPER_SLAM_DOWN).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		t.tween_property(rig, "position", base_pos + Vector3(0, -0.25, 0.1), SUPER_SLAM_DOWN).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		t.chain()
+		t.tween_property(rig, "rotation", base_rot, SUPER_SLAM_UP).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		t.tween_property(rig, "position", base_pos, SUPER_SLAM_UP).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	get_tree().create_timer(SUPER_SLAM_DOWN + SUPER_SLAM_UP, true, false, true).timeout.connect(func(): _slamming = false)
+
+func _ground_point_under_player() -> Vector3:
+	# Raycast down from the player so the wave plants on real geometry, not on
+	# a guessed feet height. Falls back to a 0.9m offset if nothing's hit.
+	var space: PhysicsDirectSpaceState3D = player.get_world_3d().direct_space_state
+	var from: Vector3 = player.global_position
+	var to: Vector3 = from + Vector3(0, -4.0, 0)
+	var rq := PhysicsRayQueryParameters3D.create(from, to)
+	rq.exclude = [player.get_rid()]
+	rq.collision_mask = 1
+	var hit := space.intersect_ray(rq)
+	if not hit.is_empty():
+		return hit.position
+	return from - Vector3(0, 0.9, 0)
 
 func _create_laser_dot() -> void:
 	_laser_dot = MeshInstance3D.new()

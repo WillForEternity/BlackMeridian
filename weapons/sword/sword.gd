@@ -26,6 +26,7 @@ const REST_POS_FPV := Vector3.ZERO
 var _hits_this_swing: Array = []
 var _combo_index: int = 0
 var _combo_window_left: float = 0.0
+var _super_active: bool = false
 
 var _trail_active: bool = false
 var _trail_points: Array[Vector3] = []
@@ -34,6 +35,7 @@ var _trail_decay_accum: float = 0.0
 var _trail_mi: MeshInstance3D
 var _trail_im: ImmediateMesh
 var _trail_mat: StandardMaterial3D
+var _trail_tint: Color = Color(0.55, 0.95, 1, 1)
 var _active_swing_tween: Tween
 
 const TRAIL_DECAY_INTERVAL: float = 1.0 / 33.0  # seconds between trail point drops
@@ -50,6 +52,13 @@ func _ready() -> void:
 
 func cooldown() -> float:
 	return data.cooldown if data else 0.42
+
+# Katana quirk: while equipped, the player dashes twice as often.
+func dash_cooldown_mult() -> float:
+	return 0.5
+
+func guide_text() -> String:
+	return "KATANA\n\nATTACK (LMB)\n  Three-strike combo: rising-L, rising-R, horizontal cleave.\n  Chain within 0.55s to keep the combo alive.\n  Damage scales 1x -> 1.5x -> 2x across the combo.\n\nDASH SLASH (CRIT)\n  Attacking while dashing crits: +50% damage, green trail,\n  and a misty wake hangs along the cut.\n\nSUPER (Q, when bar is full)\n  Corkscrew spin (~0.5s) that lifts you AND any caught target\n  into the air. Continuous re-hits at 4 dmg each. Counts as a\n  crit the entire time.\n\nQUIRK\n  Dash cooldown is HALVED while katana is equipped, so you\n  can reposition (and dash-crit) twice as often as with the\n  other weapons.\n\n[G] toggles this guide."
 
 func _damage() -> int:
 	return data.damage if data else damage
@@ -69,9 +78,118 @@ func unequip() -> void:
 	rig_fpv.visible = false
 
 func on_attack_pressed() -> void:
-	if attack_cd > 0.0:
+	if attack_cd > 0.0 or _super_active:
 		return
 	_swing()
+
+func locks_movement() -> bool:
+	return _super_active
+
+# Crit conditions for the katana: mid-dash (dash-slash) or mid-super.
+# Scales the blade length (rig Z-axis). The HitArea and tip marker are rig
+# children, so reach + trail sample point grow with the visual blade.
+# Spawns a soft, expanding, fading sphere at `at` to lay down a misty wake.
+# Called each trail-sample tick during a crit slash so a trail of puffs hangs
+# in the air along the cut.
+func _emit_mist_puff(at: Vector3) -> void:
+	var puff := MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.32
+	sphere.height = 0.64
+	sphere.radial_segments = 14
+	sphere.rings = 8
+	puff.mesh = sphere
+	puff.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.blend_mode = BaseMaterial3D.BLEND_MODE_MIX
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.albedo_color = Color(CRIT_TINT.r, CRIT_TINT.g, CRIT_TINT.b, 0.10)
+	mat.emission_enabled = true
+	mat.emission = CRIT_TINT
+	mat.emission_energy_multiplier = 0.4
+	# Soft edges: fade by view angle so spheres read as fog volumes, not solids.
+	mat.rim_enabled = false
+	puff.material_override = mat
+	# Tiny jitter so successive puffs blend into a single continuous ribbon
+	# of mist rather than visibly separate blobs.
+	var jitter := Vector3(randf_range(-0.04, 0.04), randf_range(-0.03, 0.03), randf_range(-0.04, 0.04))
+	get_tree().current_scene.add_child(puff)
+	puff.global_position = at + jitter
+	puff.scale = Vector3.ONE * 0.85
+	var tw := create_tween().set_parallel(true)
+	tw.tween_property(puff, "scale", Vector3.ONE * 1.8, 0.9).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tw.tween_property(mat, "albedo_color:a", 0.0, 0.9).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(puff.queue_free)
+
+func _set_blade_length_scale(z_scale: float) -> void:
+	var s := Vector3(1.0, 1.0, z_scale)
+	if rig_tpv:
+		rig_tpv.scale = s
+	if rig_fpv:
+		rig_fpv.scale = s
+
+func is_crit() -> bool:
+	var dashing: bool = player != null and "dash_time_left" in player and player.dash_time_left > 0.0
+	return dashing or _super_active
+
+const SUPER_DURATION: float = 0.475
+const SUPER_SPINS: float = 3.0
+const SUPER_STRIKE_DAMAGE: int = 4
+const SUPER_LIFT_HEIGHT: float = 1.2
+const SUPER_REHIT_INTERVAL: float = 0.12
+
+func on_super_pressed() -> void:
+	if _super_active or not super_ready():
+		return
+	if not consume_super():
+		return
+	_do_super()
+
+func _do_super() -> void:
+	_super_active = true
+	attack_cd = SUPER_DURATION + 0.2
+	_hits_this_swing.clear()
+
+	if _active_swing_tween and _active_swing_tween.is_valid():
+		_active_swing_tween.kill()
+	var rig: Node3D = rig_fpv if is_fpv() else rig_tpv
+	var rest_rot: Vector3 = REST_ROT_FPV if is_fpv() else REST_ROT_TPV
+	# Flatten the blade to horizontal (X=0) for the corkscrew so it sweeps
+	# through targets sideways instead of tipped up.
+	rig.rotation = Vector3.ZERO
+	var spin := create_tween()
+	spin.tween_property(rig, "rotation", Vector3(0, TAU * SUPER_SPINS, 0), SUPER_DURATION).set_trans(Tween.TRANS_LINEAR)
+	spin.tween_callback(func(): rig.rotation = rest_rot)
+
+	# Damage is dealt wherever the sword actually slashes: hit_area stays on
+	# for the whole spin, and we periodically clear the hit list so the same
+	# target can be struck once per rotation.
+	hit_area.monitoring = true
+	# Super counts as a crit (is_crit() returns true while _super_active).
+	_begin_trail(CRIT_TINT)
+	_set_blade_length_scale(1.5)
+	_active_swing_tween = create_tween()
+	var rehits: int = int(floor(SUPER_DURATION / SUPER_REHIT_INTERVAL))
+	for i in rehits:
+		_active_swing_tween.tween_interval(SUPER_REHIT_INTERVAL)
+		_active_swing_tween.tween_callback(func(): _hits_this_swing.clear())
+	_active_swing_tween.tween_interval(maxf(SUPER_DURATION - rehits * SUPER_REHIT_INTERVAL, 0.0))
+	_active_swing_tween.tween_callback(func():
+		hit_area.monitoring = false
+		_trail_t_left = 0.18
+		_super_active = false
+		_set_blade_length_scale(1.0)
+	)
+
+	# Player rises through the duration.
+	if player != null:
+		player.lift_time_left = SUPER_DURATION
+		player.lift_velocity_y = SUPER_LIFT_HEIGHT / SUPER_DURATION
+		player.punch_fov(10.0, 0.12, SUPER_DURATION)
+		if player.camera.has_method("add_trauma"):
+			player.camera.add_trauma(0.6)
 
 func tick(delta: float) -> void:
 	_combo_window_left = maxf(_combo_window_left - delta, 0.0)
@@ -82,6 +200,8 @@ func tick(delta: float) -> void:
 		_sample_trail(marker)
 		_trail_t_left = 0.18
 		_trail_decay_accum = 0.0
+		if is_crit():
+			_emit_mist_puff(marker.global_position)
 	_trail_t_left = maxf(_trail_t_left - delta, 0.0)
 	if not hit_area.monitoring and _trail_points.size() >= 4:
 		# Frame-rate independent: drop one pair every TRAIL_DECAY_INTERVAL sec.
@@ -112,7 +232,7 @@ func _swing() -> void:
 	_tween_keyframes(rig_fpv, data.keyframes, REST_ROT_FPV, REST_POS_FPV, false)
 
 	var marker: Marker3D = tip_fpv if is_fpv() else tip_tpv
-	var tint: Color = data.tint
+	var base_tint: Color = data.tint
 	var strike_start: float = data.strike_start
 	var strike_end: float = data.strike_end
 
@@ -122,6 +242,9 @@ func _swing() -> void:
 	_active_swing_tween.tween_interval(strike_start)
 	_active_swing_tween.tween_callback(func():
 		hit_area.monitoring = true
+		# Tint is decided at strike-time: crit slashes (dash or super) all share
+		# the unified crit color from the base weapon.
+		var tint: Color = CRIT_TINT if is_crit() else base_tint
 		_begin_trail(tint)
 	)
 	_active_swing_tween.tween_interval(strike_end - strike_start)
@@ -134,8 +257,8 @@ func _swing() -> void:
 # offset from rest with its own dur/trans/ease. Phases: chamber → tip-lag →
 # accelerate → cleave → settle. strike_start/strike_end mark the contact window.
 #   0: rising diagonal — bottom-left → top-right
-#   1: horizontal      — right → left (chest height)
-#   2: falling diagonal — top-left → bottom-right
+#   1: rising diagonal — bottom-right → top-left
+#   2: powerful horizontal cleave — long left → right sweep at chest height
 func _combo_data(idx: int) -> Dictionary:
 	match idx:
 		0:
@@ -157,24 +280,27 @@ func _combo_data(idx: int) -> Dictionary:
 				"strike_start": 0.16,
 				"strike_end": 0.30,
 				"keyframes": [
-					{"rot": Vector3(deg_to_rad(-45.0), deg_to_rad(95.0), deg_to_rad(15.0)), "pos": Vector3(0.25, 0.25, 0.10), "dur": 0.13, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
-					{"rot": Vector3(deg_to_rad(-45.0), deg_to_rad(100.0), deg_to_rad(20.0)), "pos": Vector3(0.27, 0.25, 0.08), "dur": 0.04, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
-					{"rot": Vector3(deg_to_rad(-45.0), 0.0, 0.0), "pos": Vector3(0.0, 0.25, -0.20), "dur": 0.05, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
-					{"rot": Vector3(deg_to_rad(-45.0), deg_to_rad(-105.0), deg_to_rad(-20.0)), "pos": Vector3(-0.55, 0.25, -0.10), "dur": 0.09, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
-					{"rot": Vector3.ZERO, "pos": Vector3.ZERO, "dur": 0.30, "trans": Tween.TRANS_QUART, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(-135.0), deg_to_rad(-30.0), deg_to_rad(25.0)), "pos": Vector3(0.80, -0.25, 0.05), "dur": 0.16, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(-145.0), deg_to_rad(-35.0), deg_to_rad(30.0)), "pos": Vector3(0.82, -0.27, 0.05), "dur": 0.05, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(-30.0), 0.0, 0.0), "pos": Vector3(0.15, 0.12, -0.15), "dur": 0.06, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
+					{"rot": Vector3(deg_to_rad(45.0), deg_to_rad(-25.0), deg_to_rad(-25.0)), "pos": Vector3(-0.55, 0.50, -0.18), "dur": 0.10, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
+					{"rot": Vector3.ZERO, "pos": Vector3.ZERO, "dur": 0.32, "trans": Tween.TRANS_QUART, "ease": Tween.EASE_OUT},
 				],
 			}
 		_:
+			# Majestic left → right horizontal cleave. Blade stays flat (X = -45°
+			# cancels rest tilt) and out in front of the player (Z always
+			# negative) so it never carves through the player's torso.
 			return {
-				"tint": Color(0.9, 0.7, 1.0, 1.0),
-				"strike_start": 0.16,
-				"strike_end": 0.30,
+				"tint": Color(1.0, 0.55, 0.75, 1.0),
+				"strike_start": 0.26,
+				"strike_end": 0.48,
 				"keyframes": [
-					{"rot": Vector3(deg_to_rad(45.0), deg_to_rad(-25.0), deg_to_rad(-25.0)), "pos": Vector3(-0.75, 0.50, -0.05), "dur": 0.16, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
-					{"rot": Vector3(deg_to_rad(55.0), deg_to_rad(-30.0), deg_to_rad(-30.0)), "pos": Vector3(-0.78, 0.52, -0.05), "dur": 0.05, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
-					{"rot": Vector3(deg_to_rad(-30.0), 0.0, 0.0), "pos": Vector3(-0.10, 0.12, -0.18), "dur": 0.06, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
-					{"rot": Vector3(deg_to_rad(-135.0), deg_to_rad(-30.0), deg_to_rad(25.0)), "pos": Vector3(0.55, -0.30, 0.05), "dur": 0.10, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
-					{"rot": Vector3.ZERO, "pos": Vector3.ZERO, "dur": 0.34, "trans": Tween.TRANS_QUART, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(-45.0), deg_to_rad(95.0), deg_to_rad(15.0)), "pos": Vector3(-0.70, 0.35, -0.30), "dur": 0.24, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(-45.0), deg_to_rad(105.0), deg_to_rad(20.0)), "pos": Vector3(-0.75, 0.37, -0.32), "dur": 0.06, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(-45.0), 0.0, 0.0), "pos": Vector3(0.0, 0.35, -0.65), "dur": 0.07, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
+					{"rot": Vector3(deg_to_rad(-45.0), deg_to_rad(-105.0), deg_to_rad(-20.0)), "pos": Vector3(0.75, 0.35, -0.30), "dur": 0.15, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
+					{"rot": Vector3.ZERO, "pos": Vector3.ZERO, "dur": 0.40, "trans": Tween.TRANS_QUART, "ease": Tween.EASE_OUT},
 				],
 			}
 
@@ -201,14 +327,23 @@ func _on_body_entered(body: Node) -> void:
 	var dir: Vector3 = Vector3.ZERO
 	if body3d != null:
 		dir = (body3d.global_position - player.global_position).normalized()
-	# Combo damage scaling: 1st = 1x, 2nd = 1.5x, 3rd = 2x (3x if dashing).
-	var mult: float = 1.0
-	if _combo_index == 1:
-		mult = 1.5
-	elif _combo_index == 2:
-		mult = 3.0 if player.dash_time_left > 0.0 else 2.0
-	var dmg: int = int(round(float(_damage()) * mult))
+	var dmg: int
+	if _super_active:
+		dmg = SUPER_STRIKE_DAMAGE
+		if body.has_method("lift_immobilize"):
+			body.lift_immobilize(SUPER_DURATION, SUPER_LIFT_HEIGHT)
+	else:
+		# Combo damage scaling: 1st = 1x, 2nd = 1.5x, 3rd = 2x (3x if dashing).
+		var mult: float = 1.0
+		if _combo_index == 1:
+			mult = 1.5
+		elif _combo_index == 2:
+			mult = 2.0
+		if player.dash_time_left > 0.0:
+			mult *= 1.5
+		dmg = int(round(float(_damage()) * mult))
 	body.take_damage(dmg, dir)
+	add_super_charge(float(dmg))
 	if body3d != null:
 		Vfx.impact_burst(body3d.global_position + Vector3(0, 0.4, 0), 0.7, Color(0.5, 0.95, 1, 1))
 	player.register_hit(0.4)
@@ -234,6 +369,7 @@ func _begin_trail(tint: Color) -> void:
 	_trail_points.clear()
 	_trail_active = true
 	_trail_t_left = 0.0
+	_trail_tint = tint
 	if _trail_mat:
 		_trail_mat.emission = tint
 
@@ -265,17 +401,17 @@ func _rebuild_trail() -> void:
 		var p0b: Vector3 = _trail_points[i * 2 + 1]
 		var p1a: Vector3 = _trail_points[(i + 1) * 2]
 		var p1b: Vector3 = _trail_points[(i + 1) * 2 + 1]
-		_trail_im.surface_set_color(Color(1, 1, 1, a0))
+		_trail_im.surface_set_color(Color(_trail_tint.r, _trail_tint.g, _trail_tint.b, a0))
 		_trail_im.surface_add_vertex(p0a)
-		_trail_im.surface_set_color(Color(1, 1, 1, a0))
+		_trail_im.surface_set_color(Color(_trail_tint.r, _trail_tint.g, _trail_tint.b, a0))
 		_trail_im.surface_add_vertex(p0b)
-		_trail_im.surface_set_color(Color(1, 1, 1, a1))
+		_trail_im.surface_set_color(Color(_trail_tint.r, _trail_tint.g, _trail_tint.b, a1))
 		_trail_im.surface_add_vertex(p1b)
 
-		_trail_im.surface_set_color(Color(1, 1, 1, a0))
+		_trail_im.surface_set_color(Color(_trail_tint.r, _trail_tint.g, _trail_tint.b, a0))
 		_trail_im.surface_add_vertex(p0a)
-		_trail_im.surface_set_color(Color(1, 1, 1, a1))
+		_trail_im.surface_set_color(Color(_trail_tint.r, _trail_tint.g, _trail_tint.b, a1))
 		_trail_im.surface_add_vertex(p1b)
-		_trail_im.surface_set_color(Color(1, 1, 1, a1))
+		_trail_im.surface_set_color(Color(_trail_tint.r, _trail_tint.g, _trail_tint.b, a1))
 		_trail_im.surface_add_vertex(p1a)
 	_trail_im.surface_end()
