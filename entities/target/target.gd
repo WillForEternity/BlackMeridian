@@ -1,4 +1,4 @@
-extends StaticBody3D
+extends AnimatableBody3D
 
 @export var max_health: int = 6
 @export var respawn_delay: float = 5.0

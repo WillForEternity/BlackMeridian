@@ -25,7 +25,11 @@ const TRAIL_SAMPLES: int = 14
 const REST_ROT_TPV := Vector3(PI / 4.0, 0.0, 0.0)
 const REST_POS_TPV := Vector3.ZERO
 const REST_ROT_FPV := Vector3(PI / 4.0, 0.0, 0.0)
-const REST_POS_FPV := Vector3.ZERO
+# FPV rest is offset down + forward in SwordRig local space so the hilt sits
+# below the eye-line rather than right in front of the camera. The 1.538×
+# SwordRig scale (in scene) cancels FPVPivot's 0.65× shrink, so the offset is
+# in pre-FPVPivot-scale units — final camera-space drop is ~0.5 * 0.65 = 0.325m.
+const REST_POS_FPV := Vector3(0.0, -0.5, -0.4)
 
 var _hits_this_swing: Array = []
 var _combo_index: int = 0

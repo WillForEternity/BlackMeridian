@@ -62,9 +62,29 @@ const CAM_POS_1P := Vector3(0.0, 0.0, 0.0)
 # report a higher allowance via `extra_air_jumps()`.
 var _air_jumps_used: int = 0
 var _coyote_left: float = 0.0
+# Horizontal velocity inherited from a moving platform at the moment of takeoff.
+# Added to input-driven velocity while airborne so jumping off a moving target
+# carries its momentum across the jump arc.
+var _air_carry_velocity: Vector3 = Vector3.ZERO
+# Replaces Godot's automatic moving-platform velocity (which leaks wall-body
+# velocity onto the player). We read get_collider_velocity() on whichever
+# slide collision is a true floor contact (normal within floor_max_angle of
+# UP) and use it for both on-platform carry and jump-takeoff momentum.
+var _floor_platform_velocity: Vector3 = Vector3.ZERO
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	# Tighter than the 45° default so the capsule's rounded bottom can't ride
+	# up the side of a cylindrical moving target — that contact normal can
+	# resolve as ~45° and get misclassified as floor.
+	floor_max_angle = deg_to_rad(30.0)
+	# Disable Godot's built-in moving-platform velocity inheritance entirely.
+	# Empirically the engine grabs the wall body's velocity even when wall
+	# layers is 0, causing the player to be dragged sideways by a moving
+	# target whose side they're merely touching. We handle the on-top carry
+	# ourselves below by reading the floor collider's velocity each frame.
+	platform_floor_layers = 0
+	platform_wall_layers = 0
 	base_fov = camera.fov
 	for w in _weapons:
 		w.setup(self)
@@ -138,11 +158,16 @@ func _physics_process(delta: float) -> void:
 	if is_on_floor():
 		_air_jumps_used = 0
 		_coyote_left = COYOTE_TIME
+		_air_carry_velocity = Vector3.ZERO
 	else:
 		_coyote_left = maxf(_coyote_left - delta, 0.0)
 
 	if Input.is_action_just_pressed("jump") and not movement_locked:
 		if is_on_floor() or _coyote_left > 0.0:
+			# Capture the platform's velocity so the jump retains horizontal
+			# momentum across the arc. Use our manual tracking (the engine's
+			# get_platform_velocity is now zero because we disabled it).
+			_air_carry_velocity = Vector3(_floor_platform_velocity.x, 0.0, _floor_platform_velocity.z)
 			velocity.y = jump_velocity
 			_coyote_left = 0.0
 		elif _air_jumps_used < _max_air_jumps():
@@ -187,8 +212,37 @@ func _physics_process(delta: float) -> void:
 		else:
 			velocity.x = move_toward(velocity.x, 0.0, speed)
 			velocity.z = move_toward(velocity.z, 0.0, speed)
+		# While airborne, layer the jump's inherited platform velocity on top of
+		# input. Player retains full air control, but the moving target's drift
+		# carries through the jump arc instead of dying on the next physics tick.
+		if not is_on_floor():
+			velocity.x += _air_carry_velocity.x
+			velocity.z += _air_carry_velocity.z
+
+	# Apply the floor's velocity (computed from last frame's slide collisions)
+	# so the player rides moving targets on top. Only the floor contact's
+	# velocity is used — wall contacts contribute nothing, so a target merely
+	# brushing the player's side won't drag them.
+	velocity.x += _floor_platform_velocity.x
+	velocity.z += _floor_platform_velocity.z
 
 	move_and_slide()
+
+	# Re-read the floor velocity from this frame's collisions for the next tick.
+	_floor_platform_velocity = _detect_floor_platform_velocity()
+	# Undo the carry so the input layer starts clean next frame.
+	velocity.x -= _floor_platform_velocity.x
+	velocity.z -= _floor_platform_velocity.z
+
+func _detect_floor_platform_velocity() -> Vector3:
+	if not is_on_floor():
+		return Vector3.ZERO
+	for i in get_slide_collision_count():
+		var c := get_slide_collision(i)
+		var angle: float = c.get_normal().angle_to(Vector3.UP)
+		if angle <= floor_max_angle:
+			return c.get_collider_velocity()
+	return Vector3.ZERO
 
 func _start_dash() -> void:
 	var input_dir := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
@@ -296,7 +350,14 @@ func _toggle_view() -> void:
 func _apply_view_mode() -> void:
 	var first := view_mode == ViewMode.FIRST_PERSON
 	camera.position = CAM_POS_1P if first else CAM_POS_3P
-	body_mesh.visible = not first
+	# In first person we still want the body to throw a shadow on the ground —
+	# SHADOWS_ONLY keeps the mesh invisible to the camera but lets the directional
+	# light treat it as a normal occluder.
+	body_mesh.visible = true
+	body_mesh.cast_shadow = (
+		GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY if first
+		else GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	)
 	weapon_pivot.visible = not first
 	fpv_pivot.visible = first
 	EventBus.player_view_mode_changed.emit(int(view_mode))
