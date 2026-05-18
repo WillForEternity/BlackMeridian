@@ -23,13 +23,16 @@ const TRAIL_SAMPLES: int = 14
 # mid-strike kf.rot.x of -30° produces a forward-up blade in TPV but a
 # downward-pointing blade in FPV.
 const REST_ROT_TPV := Vector3(PI / 4.0, 0.0, 0.0)
-const REST_POS_TPV := Vector3.ZERO
+# Push the TPV rig forward + slightly right of the player so the sword is
+# clearly "held out" rather than hugging the body.
+const REST_POS_TPV := Vector3(0.05, 0.0, -0.15)
 const REST_ROT_FPV := Vector3(PI / 4.0, 0.0, 0.0)
 # FPV rest is offset down + forward in SwordRig local space so the hilt sits
-# below the eye-line rather than right in front of the camera. The 1.538×
-# SwordRig scale (in scene) cancels FPVPivot's 0.65× shrink, so the offset is
-# in pre-FPVPivot-scale units — final camera-space drop is ~0.5 * 0.65 = 0.325m.
-const REST_POS_FPV := Vector3(0.0, -0.5, -0.4)
+# below the eye-line rather than right in front of the camera. Extra +X and
+# more -Z compared to before pushes the sword further out from the camera.
+# The 1.538× SwordRig scale (in scene) cancels FPVPivot's 0.65× shrink, so
+# these offsets are in pre-FPVPivot-scale units.
+const REST_POS_FPV := Vector3(0.15, -0.5, -0.65)
 
 var _hits_this_swing: Array = []
 var _combo_index: int = 0

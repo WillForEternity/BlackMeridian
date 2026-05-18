@@ -5,7 +5,7 @@ type="CompressedTexture2D"
 uid="uid://gxxmryjki5xn"
 path="res://.godot/imported/alien_planet.exr-65e93b051962d8c0b2bc9d0adc8aeb51.ctex"
 metadata={
-"vram_texture": false
+"vram_texture": true
 }
 
 [deps]
@@ -15,15 +15,15 @@ dest_files=["res://.godot/imported/alien_planet.exr-65e93b051962d8c0b2bc9d0adc8a
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
 compress/rdo_quality_loss=0.0
-compress/hdr_compression=1
+compress/hdr_compression=2
 compress/normal_map=0
 compress/channel_pack=0
-mipmaps/generate=false
+mipmaps/generate=true
 mipmaps/limit=-1
 roughness/mode=0
 roughness/src_normal=""

@@ -4,6 +4,7 @@
 [ext_resource type="Script" path="res://entities/player/camera_follow.gd" id="2_camfollow"]
 [ext_resource type="Script" path="res://entities/player/hotbar.gd" id="4_hotbar"]
 [ext_resource type="Script" path="res://scenes/training_cave/training_cave.gd" id="5_cave"]
+[ext_resource type="Script" path="res://scenes/training_cave/terrain.gd" id="13_terrain"]
 [ext_resource type="PackedScene" path="res://entities/target/target.tscn" id="6_target_scn"]
 [ext_resource type="Script" path="res://weapons/sword/sword.gd" id="7_sword"]
 [ext_resource type="Script" path="res://weapons/gun/gun.gd" id="8_gun"]
@@ -91,17 +92,17 @@ radius = 0.4
 height = 1.6
 
 [sub_resource type="BoxMesh" id="Mesh_SwordBlade"]
-size = Vector3(0.06, 0.06, 1.2)
+size = Vector3(0.1, 0.025, 1.0)
 
 [sub_resource type="BoxMesh" id="Mesh_SwordCore"]
-size = Vector3(0.018, 0.018, 1.18)
+size = Vector3(0.022, 0.04, 0.92)
 
 [sub_resource type="BoxMesh" id="Mesh_SwordGuard"]
-size = Vector3(0.36, 0.06, 0.1)
+size = Vector3(0.22, 0.04, 0.06)
 
 [sub_resource type="SphereMesh" id="Mesh_SwordPommel"]
-radius = 0.06
-height = 0.12
+radius = 0.04
+height = 0.09
 radial_segments = 12
 rings = 6
 
@@ -171,8 +172,9 @@ rings = 6
 [sub_resource type="BoxMesh" id="Mesh_SniperCell"]
 size = Vector3(0.14, 0.08, 0.18)
 
-[sub_resource type="BoxMesh" id="Mesh_SwordTip"]
-size = Vector3(0.05, 0.05, 0.18)
+[sub_resource type="PrismMesh" id="Mesh_SwordTip"]
+left_to_right = 0.5
+size = Vector3(0.1, 0.18, 0.025)
 
 [sub_resource type="StandardMaterial3D" id="Mat_Ground"]
 albedo_color = Color(0.12, 0.14, 0.2, 1)
@@ -280,16 +282,11 @@ transform = Transform3D(-0.534, -0.389, 0.751, 0, 0.888, 0.460, -0.846, 0.246, -
 light_color = Color(0.85, 0.82, 1, 1)
 light_energy = 0.85
 shadow_enabled = true
+directional_shadow_mode = 1
+directional_shadow_max_distance = 100.0
 
-[node name="Ground" type="StaticBody3D" parent="."]
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="Ground"]
-mesh = SubResource("PlaneMesh_Ground")
-surface_material_override/0 = SubResource("Mat_Ground")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Ground"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
-shape = SubResource("BoxShape_Ground")
+[node name="Terrain" type="Node3D" parent="."]
+script = ExtResource("13_terrain")
 
 [node name="Player" type="CharacterBody3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
@@ -332,12 +329,12 @@ mesh = SubResource("Mesh_SwordPommel")
 surface_material_override/0 = SubResource("Mat_SwordCore")
 
 [node name="Tip" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig"]
-transform = Transform3D(0.6, 0, 0, 0, 0.6, 0, 0, 0, 1, 0, 0, -1.27)
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, -1.19)
 mesh = SubResource("Mesh_SwordTip")
 surface_material_override/0 = SubResource("Mat_SwordBlade")
 
 [node name="TipMarker" type="Marker3D" parent="Player/WeaponPivot/SwordRig"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1.34)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1.28)
 
 [node name="HitArea" type="Area3D" parent="Player/WeaponPivot/SwordRig"]
 collision_layer = 0
@@ -504,12 +501,12 @@ mesh = SubResource("Mesh_SwordPommel")
 surface_material_override/0 = SubResource("Mat_SwordCore")
 
 [node name="Tip" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig"]
-transform = Transform3D(0.6, 0, 0, 0, 0.6, 0, 0, 0, 1, 0, 0, -1.27)
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, -1.19)
 mesh = SubResource("Mesh_SwordTip")
 surface_material_override/0 = SubResource("Mat_SwordBlade")
 
 [node name="TipMarker" type="Marker3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1.34)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1.28)
 
 [node name="GunRig" type="Node3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot"]
 visible = false

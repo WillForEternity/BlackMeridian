@@ -14,6 +14,14 @@ signal charge_changed(value: float)
 const COYOTE_TIME: float = 0.12
 const FALL_GRAVITY_MULT: float = 1.65
 const JUMP_CUT_FACTOR: float = 0.45
+# Horizontal movement accel/decel (m/s²). Velocity isn't set instantly from
+# input; it interpolates toward the input-derived target speed. Air values are
+# lower so jumps preserve momentum (releasing keys mid-air doesn't kill speed)
+# and a hard direction change in the air has visible inertia.
+const GROUND_ACCEL: float = 80.0
+const GROUND_DECEL: float = 80.0
+const AIR_ACCEL: float = 25.0
+const AIR_DECEL: float = 3.0
 @export var dash_speed: float = 44.0
 @export var dash_duration: float = 0.18
 @export var dash_cooldown: float = 0.9
@@ -66,6 +74,11 @@ var _coyote_left: float = 0.0
 # Added to input-driven velocity while airborne so jumping off a moving target
 # carries its momentum across the jump arc.
 var _air_carry_velocity: Vector3 = Vector3.ZERO
+# Player-controlled horizontal velocity (the part that responds to WASD).
+# Tracked separately from `velocity` so we can apply per-frame accel/decel
+# rather than overwriting velocity from input each tick; this is what gives
+# air movement weight and momentum.
+var _controlled_velocity: Vector3 = Vector3.ZERO
 # Replaces Godot's automatic moving-platform velocity (which leaks wall-body
 # velocity onto the player). We read get_collider_velocity() on whichever
 # slide collision is a true floor contact (normal within floor_max_angle of
@@ -74,10 +87,11 @@ var _floor_platform_velocity: Vector3 = Vector3.ZERO
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-	# Tighter than the 45° default so the capsule's rounded bottom can't ride
-	# up the side of a cylindrical moving target — that contact normal can
-	# resolve as ~45° and get misclassified as floor.
-	floor_max_angle = deg_to_rad(30.0)
+	# Generous so the player can walk up rocky ridge slopes. The cylinder
+	# side-drag bug that previously needed a 30° cap is now handled by the
+	# manual platform-velocity system below (which only fires on true floor
+	# contacts), so we don't need this to also gate that out.
+	floor_max_angle = deg_to_rad(55.0)
 	# Disable Godot's built-in moving-platform velocity inheritance entirely.
 	# Empirically the engine grabs the wall body's velocity even when wall
 	# layers is 0, causing the player to be dragged sideways by a moving
@@ -194,28 +208,47 @@ func _physics_process(delta: float) -> void:
 			dash_time_left = 0.0
 			velocity.x = 0.0
 			velocity.z = 0.0
+			_controlled_velocity = Vector3.ZERO
 		else:
 			dash_time_left -= delta
 			velocity.x = dash_dir.x * dash_speed
 			velocity.z = dash_dir.z * dash_speed
+			# Sync controlled velocity so accel-based control resumes from the
+			# dash's exit speed rather than snapping back to the pre-dash value.
+			_controlled_velocity = Vector3(velocity.x, 0.0, velocity.z)
 	else:
+		# Modern-action movement: build a target velocity from input and lerp
+		# the player-controlled velocity toward it with separate ground/air
+		# accel and decel rates. Keeps mid-jump momentum and gives weight to
+		# mid-air direction changes.
 		var input_dir := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
 		if movement_locked:
 			input_dir = Vector2.ZERO
-		var direction := transform.basis.x * input_dir.x + transform.basis.z * input_dir.y
-		direction.y = 0.0
-		if direction.length() > 0.0:
-			direction = direction.normalized()
-			var s := speed * _speed_multiplier()
-			velocity.x = direction.x * s
-			velocity.z = direction.z * s
+		var target: Vector3 = transform.basis.x * input_dir.x + transform.basis.z * input_dir.y
+		target.y = 0.0
+		if target.length() > 0.0:
+			target = target.normalized() * speed * _speed_multiplier()
+		var grounded: bool = is_on_floor()
+		if input_dir.length() > 0.01:
+			var accel: float = GROUND_ACCEL if grounded else AIR_ACCEL
+			var to_target: Vector3 = target - _controlled_velocity
+			var step: float = accel * delta
+			if to_target.length() > step:
+				_controlled_velocity += to_target.normalized() * step
+			else:
+				_controlled_velocity = target
 		else:
-			velocity.x = move_toward(velocity.x, 0.0, speed)
-			velocity.z = move_toward(velocity.z, 0.0, speed)
-		# While airborne, layer the jump's inherited platform velocity on top of
-		# input. Player retains full air control, but the moving target's drift
-		# carries through the jump arc instead of dying on the next physics tick.
-		if not is_on_floor():
+			var decel: float = GROUND_DECEL if grounded else AIR_DECEL
+			var v_len: float = _controlled_velocity.length()
+			var d_step: float = decel * delta
+			if v_len > d_step:
+				_controlled_velocity -= _controlled_velocity.normalized() * d_step
+			else:
+				_controlled_velocity = Vector3.ZERO
+		velocity.x = _controlled_velocity.x
+		velocity.z = _controlled_velocity.z
+		# Layer the jump's inherited platform velocity on top while airborne.
+		if not grounded:
 			velocity.x += _air_carry_velocity.x
 			velocity.z += _air_carry_velocity.z
 

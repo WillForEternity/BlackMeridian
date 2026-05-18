@@ -20,6 +20,11 @@ var _flash_mat: StandardMaterial3D
 var _dead: bool = false
 var _active_tween: Tween
 var _immobilized: bool = false
+# Reusable downward-raycast query for terrain sampling. Built once in _ready
+# with self + player excluded so the cast falls through both bodies and hits
+# only the terrain — without this the target would snap to the top of the
+# player whenever the player stood directly underneath.
+var _terrain_query: PhysicsRayQueryParameters3D
 
 @onready var mesh: MeshInstance3D = $MeshInstance3D
 
@@ -34,6 +39,28 @@ func _ready() -> void:
 	_flash_mat.emission_enabled = true
 	_flash_mat.emission = Color(1, 1, 1, 1)
 	_flash_mat.emission_energy_multiplier = 2.0
+	_setup_terrain_query()
+	# Snap onto whatever terrain is below the target's scene-defined x/z.
+	# Deferred so the procedural terrain's collision body is in the tree by
+	# the time the raycast runs.
+	call_deferred("_snap_to_terrain")
+
+func _setup_terrain_query() -> void:
+	_terrain_query = PhysicsRayQueryParameters3D.create(Vector3.ZERO, Vector3.ZERO)
+	_terrain_query.collision_mask = 1
+	var excl: Array[RID] = [self.get_rid()]
+	var player: Node = get_tree().current_scene.find_child("Player", true, false)
+	if player and player is CollisionObject3D:
+		excl.append((player as CollisionObject3D).get_rid())
+	_terrain_query.exclude = excl
+
+# Snap onto the terrain surface using the same raycast logic as the patrol.
+func _snap_to_terrain() -> void:
+	var ty: float = _sample_terrain_y(global_position.x, global_position.z)
+	if is_nan(ty):
+		return
+	position.y = ty
+	_orig_position.y = ty
 
 func _physics_process(delta: float) -> void:
 	if _dead or _immobilized or move_radius <= 0.0 or move_speed <= 0.0:
@@ -47,7 +74,31 @@ func _physics_process(delta: float) -> void:
 	var axis := move_axis
 	if axis.length_squared() < 0.0001:
 		axis = Vector3.RIGHT
-	position = _orig_position + axis.normalized() * sin(_move_t) * move_radius
+	# Patrol horizontally around _orig_position; the Y component is driven by
+	# a per-frame terrain sample so the target rides the surface across slopes
+	# instead of flying through them at a fixed height.
+	var horiz: Vector3 = axis.normalized() * sin(_move_t) * move_radius
+	horiz.y = 0.0
+	var new_xz: Vector3 = _orig_position + horiz
+	var ty: float = _sample_terrain_y(new_xz.x, new_xz.z)
+	if not is_nan(ty):
+		new_xz.y = ty
+	else:
+		new_xz.y = position.y
+	position = new_xz
+
+# Cast straight down through the terrain layer. Excludes self + player so
+# the cast doesn't latch onto the player when they're standing underneath.
+func _sample_terrain_y(x: float, z: float) -> float:
+	if _terrain_query == null:
+		return NAN
+	var space: PhysicsDirectSpaceState3D = get_world_3d().direct_space_state
+	_terrain_query.from = Vector3(x, 200.0, z)
+	_terrain_query.to = Vector3(x, -200.0, z)
+	var hit: Dictionary = space.intersect_ray(_terrain_query)
+	if hit.is_empty():
+		return NAN
+	return hit.position.y + 0.8
 
 func take_damage(amount: int, dir: Vector3) -> void:
 	if _dead:
