@@ -69,10 +69,7 @@ func tick(delta: float) -> void:
 		var aim: Vector3 = player.get_aim_point()
 		var to_aim := aim - rig_tpv.global_position
 		if to_aim.length_squared() > 0.04:
-			var up := Vector3.UP
-			if absf(to_aim.normalized().dot(up)) > 0.99:
-				up = Vector3(0, 0, -1)
-			rig_tpv.look_at(aim, up)
+			rig_tpv.look_at(aim, Vfx.safe_up(to_aim.normalized()))
 	if _charging:
 		_charge_t = minf(_charge_t + delta, charge_time)
 		_update_charge_visuals()

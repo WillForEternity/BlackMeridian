@@ -54,10 +54,7 @@ func tick(delta: float) -> void:
 	var to_aim := aim - rig_tpv.global_position
 	if to_aim.length_squared() <= 0.04:
 		return
-	var up := Vector3.UP
-	if absf(to_aim.normalized().dot(up)) > 0.99:
-		up = Vector3(0, 0, -1)
-	rig_tpv.look_at(aim, up)
+	rig_tpv.look_at(aim, Vfx.safe_up(to_aim.normalized()))
 
 func on_attack_pressed() -> void:
 	if attack_cd > 0.0:

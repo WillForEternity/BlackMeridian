@@ -9,6 +9,13 @@ extends Node
 func _attach(node: Node) -> void:
 	get_tree().current_scene.add_child(node)
 
+# Returns an up vector safe to feed look_at() — falls back to FORWARD when
+# `dir` is nearly parallel to world UP (otherwise look_at()'s basis degenerates).
+func safe_up(dir: Vector3) -> Vector3:
+	if absf(dir.dot(Vector3.UP)) > 0.99:
+		return Vector3.FORWARD
+	return Vector3.UP
+
 func _spawn_emissive_sphere(at: Vector3, radius: float, segs: int, rings: int, tint: Color, energy: float) -> Array:
 	# Returns [MeshInstance3D, StandardMaterial3D] — caller animates them.
 	var mi := MeshInstance3D.new()
@@ -80,10 +87,7 @@ func muzzle_flash_cross(at: Vector3, fire_dir: Vector3, scale_mul: float, tint: 
 	var parent := Node3D.new()
 	_attach(parent)
 	parent.global_position = at
-	var up := Vector3.UP
-	if absf(fire_dir.dot(up)) > 0.99:
-		up = Vector3.FORWARD
-	parent.look_at(parent.global_position + fire_dir, up)
+	parent.look_at(parent.global_position + fire_dir, safe_up(fire_dir))
 
 	var tongue := MeshInstance3D.new()
 	var box := BoxMesh.new()
@@ -195,10 +199,7 @@ func _beam_layer(from: Vector3, to: Vector3, thickness: float, tint: Color, ener
 	var diff := to - from
 	var dist := diff.length()
 	mi.global_position = from + diff * 0.5
-	var up := Vector3.UP
-	if absf(diff.normalized().dot(up)) > 0.99:
-		up = Vector3.FORWARD
-	mi.look_at(to, up)
+	mi.look_at(to, safe_up(diff.normalized()))
 	mi.scale = Vector3(1, 1, dist)
 	var t := mi.create_tween()
 	t.set_parallel(true)
@@ -225,10 +226,7 @@ func _helix_wrap(from: Vector3, dir: Vector3, dist: float, charge01: float, tint
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_attach(mi)
 
-	var up := Vector3.UP
-	if absf(dir.dot(up)) > 0.99:
-		up = Vector3.FORWARD
-	var side := dir.cross(up).normalized()
+	var side := dir.cross(safe_up(dir)).normalized()
 	var up2 := side.cross(dir).normalized()
 	var radius: float = lerpf(0.12, 0.22, charge01)
 	var turns: float = 4.5
@@ -316,10 +314,7 @@ func _emp_arc(a: Vector3, b: Vector3, tint: Color) -> void:
 	if dlen < 0.001:
 		return
 	var fwd := dir.normalized()
-	var up := Vector3.UP
-	if absf(fwd.dot(up)) > 0.99:
-		up = Vector3.FORWARD
-	var side := fwd.cross(up).normalized()
+	var side := fwd.cross(safe_up(fwd)).normalized()
 	var up2 := side.cross(fwd).normalized()
 
 	var mi := MeshInstance3D.new()
@@ -472,6 +467,11 @@ func emp_ground_wave(origin: Vector3, max_radius: float, duration: float, tint: 
 	, 1.0, 0.0, duration)
 	get_tree().create_timer(duration + 0.05).timeout.connect(mi.queue_free)
 
+	# Capture the scene this effect belongs to. If the player resets mid-super,
+	# the queued timer closures will see a swapped current_scene and bail rather
+	# than spawning stray bolts into the freshly reloaded arena.
+	var scene := get_tree().current_scene
+
 	# Chaotic rainbow-arched bolts from the player out to the wavefront. Each
 	# tick spawns a clump of arcs landing at random points along the current
 	# ring radius, so the EM field reads as continuously discharging outward.
@@ -479,6 +479,8 @@ func emp_ground_wave(origin: Vector3, max_radius: float, duration: float, tint: 
 	for i in arch_ticks:
 		var tick_t: float = float(i) / float(arch_ticks) * duration
 		get_tree().create_timer(tick_t, true, false, true).timeout.connect(func():
+			if not is_instance_valid(scene) or get_tree().current_scene != scene:
+				return
 			var phase: float = tick_t / duration
 			var r: float = lerpf(0.6, max_radius, phase)
 			var arcs_this_tick: int = 3
@@ -496,6 +498,8 @@ func emp_ground_wave(origin: Vector3, max_radius: float, duration: float, tint: 
 	for i in burst_count:
 		var burst_t: float = float(i) / float(burst_count) * duration
 		get_tree().create_timer(burst_t, true, false, true).timeout.connect(func():
+			if not is_instance_valid(scene) or get_tree().current_scene != scene:
+				return
 			var phase: float = burst_t / duration
 			var r: float = lerpf(0.1, max_radius, phase)
 			var arcs_per_burst: int = 4
@@ -550,10 +554,14 @@ func emp_shockwave(origin: Vector3, max_radius: float, tint: Color) -> void:
 		var end_r: float = randf_range(max_radius * 0.7, max_radius)
 		_emp_arc(origin, origin + n * end_r, tint)
 
+	# See emp_ground_wave for the rationale; same scene-reload guard.
+	var scene := get_tree().current_scene
 	var bursts: int = 4
 	for i in bursts:
 		var burst_t: float = float(i + 1) / float(bursts) * life * 0.7
 		get_tree().create_timer(burst_t, true, false, true).timeout.connect(func():
+			if not is_instance_valid(scene) or get_tree().current_scene != scene:
+				return
 			var phase: float = burst_t / life
 			var r: float = lerpf(0.3, 1.0, phase) * max_radius
 			var surface_count: int = 3
@@ -594,10 +602,7 @@ func arc_lightning(a: Vector3, b: Vector3, charge01: float) -> void:
 		mi.queue_free()
 		return
 	var fwd := dir.normalized()
-	var up := Vector3.UP
-	if absf(fwd.dot(up)) > 0.99:
-		up = Vector3.FORWARD
-	var side := fwd.cross(up).normalized()
+	var side := fwd.cross(safe_up(fwd)).normalized()
 	var up2 := side.cross(fwd).normalized()
 
 	var jitter := lerpf(0.012, 0.03, charge01)

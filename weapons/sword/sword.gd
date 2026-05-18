@@ -18,9 +18,13 @@ const COMBO_COUNT: int = 3
 const TRAIL_SAMPLES: int = 14
 
 # Rest pose: blade tipped +45° up-forward at right hip (chudan-ish low guard).
+# FPV uses the same pitch baseline so combo keyframes (which are offsets from
+# rest) resolve to the same total rotation in both views — otherwise e.g. a
+# mid-strike kf.rot.x of -30° produces a forward-up blade in TPV but a
+# downward-pointing blade in FPV.
 const REST_ROT_TPV := Vector3(PI / 4.0, 0.0, 0.0)
 const REST_POS_TPV := Vector3.ZERO
-const REST_ROT_FPV := Vector3.ZERO
+const REST_ROT_FPV := Vector3(PI / 4.0, 0.0, 0.0)
 const REST_POS_FPV := Vector3.ZERO
 
 var _hits_this_swing: Array = []
@@ -228,8 +232,11 @@ func _swing() -> void:
 	_combo_window_left = COMBO_WINDOW
 
 	var data := _combo_data(_combo_index)
+	# Both rigs run the full position+rotation animation so the swing reads
+	# the same in third- and first-person. FPVPivot is already scaled down in
+	# the scene, so the offsets shrink appropriately for the closer camera.
 	_tween_keyframes(rig_tpv, data.keyframes, REST_ROT_TPV, REST_POS_TPV, true)
-	_tween_keyframes(rig_fpv, data.keyframes, REST_ROT_FPV, REST_POS_FPV, false)
+	_tween_keyframes(rig_fpv, data.keyframes, REST_ROT_FPV, REST_POS_FPV, true)
 
 	var marker: Marker3D = tip_fpv if is_fpv() else tip_tpv
 	var base_tint: Color = data.tint
@@ -259,6 +266,11 @@ func _swing() -> void:
 #   0: rising diagonal — bottom-left → top-right
 #   1: rising diagonal — bottom-right → top-left
 #   2: powerful horizontal cleave — long left → right sweep at chest height
+#
+# Combos 0 and 1 mirror combo 2's broad-swing pacing (long chamber, fast
+# extension, wide follow-through) but the rig position arcs diagonally and the
+# blade pitches up as it sweeps, so the cut traces a true diagonal in screen
+# space rather than reading as a vertical chop.
 func _combo_data(idx: int) -> Dictionary:
 	match idx:
 		0:
@@ -267,23 +279,28 @@ func _combo_data(idx: int) -> Dictionary:
 				"strike_start": 0.20,
 				"strike_end": 0.34,
 				"keyframes": [
-					{"rot": Vector3(deg_to_rad(-135.0), deg_to_rad(30.0), deg_to_rad(-25.0)), "pos": Vector3(-0.80, -0.25, 0.05), "dur": 0.16, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
-					{"rot": Vector3(deg_to_rad(-145.0), deg_to_rad(35.0), deg_to_rad(-30.0)), "pos": Vector3(-0.82, -0.27, 0.05), "dur": 0.05, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
-					{"rot": Vector3(deg_to_rad(-30.0), 0.0, 0.0), "pos": Vector3(-0.15, 0.12, -0.15), "dur": 0.06, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
-					{"rot": Vector3(deg_to_rad(45.0), deg_to_rad(25.0), deg_to_rad(25.0)), "pos": Vector3(0.55, 0.50, -0.18), "dur": 0.10, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
+					# Chamber low-left: blade pitched down, tip yawed right, cocked across the body.
+					{"rot": Vector3(deg_to_rad(-75.0), deg_to_rad(95.0), deg_to_rad(15.0)), "pos": Vector3(-0.65, -0.35, -0.20), "dur": 0.16, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
+					# Tip-lag overextension just before release.
+					{"rot": Vector3(deg_to_rad(-85.0), deg_to_rad(105.0), deg_to_rad(20.0)), "pos": Vector3(-0.70, -0.40, -0.22), "dur": 0.05, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
+					# Mid-strike: blade extended forward at chest height, peak contact frame.
+					{"rot": Vector3(deg_to_rad(-30.0), 0.0, 0.0), "pos": Vector3(0.0, 0.15, -0.60), "dur": 0.06, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
+					# Follow-through high-right: blade pitched up, tip yawed past the shoulder.
+					{"rot": Vector3(deg_to_rad(15.0), deg_to_rad(-105.0), deg_to_rad(-20.0)), "pos": Vector3(0.65, 0.55, -0.20), "dur": 0.10, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
 					{"rot": Vector3.ZERO, "pos": Vector3.ZERO, "dur": 0.32, "trans": Tween.TRANS_QUART, "ease": Tween.EASE_OUT},
 				],
 			}
 		1:
+			# Mirror of combo 0: X positions flipped, Y/Z rotations flipped, pitch sweep identical.
 			return {
 				"tint": Color(0.75, 0.85, 1.0, 1.0),
 				"strike_start": 0.16,
 				"strike_end": 0.30,
 				"keyframes": [
-					{"rot": Vector3(deg_to_rad(-135.0), deg_to_rad(-30.0), deg_to_rad(25.0)), "pos": Vector3(0.80, -0.25, 0.05), "dur": 0.16, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
-					{"rot": Vector3(deg_to_rad(-145.0), deg_to_rad(-35.0), deg_to_rad(30.0)), "pos": Vector3(0.82, -0.27, 0.05), "dur": 0.05, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
-					{"rot": Vector3(deg_to_rad(-30.0), 0.0, 0.0), "pos": Vector3(0.15, 0.12, -0.15), "dur": 0.06, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
-					{"rot": Vector3(deg_to_rad(45.0), deg_to_rad(-25.0), deg_to_rad(-25.0)), "pos": Vector3(-0.55, 0.50, -0.18), "dur": 0.10, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(-75.0), deg_to_rad(-95.0), deg_to_rad(-15.0)), "pos": Vector3(0.65, -0.35, -0.20), "dur": 0.16, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(-85.0), deg_to_rad(-105.0), deg_to_rad(-20.0)), "pos": Vector3(0.70, -0.40, -0.22), "dur": 0.05, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(-30.0), 0.0, 0.0), "pos": Vector3(0.0, 0.15, -0.60), "dur": 0.06, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
+					{"rot": Vector3(deg_to_rad(15.0), deg_to_rad(105.0), deg_to_rad(20.0)), "pos": Vector3(-0.65, 0.55, -0.20), "dur": 0.10, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
 					{"rot": Vector3.ZERO, "pos": Vector3.ZERO, "dur": 0.32, "trans": Tween.TRANS_QUART, "ease": Tween.EASE_OUT},
 				],
 			}

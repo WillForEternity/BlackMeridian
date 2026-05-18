@@ -60,10 +60,7 @@ func reset_for_reuse() -> void:
 func set_direction(d: Vector3) -> void:
 	if d.length() > 0.0:
 		direction = d.normalized()
-		var up := Vector3.UP
-		if absf(direction.dot(up)) > 0.99:
-			up = Vector3.FORWARD
-		look_at(global_position + direction, up)
+		look_at(global_position + direction, Vfx.safe_up(direction))
 
 func _physics_process(delta: float) -> void:
 	global_position += direction * speed * delta
