@@ -160,15 +160,43 @@ func _process(_dt: float) -> void:
 	# Patch follows the camera every frame, snapped to whole meters so blades
 	# don't crawl. Heights are resolved GPU-side — no rebuild cost.
 	if not _grass_patch_mmis.is_empty():
-		var sx: float = round(pos.x / PATCH_SNAP) * PATCH_SNAP
-		var sz: float = round(pos.z / PATCH_SNAP) * PATCH_SNAP
-		var origin := Vector3(sx, 0.0, sz)
-		var center := Vector2(sx, sz)
-		for mmi in _grass_patch_mmis:
-			(mmi as MultiMeshInstance3D).global_position = origin
+		# Move the patch MMI continuously with the player (no PATCH_SNAP). With
+		# exact cell indexing via INSTANCE_CUSTOM + per-layer integer offset,
+		# blades render at fixed world cells regardless of MMI position — so
+		# snapping the MMI to 1m would only desync each layer's coverage with
+		# the patch position (each layer's cell_step is different, none divides
+		# 1m evenly). Continuous follow + per-layer offset = smooth.
+		var center := Vector2(pos.x, pos.z)
+		var step_short: float = PATCH_SIZE / float(PATCH_SHORT_GRID)
+		var step_tall: float = PATCH_SIZE / float(PATCH_TALL_GRID)
+		var step_core: float = PATCH_CORE_SIZE / float(PATCH_CORE_GRID)
+		# Patches stay at world origin; the shader anchors blades to integer
+		# world cells via wo + patch_cell_offset. Sliding patch_cell_offset
+		# per frame moves the visible disc with the player without moving
+		# the MMI (which would risk float-precision loss in wo extraction).
 		_grass_material_patch_short.set_shader_parameter("patch_center", center)
 		_grass_material_patch_tall.set_shader_parameter("patch_center", center)
 		_grass_material_patch_core.set_shader_parameter("patch_center", center)
+		_grass_material_patch_short.set_shader_parameter(
+			"patch_cell_offset", Vector2(round(pos.x / step_short), round(pos.z / step_short))
+		)
+		_grass_material_patch_tall.set_shader_parameter(
+			"patch_cell_offset", Vector2(round(pos.x / step_tall), round(pos.z / step_tall))
+		)
+		_grass_material_patch_core.set_shader_parameter(
+			"patch_cell_offset", Vector2(round(pos.x / step_core), round(pos.z / step_core))
+		)
+		# Update each MMI's custom_aabb to a player-centered box so Godot's
+		# frustum culling still works (the MMI itself stays at world origin).
+		for mmi in _grass_patch_mmis:
+			var m := mmi as MultiMeshInstance3D
+			var psize: float = float(m.get_meta("patch_size"))
+			var phalf: float = psize * 0.5
+			m.global_position = Vector3.ZERO
+			m.custom_aabb = AABB(
+				Vector3(pos.x - phalf, -200.0, pos.z - phalf),
+				Vector3(psize, 400.0, psize)
+			)
 	# Tile streaming: only re-survey when the camera has moved enough, and
 	# never build more than GRASS_TILE_SPAWN_BUDGET tiles per frame.
 	if _last_stream_pos.x == INF or pos.distance_to(_last_stream_pos) >= GRASS_REBUILD_THRESHOLD:
@@ -379,10 +407,15 @@ func _make_patch_layer(
 			var lz: float = -half + (float(iz) + 0.5) * step
 			if lx * lx + lz * lz > radius_sq:
 				continue
-			transforms.append(Transform3D(Basis.IDENTITY, Vector3(lx, 0.0, lz)))
+			# Bake the INTEGER local cell index directly into the transform
+			# translation so wo.xz reads as the cell index with NO rounding
+			# anywhere (CPU or GPU). Avoids the half-integer round() ambiguity
+			# that the multimesh storage was hitting at certain cell positions.
+			var local_cell_x: int = ix - grid / 2
+			var local_cell_z: int = iz - grid / 2
+			transforms.append(Transform3D(Basis.IDENTITY, Vector3(float(local_cell_x), 0.0, float(local_cell_z))))
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.use_custom_data = false
 	mm.mesh = mesh
 	mm.instance_count = transforms.size()
 	for i in transforms.size():
@@ -396,7 +429,11 @@ func _make_patch_layer(
 		Vector3(patch_size, 400.0, patch_size)
 	)
 	mmi.set_meta("cell_step", step)
+	mmi.set_meta("patch_size", patch_size)
 	mat.set_shader_parameter("cell_step", step)
+	mat.set_shader_parameter("patch_size_i", int(round(patch_size)))
+	mat.set_shader_parameter("grid_i", grid)
+	mat.set_shader_parameter("patch_cell_offset", Vector2.ZERO)
 	return mmi
 
 func _init_tree_placement_noise() -> void:
@@ -832,6 +869,15 @@ uniform float fade_outer   = 7.0;
 uniform float min_normal_y = 0.72;
 uniform float max_elev     = 55.0;
 uniform float cell_step    = 0.21;
+// Integer numerator/denominator for the cell→world rational. cell_step
+// equals patch_size_i / grid_i, but we keep the integers so the
+// multiplication stays exact (no float-roundoff accumulating in cell_step).
+uniform int   patch_size_i = 60;
+uniform int   grid_i       = 820;
+// Integer cell offset for this layer based on the patch's snapped world
+// position. World cell = INSTANCE_CUSTOM.xy + patch_cell_offset. CPU-computed
+// with doubles so the world-cell mapping is exact and never collides.
+uniform vec2  patch_cell_offset = vec2(0.0);
 
 uniform vec3  base_color  : source_color = vec3(0.03, 0.10, 0.03);
 uniform vec3  tip_meadow  : source_color = vec3(0.40, 0.66, 0.20);
@@ -847,21 +893,33 @@ float sample_h(vec2 wxz) {
 	return texture(heightmap, uv).r;
 }
 
+// IQ hash (https://www.shadertoy.com/view/4djSRW) — sin-free. The sin-based
+// version produced visible diagonal banding because sin loses precision at
+// the dot-product magnitudes our cell indices reach.
 float h12(vec2 p) {
-	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+	vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+	p3 += dot(p3, p3.yzx + 33.33);
+	return fract((p3.x + p3.y) * p3.z);
 }
 vec2 h22(vec2 p) {
-	return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453);
+	vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+	p3 += dot(p3, p3.yzx + 33.33);
+	return fract(vec2((p3.x + p3.y) * p3.z, (p3.x + p3.z) * p3.y));
 }
 
 void vertex() {
-	// World-anchored blade. The instance's world XZ is snapped to the nearest
-	// fixed world cell, and all per-blade variation is hashed off that cell.
-	// Patch slides → instances get reassigned to different cells, but each
-	// cell always renders the same blade. Result: no shimmer.
+	// World-anchored blade. Each instance owns a fixed LOCAL cell index
+	// (baked CPU-side via INSTANCE_CUSTOM.xy). The world cell is just
+	// local_cell + patch_cell_offset — pure integer-on-float addition with
+	// no float-precision floor(). When the patch slides, every instance's
+	// world cell shifts by the same exact offset; no collisions, no gaps.
 	vec3 wo = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-	vec2 cell = floor(wo.xz / cell_step + 0.5);
-	vec2 cell_origin = cell * cell_step;
+	// Cell index baked directly as integer into the transform translation.
+	// cell-to-world conversion done as integer mul + single float div:
+	// cell_origin = cell * patch_size_i / grid_i.
+	ivec2 cell_i = ivec2(int(wo.x), int(wo.z)) + ivec2(patch_cell_offset);
+	vec2 cell = vec2(cell_i);
+	vec2 cell_origin = vec2(cell_i * patch_size_i) / float(grid_i);
 	vec2 jitter = (h22(cell + 13.7) - 0.5) * cell_step * 0.85;
 	vec2 anchored = cell_origin + jitter;
 
@@ -875,7 +933,6 @@ void vertex() {
 
 	float h = sample_h(anchored);
 
-	// Slope from heightmap (central differences) — discard on rocky terrain.
 	float h_l = sample_h(anchored + vec2(-terrain_cell, 0.0));
 	float h_r = sample_h(anchored + vec2( terrain_cell, 0.0));
 	float h_d = sample_h(anchored + vec2(0.0, -terrain_cell));
@@ -891,7 +948,6 @@ void vertex() {
 	float slope_keep = step(min_normal_y, ny);
 	keep *= elev * slope_keep;
 
-	// Strip baked world translation, apply blade-local width scale + yaw.
 	vec2 local_xz = (VERTEX.xz - wo.xz) * sw;
 	float c = cos(yaw); float s = sin(yaw);
 	local_xz = vec2(local_xz.x * c - local_xz.y * s, local_xz.x * s + local_xz.y * c);
@@ -916,7 +972,6 @@ void fragment() {
 	float bend = COLOR.r;
 	float dry  = COLOR.g;
 	float hue  = COLOR.b;
-	// Minority of blades pick yellow instead of lime for their "dry" tone.
 	vec3 dry_tip = mix(tip_dry, tip_yellow, step(1.0 - yellow_chance, hue));
 	vec3 tip = mix(tip_meadow, dry_tip, dry);
 	vec3 col = mix(base_color, tip, bend);
