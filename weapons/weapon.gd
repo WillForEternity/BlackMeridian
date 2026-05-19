@@ -13,7 +13,7 @@ const SUPER_MAX: float = 12.0
 # Shared "crit" visual: any weapon currently in a crit state recolors its
 # damaging visuals (slash trail, projectile, etc.) to this tint. Subclasses
 # decide *when* they crit by overriding is_crit(); the color stays unified.
-const CRIT_TINT: Color = Color(0.1, 1.0, 0.2, 1.0)
+const CRIT_TINT: Color = Color(0.55, 0.15, 0.85, 1.0)
 
 # Override per weapon. Default: never crits. Examples:
 #   sword → crits while player is dashing or mid-super

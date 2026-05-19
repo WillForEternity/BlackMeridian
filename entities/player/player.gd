@@ -30,6 +30,8 @@ const SWORD_SLICE_DISTANCE: float = 1.45
 @export var mouse_sensitivity: float = 0.0028
 @export var pitch_min_deg: float = -85.0
 @export var pitch_max_deg: float = 85.0
+# Third-person camera collision: leave this much air between camera and surface.
+const CAM_COLLISION_MARGIN: float = 0.25
 
 @export var sword_path: NodePath
 @export var gun_path: NodePath
@@ -215,7 +217,8 @@ func _physics_process(delta: float) -> void:
 			velocity.z = dash_dir.z * dash_speed
 			# Sync controlled velocity so accel-based control resumes from the
 			# dash's exit speed rather than snapping back to the pre-dash value.
-			_controlled_velocity = Vector3(velocity.x, 0.0, velocity.z)
+			# Scaled to half so the post-dash skid is shorter.
+			_controlled_velocity = Vector3(velocity.x * 0.5, 0.0, velocity.z * 0.5)
 	else:
 		# Modern-action movement: build a target velocity from input and lerp
 		# the player-controlled velocity toward it with separate ground/air
@@ -266,6 +269,35 @@ func _physics_process(delta: float) -> void:
 	# Undo the carry so the input layer starts clean next frame.
 	velocity.x -= _floor_platform_velocity.x
 	velocity.z -= _floor_platform_velocity.z
+
+	_update_camera_collision()
+
+# Pulls the third-person camera in along the pivot→camera ray if any solid
+# surface is between the player and the camera's resting position. Keeps the
+# camera from clipping into terrain when the player tilts steeply.
+func _update_camera_collision() -> void:
+	if view_mode == ViewMode.FIRST_PERSON:
+		return
+	var pivot_pos: Vector3 = pitch_pivot.global_position
+	var target_local: Vector3 = CAM_POS_3P
+	var target_world: Vector3 = pitch_pivot.global_transform * target_local
+	var space := get_world_3d().direct_space_state
+	var query := PhysicsRayQueryParameters3D.create(pivot_pos, target_world)
+	query.exclude = [self.get_rid()]
+	query.collide_with_areas = false
+	var hit := space.intersect_ray(query)
+	if hit.is_empty():
+		camera.position = target_local
+		return
+	# Pull camera back along the same direction by COLLISION_MARGIN.
+	var ray: Vector3 = target_world - pivot_pos
+	var ray_len: float = ray.length()
+	if ray_len < 0.0001:
+		return
+	var hit_dist: float = pivot_pos.distance_to(hit.position)
+	var safe_dist: float = maxf(hit_dist - CAM_COLLISION_MARGIN, 0.0)
+	var safe_world: Vector3 = pivot_pos + ray.normalized() * safe_dist
+	camera.position = pitch_pivot.to_local(safe_world)
 
 func _detect_floor_platform_velocity() -> Vector3:
 	if not is_on_floor():

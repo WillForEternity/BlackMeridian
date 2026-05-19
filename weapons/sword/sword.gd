@@ -13,7 +13,8 @@ extends "res://weapons/weapon.gd"
 @onready var tip_tpv: Marker3D = get_node(tip_marker_tpv_path)
 @onready var tip_fpv: Marker3D = get_node(tip_marker_fpv_path)
 
-const COMBO_WINDOW: float = 0.55
+const COMBO_WINDOW: float = 1.0
+const COMBO_MIN_GAP: float = 0.5
 const COMBO_COUNT: int = 3
 const TRAIL_SAMPLES: int = 14
 
@@ -48,8 +49,44 @@ var _trail_im: ImmediateMesh
 var _trail_mat: StandardMaterial3D
 var _trail_tint: Color = Color(0.55, 0.95, 1, 1)
 var _active_swing_tween: Tween
+# Sticky crit latch: set true any time is_crit() is observed during the strike
+# window, so a slash that overlaps a dash at any point spawns the crit FX even
+# if the dash expires before strike_end fires.
+var _swing_was_crit: bool = false
 
 const TRAIL_DECAY_INTERVAL: float = 1.0 / 33.0  # seconds between trail point drops
+
+# ── Katana idle-sheathe ──────────────────────────────────────────────────────
+# After IDLE_SHEATHE_TIME of no swings while equipped, the rig tweens onto
+# the saya on the player's left hip. Any swing or super yanks it back out.
+const IDLE_SHEATHE_TIME: float = 5.0
+const SHEATHE_TWEEN_IN: float = 0.65
+const SHEATHE_TWEEN_OUT: float = 0.0
+# Quick-draw flourish: when the player clicks while sheathed, the click
+# *draws* the blade (no attack). A follow-up click within the next moment
+# performs the actual swing. The draw animation has to be short enough that
+# the second click feels responsive.
+const DRAW_DURATION: float = 0.12
+# TPV sheathed pose — rig glides toward the saya on the left hip. The rig is
+# hidden at the end of the sheathe (and re-shown on unsheathe), so this pose
+# only needs to roughly aim at the saya — it doesn't have to match perfectly.
+const SHEATHE_POS_TPV := Vector3(-0.78, 0.15, 0.35)
+const SHEATHE_ROT_TPV := Vector3(deg_to_rad(-20.0), deg_to_rad(180.0), deg_to_rad(-10.0))
+
+# Katana visual styling
+const KATANA_BLADE_TINT := Color(0.92, 0.96, 1.0, 1.0)
+const KATANA_EDGE_TINT := Color(1.0, 1.0, 1.0, 1.0)
+const KATANA_HILT_DARK := Color(0.07, 0.05, 0.05, 1.0)
+const KATANA_WRAP_TINT := Color(0.30, 0.08, 0.10, 1.0)
+const KATANA_GOLD := Color(0.96, 0.78, 0.30, 1.0)
+const SCABBARD_TINT := Color(0.05, 0.04, 0.07, 1.0)
+
+var _idle_t: float = 0.0
+# Default state at spawn: sword is in the saya. The player has to swing (or
+# trigger a super) to draw it out.
+var _sheathed: bool = true
+var _sheathe_tween: Tween
+var _scabbard: Node3D
 
 func _ready() -> void:
 	super()
@@ -60,6 +97,17 @@ func _ready() -> void:
 	rig_tpv.position = REST_POS_TPV
 	rig_fpv.rotation = REST_ROT_FPV
 	rig_fpv.position = REST_POS_FPV
+	# Replace the scene's blocky sword visuals with a longer katana-shaped rig.
+	# HitArea and TipMarker (Marker3D) are kept untouched so combat reach and
+	# trail sampling don't change.
+	_install_katana_visuals(rig_tpv, false)
+	_install_katana_visuals(rig_fpv, true)
+
+# Override setup() so the scabbard can be parented to the player as soon as
+# the player ref is known (the base setup just stores `player`).
+func setup(p: Node) -> void:
+	super(p)
+	_build_scabbard()
 
 func cooldown() -> float:
 	return data.cooldown if data else 0.42
@@ -69,14 +117,26 @@ func dash_cooldown_mult() -> float:
 	return 0.5
 
 func guide_text() -> String:
-	return "KATANA\n\nATTACK (LMB)\n  Three-strike combo: rising-L, rising-R, horizontal cleave.\n  Chain within 0.55s to keep the combo alive.\n  Damage scales 1x -> 1.5x -> 2x across the combo.\n\nDASH SLASH (CRIT)\n  Attacking while dashing crits: +50% damage, green trail,\n  and a misty wake hangs along the cut.\n\nSUPER (Q, when bar is full)\n  Corkscrew spin (~0.5s) that lifts you AND any caught target\n  into the air. Continuous re-hits at 4 dmg each. Counts as a\n  crit the entire time.\n\nQUIRK\n  Dash cooldown is HALVED while katana is equipped, so you\n  can reposition (and dash-crit) twice as often as with the\n  other weapons.\n\n[G] toggles this guide."
+	return "KATANA\n\nATTACK (LMB)\n  Three-strike combo: rising-L, rising-R, horizontal cleave.\n  Chain between 0.5s and 1.0s after the previous slash to keep the combo alive.\n  Damage scales 1x -> 1.5x -> 2x across the combo.\n\nDASH SLASH (CRIT)\n  Attacking while dashing crits: +50% damage, green trail,\n  and a misty wake hangs along the cut.\n\nSUPER (Q, when bar is full)\n  Corkscrew spin (~0.5s) that lifts you AND any caught target\n  into the air. Continuous re-hits at 4 dmg each. Counts as a\n  crit the entire time.\n\nQUIRK\n  Dash cooldown is HALVED while katana is equipped, so you\n  can reposition (and dash-crit) twice as often as with the\n  other weapons.\n\n[G] toggles this guide."
 
 func _damage() -> int:
 	return data.damage if data else damage
 
 func equip() -> void:
-	rig_tpv.visible = true
-	rig_fpv.visible = true
+	_idle_t = 0.0
+	_kill_sheathe_tween()
+	# Preserve the sheathed/drawn state across weapon swaps. On initial spawn
+	# `_sheathed` defaults to true so the player sees just the saya on the hip.
+	if _sheathed:
+		rig_tpv.visible = false
+		rig_fpv.visible = false
+	else:
+		rig_tpv.visible = true
+		rig_fpv.visible = true
+		rig_tpv.rotation = REST_ROT_TPV
+		rig_tpv.position = REST_POS_TPV
+		rig_fpv.rotation = REST_ROT_FPV
+		rig_fpv.position = REST_POS_FPV
 
 func unequip() -> void:
 	# Kill any in-flight swing tween and force the hit area off, otherwise an
@@ -84,12 +144,19 @@ func unequip() -> void:
 	if _active_swing_tween and _active_swing_tween.is_valid():
 		_active_swing_tween.kill()
 	_active_swing_tween = null
+	_kill_sheathe_tween()
 	hit_area.monitoring = false
 	rig_tpv.visible = false
 	rig_fpv.visible = false
 
 func on_attack_pressed() -> void:
 	if attack_cd > 0.0 or _super_active:
+		return
+	# First click while sheathed = quick draw, NOT a swing. A second click
+	# afterwards (immediately allowed — no cooldown set on the draw) performs
+	# the actual attack.
+	if _sheathed:
+		_draw_quick()
 		return
 	_swing()
 
@@ -99,40 +166,167 @@ func locks_movement() -> bool:
 # Crit conditions for the katana: mid-dash (dash-slash) or mid-super.
 # Scales the blade length (rig Z-axis). The HitArea and tip marker are rig
 # children, so reach + trail sample point grow with the visual blade.
-# Spawns a soft, expanding, fading sphere at `at` to lay down a misty wake.
-# Called each trail-sample tick during a crit slash so a trail of puffs hangs
-# in the air along the cut.
-func _emit_mist_puff(at: Vector3) -> void:
-	var puff := MeshInstance3D.new()
-	var sphere := SphereMesh.new()
-	sphere.radius = 0.32
-	sphere.height = 0.64
-	sphere.radial_segments = 14
-	sphere.rings = 8
-	puff.mesh = sphere
-	puff.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.blend_mode = BaseMaterial3D.BLEND_MODE_MIX
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	mat.albedo_color = Color(CRIT_TINT.r, CRIT_TINT.g, CRIT_TINT.b, 0.10)
-	mat.emission_enabled = true
-	mat.emission = CRIT_TINT
-	mat.emission_energy_multiplier = 0.4
-	# Soft edges: fade by view angle so spheres read as fog volumes, not solids.
-	mat.rim_enabled = false
-	puff.material_override = mat
-	# Tiny jitter so successive puffs blend into a single continuous ribbon
-	# of mist rather than visibly separate blobs.
-	var jitter := Vector3(randf_range(-0.04, 0.04), randf_range(-0.03, 0.03), randf_range(-0.04, 0.04))
-	get_tree().current_scene.add_child(puff)
-	puff.global_position = at + jitter
-	puff.scale = Vector3.ONE * 0.85
+const CRIT_SLASH_SHADER_CODE := """
+shader_type spatial;
+render_mode unshaded, blend_add, cull_disabled, depth_draw_never, depth_test_disabled;
+
+uniform vec4 tint : source_color = vec4(0.35, 1.0, 0.55, 1.0);
+uniform vec4 hot_tint : source_color = vec4(0.92, 1.0, 0.96, 1.0);
+uniform float progress : hint_range(-0.6, 1.6) = -0.2;
+uniform float intensity : hint_range(0.0, 25.0) = 9.0;
+uniform float edge_softness : hint_range(0.5, 12.0) = 2.6;
+uniform float dissolve : hint_range(0.0, 1.6) = 0.0;
+uniform float head_glow : hint_range(0.0, 12.0) = 5.0;
+uniform float reveal_width : hint_range(0.05, 1.0) = 0.55;
+
+float hash21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vnoise(vec2 p){
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	vec2 u = f * f * (3.0 - 2.0 * f);
+	return mix(mix(hash21(i),                 hash21(i + vec2(1.0, 0.0)), u.x),
+	           mix(hash21(i + vec2(0.0,1.0)), hash21(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+float fbm(vec2 p){
+	float a = 0.5;
+	float v = 0.0;
+	for (int k = 0; k < 4; k++){
+		v += a * vnoise(p);
+		p *= 2.07;
+		a *= 0.5;
+	}
+	return v;
+}
+
+void fragment(){
+	// UV.y = 0 is the cutting edge (sharpest/brightest); UV.y = 1 is the outer fringe.
+	float edge = UV.y;
+	float thickness = pow(1.0 - edge, edge_softness);
+	// Taper at start/end of arc so it doesn't read as a chopped band.
+	float arc_taper = smoothstep(0.0, 0.10, UV.x) * smoothstep(1.0, 0.86, UV.x);
+	// Sweep reveal — bright wave moves along UV.x as progress goes 0 -> 1.
+	float reveal = smoothstep(progress - reveal_width, progress, UV.x);
+	// Bright leading edge streak that travels with progress.
+	float hot = smoothstep(progress - 0.055, progress - 0.004, UV.x)
+	          * (1.0 - smoothstep(progress - 0.004, progress + 0.020, UV.x));
+	// Noise-erosion dissolve: outer fringe and high-noise regions disappear first.
+	// At dissolve=0 the threshold sits well above the noise field so the whole
+	// band is visible; as dissolve grows toward 1 the threshold drops and more
+	// of the band gets carved away.
+	float n = fbm(vec2(UV.x * 9.0, UV.y * 2.2));
+	float erode_thresh = 1.25 - dissolve * 1.30;
+	float erode = 1.0 - smoothstep(erode_thresh - 0.22, erode_thresh, n + edge * 0.45);
+	erode = clamp(erode, 0.0, 1.0);
+	// Subtle streak texture along the cut so it reads as wind, not a solid blob.
+	float streaks = 0.55 + 0.45 * vnoise(vec2(UV.x * 28.0, UV.y * 1.5 + 3.1));
+	float a = thickness * arc_taper * reveal * erode * streaks;
+	vec3 col = mix(tint.rgb, hot_tint.rgb, pow(thickness, 2.2));
+	col += hot_tint.rgb * hot * head_glow;
+	ALBEDO = col * intensity;
+	ALPHA = clamp(a, 0.0, 1.0);
+}
+"""
+
+# Cached so we don't recompile the shader on every crit.
+static var _crit_slash_shader: Shader = null
+
+static func _get_crit_slash_shader() -> Shader:
+	if _crit_slash_shader == null:
+		_crit_slash_shader = Shader.new()
+		_crit_slash_shader.code = CRIT_SLASH_SHADER_CODE
+	return _crit_slash_shader
+
+# Spawn a sharp crescent "wind-blade" slash using a ShaderMaterial:
+#   * thin cutting edge along the actual sword path, extruded outward past the
+#     tip along the blade axis so the slash reads as a wind extension.
+#   * shader does soft-edge falloff, an animated reveal sweep with a hot
+#     leading streak, fbm-based dissolve, and subtle wind streaking.
+#   * a second wider, dimmer halo pass behind it for the bloom-haze look.
+func _spawn_crit_slash(power: float = 1.0) -> void:
+	if _trail_points.size() < 6:
+		return
+	# Lifetime + size both scale with power so the super reads as a far larger
+	# event than the dash-combo crits without changing the underlying shader.
+	var dur: float = lerpf(0.42, 0.85, clampf((power - 1.0) / 1.5, 0.0, 1.0))
+	_spawn_crit_slash_layer(0.95 * power, 9.0 * power, 5.2, 0.55, dur)         # core: sharp, bright
+	_spawn_crit_slash_layer(1.55 * power, 4.5 * power, 7.2, 0.70, dur * 1.10)  # halo: wider, softer
+	if power >= 1.4:
+		# Outer wind-shell for the super: huge, low-intensity, fades slow.
+		_spawn_crit_slash_layer(2.25 * power, 2.6 * power, 8.0, 0.85, dur * 1.30)
+
+func _spawn_crit_slash_layer(out_len: float, base_intensity: float, edge_soft: float, reveal_w: float, lifetime: float) -> void:
+	var snap: Array[Vector3] = _trail_points.duplicate()
+	var mi := MeshInstance3D.new()
+	var arr_mesh := ArrayMesh.new()
+	mi.mesh = arr_mesh
+	var mat := ShaderMaterial.new()
+	mat.shader = _get_crit_slash_shader()
+	mat.set_shader_parameter("tint", CRIT_TINT)
+	mat.set_shader_parameter("hot_tint", Color(0.92, 1.0, 0.96, 1.0))
+	mat.set_shader_parameter("progress", -0.15)
+	mat.set_shader_parameter("dissolve", 0.0)
+	mat.set_shader_parameter("intensity", base_intensity)
+	mat.set_shader_parameter("edge_softness", edge_soft)
+	mat.set_shader_parameter("reveal_width", reveal_w)
+	mat.set_shader_parameter("head_glow", 5.5)
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# Don't let the slash get backface-culled by view dependence — it's a thin band.
+	mi.extra_cull_margin = 4.0
+	get_tree().current_scene.add_child(mi)
+	_build_crit_slash_mesh(arr_mesh, snap, out_len)
 	var tw := create_tween().set_parallel(true)
-	tw.tween_property(puff, "scale", Vector3.ONE * 1.8, 0.9).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	tw.tween_property(mat, "albedo_color:a", 0.0, 0.9).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
-	tw.chain().tween_callback(puff.queue_free)
+	tw.tween_method(
+		func(v: float) -> void: mat.set_shader_parameter("progress", v),
+		-0.15, 1.25, lifetime * 0.88
+	).set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_OUT)
+	tw.tween_method(
+		func(v: float) -> void: mat.set_shader_parameter("dissolve", v),
+		0.0, 1.35, lifetime
+	).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tw.tween_method(
+		func(v: float) -> void: mat.set_shader_parameter("intensity", v),
+		base_intensity * 1.1, 0.0, lifetime
+	).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(mi.queue_free)
+
+func _build_crit_slash_mesh(arr_mesh: ArrayMesh, pairs: Array, out_len: float) -> void:
+	var n: int = pairs.size() / 2
+	if n < 2:
+		return
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	verts.resize(n * 2)
+	uvs.resize(n * 2)
+	for i in range(n):
+		var tip: Vector3 = pairs[i * 2]
+		var hilt: Vector3 = pairs[i * 2 + 1]
+		var blade: Vector3 = tip - hilt
+		if blade.length() < 0.001:
+			blade = Vector3.UP
+		blade = blade.normalized()
+		var inner: Vector3 = tip - blade * 0.10
+		var outer: Vector3 = tip + blade * out_len
+		var u: float = float(i) / float(n - 1)
+		verts[i * 2] = inner
+		verts[i * 2 + 1] = outer
+		uvs[i * 2] = Vector2(u, 0.0)
+		uvs[i * 2 + 1] = Vector2(u, 1.0)
+	for i in range(n - 1):
+		var a: int = i * 2
+		var b: int = i * 2 + 1
+		var c: int = (i + 1) * 2
+		var d: int = (i + 1) * 2 + 1
+		# Two triangles, both winding orders so the band is visible from either side.
+		indices.append(a); indices.append(b); indices.append(d)
+		indices.append(a); indices.append(d); indices.append(c)
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
 func _set_blade_length_scale(z_scale: float) -> void:
 	var s := Vector3(1.0, 1.0, z_scale)
@@ -160,6 +354,11 @@ func on_super_pressed() -> void:
 
 func _do_super() -> void:
 	_super_active = true
+	# Treat super as "using" the sword — refresh the idle clock and yank the
+	# blade out if it was holstered.
+	if _sheathed:
+		_unsheathe(true)
+	_idle_t = 0.0
 	attack_cd = SUPER_DURATION + 0.2
 	_hits_this_swing.clear()
 
@@ -188,6 +387,7 @@ func _do_super() -> void:
 		_active_swing_tween.tween_callback(func(): _hits_this_swing.clear())
 	_active_swing_tween.tween_interval(maxf(SUPER_DURATION - rehits * SUPER_REHIT_INTERVAL, 0.0))
 	_active_swing_tween.tween_callback(func():
+		_spawn_crit_slash(1.0)
 		hit_area.monitoring = false
 		_trail_t_left = 0.18
 		_super_active = false
@@ -204,6 +404,13 @@ func _do_super() -> void:
 
 func tick(delta: float) -> void:
 	_combo_window_left = maxf(_combo_window_left - delta, 0.0)
+	# Idle-sheathe timing: counts only while equipped (tick runs only then).
+	# Swings/supers reset _idle_t to 0, so this trips exactly when the player
+	# hasn't swung for IDLE_SHEATHE_TIME seconds.
+	_idle_t += delta
+	var busy: bool = _super_active or (_active_swing_tween != null and _active_swing_tween.is_valid())
+	if not _sheathed and not busy and _idle_t >= IDLE_SHEATHE_TIME:
+		_sheathe()
 	if not _trail_active:
 		return
 	var marker: Marker3D = tip_fpv if is_fpv() else tip_tpv
@@ -211,8 +418,12 @@ func tick(delta: float) -> void:
 		_sample_trail(marker)
 		_trail_t_left = 0.18
 		_trail_decay_accum = 0.0
-		if is_crit():
-			_emit_mist_puff(marker.global_position)
+		# Upgrade trail/latch to crit if a dash kicks in mid-swing.
+		if not _swing_was_crit and is_crit():
+			_swing_was_crit = true
+			if _trail_mat:
+				_trail_mat.emission = CRIT_TINT
+			_trail_tint = CRIT_TINT
 	_trail_t_left = maxf(_trail_t_left - delta, 0.0)
 	if not hit_area.monitoring and _trail_points.size() >= 4:
 		# Frame-rate independent: drop one pair every TRAIL_DECAY_INTERVAL sec.
@@ -229,13 +440,23 @@ func tick(delta: float) -> void:
 			_trail_im.clear_surfaces()
 
 func _swing() -> void:
+	# Drawing-from-sheathe is handled by `_draw_quick` on the prior click,
+	# but if anything still has the saya-tween running (e.g. a draw mid-tween)
+	# we kill it so the swing keyframes own the rig transform cleanly.
+	_kill_sheathe_tween()
+	_idle_t = 0.0
 	attack_cd = cooldown()
 	_hits_this_swing.clear()
 
-	if _combo_window_left <= 0.0:
-		_combo_index = 0
-	else:
+	# Combo advances only when the next click lands inside the chain window
+	# [COMBO_MIN_GAP, COMBO_WINDOW] since the previous slash; earlier or later
+	# clicks restart the combo at strike 0.
+	var elapsed: float = COMBO_WINDOW - _combo_window_left
+	var in_window: bool = _combo_window_left > 0.0 and elapsed >= COMBO_MIN_GAP
+	if in_window:
 		_combo_index = (_combo_index + 1) % COMBO_COUNT
+	else:
+		_combo_index = 0
 	_combo_window_left = COMBO_WINDOW
 
 	var data := _combo_data(_combo_index)
@@ -250,21 +471,27 @@ func _swing() -> void:
 	var strike_start: float = data.strike_start
 	var strike_end: float = data.strike_end
 
+	# Reset the sticky crit latch; tick() will set it true if a crit is
+	# observed at any point during the strike window, and we also seed it from
+	# the initial is_crit() at strike_start.
+	_swing_was_crit = false
 	if _active_swing_tween and _active_swing_tween.is_valid():
 		_active_swing_tween.kill()
 	_active_swing_tween = create_tween()
 	_active_swing_tween.tween_interval(strike_start)
 	_active_swing_tween.tween_callback(func():
 		hit_area.monitoring = true
-		# Tint is decided at strike-time: crit slashes (dash or super) all share
-		# the unified crit color from the base weapon.
-		var tint: Color = CRIT_TINT if is_crit() else base_tint
+		if is_crit():
+			_swing_was_crit = true
+		var tint: Color = CRIT_TINT if _swing_was_crit else base_tint
 		_begin_trail(tint)
 	)
 	_active_swing_tween.tween_interval(strike_end - strike_start)
 	_active_swing_tween.tween_callback(func():
 		hit_area.monitoring = false
 		_trail_t_left = 0.18
+		if _swing_was_crit:
+			_spawn_crit_slash(0.5)
 	)
 
 # Three-strike combo; chains within COMBO_WINDOW. Each keyframe is a rot/pos
@@ -318,7 +545,7 @@ func _combo_data(idx: int) -> Dictionary:
 			return {
 				"tint": Color(1.0, 0.55, 0.75, 1.0),
 				"strike_start": 0.26,
-				"strike_end": 0.48,
+				"strike_end": 0.38,
 				"keyframes": [
 					{"rot": Vector3(deg_to_rad(-45.0), deg_to_rad(95.0), deg_to_rad(15.0)), "pos": Vector3(-0.70, 0.35, -0.30), "dur": 0.24, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
 					{"rot": Vector3(deg_to_rad(-45.0), deg_to_rad(105.0), deg_to_rad(20.0)), "pos": Vector3(-0.75, 0.37, -0.32), "dur": 0.06, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
@@ -439,3 +666,208 @@ func _rebuild_trail() -> void:
 		_trail_im.surface_set_color(Color(_trail_tint.r, _trail_tint.g, _trail_tint.b, a1))
 		_trail_im.surface_add_vertex(p1a)
 	_trail_im.surface_end()
+
+# ── Katana visuals & scabbard ────────────────────────────────────────────────
+
+# Replace the scene's stubby box-sword children with a katana silhouette:
+# longer slim blade, gold tsuba, wrapped tsuka, kashira. HitArea and TipMarker
+# are left in place so combat reach is unchanged.
+func _install_katana_visuals(rig: Node3D, fpv: bool) -> void:
+	if rig == null:
+		return
+	for n in ["Blade", "Core", "Guard", "Pommel", "Tip"]:
+		var c := rig.get_node_or_null(n)
+		if c is MeshInstance3D:
+			(c as MeshInstance3D).visible = false
+	var sf: float = 0.95 if fpv else 1.0
+	# Blade (main slim spine).
+	_add_box(rig, Vector3(0.045 * sf, 0.022 * sf, 1.55 * sf), Vector3(0, 0, -0.78 * sf), Vector3.ZERO, _katana_blade_mat())
+	# Glowing edge highlight along one side of the blade.
+	_add_box(rig, Vector3(0.012 * sf, 0.024 * sf, 1.50 * sf), Vector3(-0.020 * sf, 0.0, -0.78 * sf), Vector3.ZERO, _katana_edge_mat())
+	# Tip taper — a narrower, shorter box at the very point so the blade
+	# reads as pointed rather than a chopped bar.
+	_add_box(rig, Vector3(0.026 * sf, 0.014 * sf, 0.16 * sf), Vector3(0, 0, -(1.55 + 0.08) * sf), Vector3.ZERO, _katana_blade_mat())
+	# Tsuba (round gold guard) — cylinder oriented with its axis along Z.
+	_add_cyl(rig, 0.085 * sf, 0.024 * sf, Vector3(0, 0, 0.005), Vector3(deg_to_rad(90.0), 0.0, 0.0), _katana_gold_mat())
+	# Tsuka (handle core) — slim dark cylinder behind the tsuba.
+	_add_cyl(rig, 0.032 * sf, 0.28 * sf, Vector3(0, 0, 0.16 * sf), Vector3(deg_to_rad(90.0), 0.0, 0.0), _katana_hilt_mat())
+	# Tsuka-ito wrap — six diamond-oriented boxes ringing the handle to
+	# suggest the crisscross cord wrap of a katana handle.
+	for i in 6:
+		var z := 0.04 + float(i) * 0.045 * sf
+		_add_box(rig, Vector3(0.072 * sf, 0.072 * sf, 0.022 * sf), Vector3(0, 0, z), Vector3(0, 0, deg_to_rad(45.0)), _katana_wrap_mat())
+	# Kashira (pommel cap).
+	_add_box(rig, Vector3(0.060 * sf, 0.060 * sf, 0.042 * sf), Vector3(0, 0, 0.32 * sf), Vector3.ZERO, _katana_gold_mat())
+	# Mekugi pin (small accent on the wrap).
+	_add_box(rig, Vector3(0.078 * sf, 0.018 * sf, 0.018 * sf), Vector3(0, 0, 0.14 * sf), Vector3.ZERO, _katana_gold_mat())
+
+func _add_box(parent: Node3D, size: Vector3, pos: Vector3, rot: Vector3, mat: StandardMaterial3D) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = size
+	mi.mesh = bm
+	mi.position = pos
+	mi.rotation = rot
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mi)
+	return mi
+
+func _add_cyl(parent: Node3D, radius: float, height: float, pos: Vector3, rot: Vector3, mat: StandardMaterial3D) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var cm := CylinderMesh.new()
+	cm.top_radius = radius
+	cm.bottom_radius = radius
+	cm.height = height
+	cm.radial_segments = 20
+	mi.mesh = cm
+	mi.position = pos
+	mi.rotation = rot
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mi)
+	return mi
+
+func _katana_blade_mat() -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = KATANA_BLADE_TINT
+	m.metallic = 0.85
+	m.roughness = 0.18
+	m.emission_enabled = true
+	m.emission = KATANA_BLADE_TINT
+	m.emission_energy_multiplier = 0.45
+	return m
+
+func _katana_edge_mat() -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.albedo_color = KATANA_EDGE_TINT
+	m.emission_enabled = true
+	m.emission = KATANA_EDGE_TINT
+	m.emission_energy_multiplier = 1.4
+	return m
+
+func _katana_hilt_mat() -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = KATANA_HILT_DARK
+	m.roughness = 0.62
+	return m
+
+func _katana_wrap_mat() -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = KATANA_WRAP_TINT
+	m.roughness = 0.55
+	return m
+
+func _katana_gold_mat() -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = KATANA_GOLD
+	m.metallic = 0.9
+	m.roughness = 0.28
+	m.emission_enabled = true
+	m.emission = KATANA_GOLD
+	m.emission_energy_multiplier = 0.25
+	return m
+
+# Scabbard (saya) parented to the player's body so it stays on the left hip
+# regardless of whether the katana is the active weapon. WeaponPivot sits on
+# the right hip, so the saya is offset to the player's left and tipped back
+# in the classic worn-katana angle.
+func _build_scabbard() -> void:
+	if _scabbard != null or player == null:
+		return
+	_scabbard = Node3D.new()
+	_scabbard.name = "Scabbard"
+	player.add_child(_scabbard)
+	# Player-local: -X = left, +Y = up, -Z = forward. The saya is mounted on
+	# the left hip and tilted forward + slightly horizontal like a worn
+	# katana hanging from the obi.
+	# Mouth (koiguchi) sits at the player's waist on the left hip. The saya
+	# runs almost horizontal from there, dipping slightly toward the ground
+	# as it extends behind the player.
+	_scabbard.position = Vector3(-0.42, 0.05, 0.10)
+	# Small X tilt = saya tip dips slightly toward the floor. No Y rotation
+	# is needed — body extends along local +Z, which in player-local space
+	# already points behind the player.
+	_scabbard.rotation = Vector3(deg_to_rad(18.0), 0.0, deg_to_rad(-10.0))
+
+	# Saya body now extends in +Z so the mouth (z≈0) stays at the waist and
+	# the tip is the part that swings out behind — fixes the previous
+	# upside-down orientation.
+	var body_mat := StandardMaterial3D.new()
+	body_mat.albedo_color = SCABBARD_TINT
+	body_mat.roughness = 0.32
+	body_mat.metallic = 0.1
+	_add_box(_scabbard, Vector3(0.085, 0.045, 1.62), Vector3(0, 0, 0.82), Vector3.ZERO, body_mat)
+	# Gold koiguchi (mouth) at the front/waist end.
+	_add_box(_scabbard, Vector3(0.094, 0.052, 0.06), Vector3(0, 0, 0.04), Vector3.ZERO, _katana_gold_mat())
+	# Gold kojiri (tip cap) at the far end.
+	_add_box(_scabbard, Vector3(0.094, 0.052, 0.06), Vector3(0, 0, 1.60), Vector3.ZERO, _katana_gold_mat())
+	# Gold sageo wrap band partway down.
+	_add_box(_scabbard, Vector3(0.095, 0.053, 0.04), Vector3(0, 0, 0.32), Vector3.ZERO, _katana_gold_mat())
+
+# ── Sheathe / unsheathe ──────────────────────────────────────────────────────
+
+func _sheathe() -> void:
+	if _sheathed:
+		return
+	_sheathed = true
+	_kill_sheathe_tween()
+	# TPV rig glides toward the saya, then hides — the visible saya does the
+	# rest of the storytelling. FPV rig has no sensible in-frustum holster pose
+	# so it just hides at the same time.
+	_sheathe_tween = create_tween().set_parallel(true)
+	_sheathe_tween.tween_property(rig_tpv, "position", SHEATHE_POS_TPV, SHEATHE_TWEEN_IN).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN_OUT)
+	_sheathe_tween.tween_property(rig_tpv, "rotation", SHEATHE_ROT_TPV, SHEATHE_TWEEN_IN).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN_OUT)
+	_sheathe_tween.tween_callback(func():
+		if is_instance_valid(rig_tpv):
+			rig_tpv.visible = false
+		if is_instance_valid(rig_fpv):
+			rig_fpv.visible = false
+	).set_delay(SHEATHE_TWEEN_IN * 0.9)
+
+func _unsheathe(immediate: bool = false) -> void:
+	if not _sheathed and not immediate:
+		return
+	_sheathed = false
+	_kill_sheathe_tween()
+	if rig_tpv:
+		rig_tpv.visible = true
+	if rig_fpv:
+		rig_fpv.visible = true
+	if immediate:
+		rig_tpv.rotation = REST_ROT_TPV
+		rig_tpv.position = REST_POS_TPV
+		rig_fpv.rotation = REST_ROT_FPV
+		rig_fpv.position = REST_POS_FPV
+		return
+	# Start from the saya pose so the draw reads as "pulled out of the
+	# scabbard," then tween back to ready stance.
+	rig_tpv.position = SHEATHE_POS_TPV
+	rig_tpv.rotation = SHEATHE_ROT_TPV
+	_sheathe_tween = create_tween().set_parallel(true)
+	_sheathe_tween.tween_property(rig_tpv, "position", REST_POS_TPV, SHEATHE_TWEEN_OUT).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	_sheathe_tween.tween_property(rig_tpv, "rotation", REST_ROT_TPV, SHEATHE_TWEEN_OUT).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+func _draw_quick() -> void:
+	# Fast draw-from-saya. Sets attack_cd = 0 explicitly (in case some prior
+	# state left it non-zero) so the player can chain a swing immediately.
+	# Resets idle so the sword doesn't sheathe itself again right away.
+	_sheathed = false
+	_idle_t = 0.0
+	_kill_sheathe_tween()
+	rig_tpv.visible = true
+	rig_fpv.visible = true
+	rig_fpv.rotation = REST_ROT_FPV
+	rig_fpv.position = REST_POS_FPV
+	# Start the TPV rig at the saya pose and tween it to ready, fast.
+	rig_tpv.position = SHEATHE_POS_TPV
+	rig_tpv.rotation = SHEATHE_ROT_TPV
+	_sheathe_tween = create_tween().set_parallel(true)
+	_sheathe_tween.tween_property(rig_tpv, "position", REST_POS_TPV, DRAW_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_sheathe_tween.tween_property(rig_tpv, "rotation", REST_ROT_TPV, DRAW_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+
+func _kill_sheathe_tween() -> void:
+	if _sheathe_tween and _sheathe_tween.is_valid():
+		_sheathe_tween.kill()
+	_sheathe_tween = null

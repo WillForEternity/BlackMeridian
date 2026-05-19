@@ -3,15 +3,16 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://gxxmryjki5xn"
-path="res://.godot/imported/alien_planet.exr-65e93b051962d8c0b2bc9d0adc8aeb51.ctex"
+path.bptc="res://.godot/imported/alien_planet.exr-65e93b051962d8c0b2bc9d0adc8aeb51.bptc.ctex"
 metadata={
+"imported_formats": ["s3tc_bptc"],
 "vram_texture": true
 }
 
 [deps]
 
 source_file="res://assets/hdri/alien_planet.exr"
-dest_files=["res://.godot/imported/alien_planet.exr-65e93b051962d8c0b2bc9d0adc8aeb51.ctex"]
+dest_files=["res://.godot/imported/alien_planet.exr-65e93b051962d8c0b2bc9d0adc8aeb51.bptc.ctex"]
 
 [params]
 
@@ -20,7 +21,7 @@ compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
 compress/rdo_quality_loss=0.0
-compress/hdr_compression=2
+compress/hdr_compression=1
 compress/normal_map=0
 compress/channel_pack=0
 mipmaps/generate=true
@@ -37,4 +38,4 @@ process/normal_map_invert_y=false
 process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
-detect_3d/compress_to=1
+detect_3d/compress_to=0

@@ -19,10 +19,10 @@ func _ready() -> void:
 	super()
 
 func cooldown() -> float:
-	return data.cooldown if data else 0.22
+	return data.cooldown if data else 0.165
 
 func guide_text() -> String:
-	return "PLASMA\n\nATTACK (LMB)\n  Semi-auto projectile, ~0.22s between shots. 2 dmg per hit.\n  Bullets are pooled and travel along the camera ray.\n\nSUPER (Q, when bar is full)\n  Overdrive for 6 seconds: every trigger pull fires a 3-round\n  spread (center + two shots at ~4 degree offset). Muzzle\n  tint shifts from pink to a hotter orange while active.\n\nQUIRK\n  Each projectile feeds super charge equal to its damage, so\n  the plasma gun ramps its own super faster than weapons\n  that hit less often.\n\n[G] toggles this guide."
+	return "PLASMA\n\nATTACK (LMB)\n  Semi-auto projectile, ~0.165s between shots. 2 dmg per hit.\n  Bullets are pooled and travel along the camera ray.\n\nSUPER (Q, when bar is full)\n  Overdrive for 6 seconds: every trigger pull fires a 3-round\n  spread (center + two shots at ~4 degree offset). Muzzle\n  tint shifts from pink to a hotter orange while active.\n\nQUIRK\n  Each projectile feeds super charge equal to its damage, so\n  the plasma gun ramps its own super faster than weapons\n  that hit less often.\n\n[G] toggles this guide."
 
 func equip() -> void:
 	rig_tpv.visible = true

@@ -31,3 +31,9 @@ func release(p: Node) -> void:
 	if p.get_parent():
 		p.get_parent().remove_child(p)
 	_free.append(p)
+
+func _exit_tree() -> void:
+	for p in _free:
+		if is_instance_valid(p):
+			p.free()
+	_free.clear()

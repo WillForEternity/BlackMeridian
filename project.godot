@@ -20,14 +20,6 @@ EventBus="*res://globals/event_bus.gd"
 Vfx="*res://globals/vfx.gd"
 ProjectilePool="*res://weapons/gun/projectile_pool.gd"
 
-[layer_names]
-
-3d_physics/layer_1="world"
-3d_physics/layer_2="player"
-3d_physics/layer_3="enemies"
-3d_physics/layer_4="projectiles"
-3d_physics/layer_5="destructible_projectiles"
-
 [input]
 
 move_forward={
@@ -115,6 +107,10 @@ weapon_guide={
 ]
 }
 
-[rendering]
+[layer_names]
 
-renderer/rendering_method="forward_plus"
+3d_physics/layer_1="world"
+3d_physics/layer_2="player"
+3d_physics/layer_3="enemies"
+3d_physics/layer_4="projectiles"
+3d_physics/layer_5="destructible_projectiles"

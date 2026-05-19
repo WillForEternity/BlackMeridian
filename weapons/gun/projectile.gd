@@ -1,7 +1,7 @@
 class_name Projectile
 extends Area3D
 
-@export var speed: float = 44.0
+@export var speed: float = 66.0
 @export var lifetime: float = 2.0
 @export var damage: int = 2
 
