@@ -428,8 +428,17 @@ func tick(delta: float) -> void:
 			if _trail_mat:
 				_trail_mat.emission = CRIT_TINT
 			_trail_tint = CRIT_TINT
-	_trail_t_left = maxf(_trail_t_left - delta, 0.0)
-	if not _trail_sampling and _trail_points.size() >= 4:
+	# Dash-crit lingers: while the player is still dashing AND this swing was
+	# a crit, keep the trail alive (no countdown, no decay) so the green slash
+	# trail hangs in the air for the full dash. Once the dash ends, normal
+	# fade behaviour resumes.
+	var dash_holding: bool = _swing_was_crit \
+		and player != null and "dash_time_left" in player and player.dash_time_left > 0.0
+	if dash_holding:
+		_trail_t_left = maxf(_trail_t_left, 0.18)
+	else:
+		_trail_t_left = maxf(_trail_t_left - delta, 0.0)
+	if not _trail_sampling and not dash_holding and _trail_points.size() >= 4:
 		# Frame-rate independent: drop one pair every TRAIL_DECAY_INTERVAL sec.
 		_trail_decay_accum += delta
 		while _trail_decay_accum >= TRAIL_DECAY_INTERVAL and _trail_points.size() >= 4:
@@ -568,8 +577,11 @@ func _combo_data(idx: int) -> Dictionary:
 			# negative) so it never carves through the player's torso.
 			return {
 				"tint": Color(1.0, 0.55, 0.75, 1.0),
-				"strike_start": 0.26,
-				"strike_end": 0.38,
+				# Strike now lands on KF3 (the cleave forward, 0.37 → 0.52)
+				# rather than the chamber pull-back that preceded it — the
+				# trail was previously tracing the wind-up, not the slash.
+				"strike_start": 0.37,
+				"strike_end": 0.50,
 				"trail_start": 0.24,
 				"trail_end": 0.52,
 				"keyframes": [

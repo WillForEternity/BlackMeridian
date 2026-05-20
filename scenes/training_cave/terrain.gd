@@ -13,6 +13,20 @@ const CELL: float = SIZE / float(GRID - 1)
 const CHUNKS_PER_SIDE: int = 8
 const CHUNK_CELLS: int = (GRID - 1) / CHUNKS_PER_SIDE   # 128 cells per chunk
 const CHUNK_VERTS: int = CHUNK_CELLS + 1                # 129 verts per chunk edge
+const CHUNK_SIZE_M: float = CHUNK_CELLS * CELL          # chunk extent in world meters
+# Chunks within this radius of the camera are kept resident; others are freed.
+# Pick a value safely beyond the far cull/fog distance so chunks pop in before
+# they're visible. Budget caps how many chunk meshes get built per frame.
+const CHUNK_STREAM_RADIUS: float = 384.0
+const CHUNK_SPAWN_BUDGET: int = 2
+const CHUNK_REBUILD_THRESHOLD: float = 16.0
+# Far-terrain "billboard floor": one low-poly mesh covering the full world,
+# sampled every FAR_CELL meters from the heightmap. Sits FAR_Y_OFFSET below
+# the streamed chunks so they hide it where they overlap, leaving only the
+# distant background visible. No collision, no streaming, ~one chunk's worth
+# of geometry total regardless of SIZE.
+const FAR_CELL: float = 8.0
+const FAR_Y_OFFSET: float = -0.5
 
 # Base noise = gentle rolling terrain everywhere.
 const BASE_FREQ: float = 0.003
@@ -109,6 +123,186 @@ const TREE_STREAM_RADIUS: float = 340.0
 const TREE_REBUILD_THRESHOLD: float = 15.0
 const TREE_TILE_SPAWN_BUDGET: int = 1
 
+# --- Stream ---
+# A winding stream cut into the heightmap before chunk build, with the water
+# ribbon tile-streamed around the camera (same architecture as grass/trees).
+# Carve uses a Gaussian falloff (real "inverse bell" cross-section) and tracks
+# the ORIGINAL terrain height at each centerline x, so the water surface rests
+# just below the natural ground level rather than at a fixed Y.
+const STREAM_ENABLED: bool = true
+const STREAM_WATER_BELOW_ORIGINAL: float = 1.4   # deeper water — surface this far below original terrain
+const STREAM_BED_BELOW_ORIGINAL: float = 2.2     # bed deeper than water surface so it doesn't read flat
+const STREAM_HALF_WIDTH: float = 3.4             # water surface fills the flat bed (just inside FLAT_HALF_WIDTH)
+const STREAM_FLAT_HALF_WIDTH: float = 3.6        # flat bed core fully covers water mesh + sub-cell misalignment
+const STREAM_BANK_HALF_WIDTH: float = 4.8        # outer carve → steep banks
+const STREAM_Z_AMP: float = 80.0
+const STREAM_Z_FREQ: float = 0.0028
+const SAND_HALF_WIDTH: float = 4.5               # outer edge of sandy ribbon (must be < STREAM_BANK_HALF_WIDTH, > STREAM_HALF_WIDTH)
+const SAND_Y_OFFSET: float = 0.06                # tiny lift above ground to avoid z-fight
+const GRASS_BANK_EXCLUSION: float = 5.2          # no grass within this radius of centerline (must exceed STREAM_BANK_HALF_WIDTH)
+const TREE_BANK_INFLUENCE: float = 30.0          # within this distance from centerline, trees get a placement boost
+const TREE_BANK_BOOST: float = 0.45              # max reduction to placement threshold at the bank
+const TREE_BANK_EXCLUSION: float = 5.4           # don't place trees inside the water/sand
+
+# --- Stream path tracing ---
+# The centerline is *traced* through the heightmap by gradient descent rather
+# than being a 1D sine wave: at each +x step, z drifts toward the local downhill
+# (∂h/∂z) with a small noise jitter for meander. Path is monotonic in x so we
+# can keep the existing z(x) lookup interface — every consumer (carve, water
+# tiles, sand ribbon, brook stones) reads `_centerline_z(wx)` exactly like
+# before. Slope along the path is baked into the water mesh's vertex color so
+# the surface scroll speed reflects gravity (fast on steeps, slow on flats).
+const STREAM_TRACE_MARGIN: int = 60              # grid cells of headroom from each edge
+const STREAM_TRACE_STEP_DZ_MAX: float = 0.18     # max |dz| per 1m of dx — keeps the path nearly straight
+const STREAM_TRACE_GRAD_GAIN: float = 1.2        # gentle bias toward lower terrain; no aggressive turning
+const STREAM_TRACE_JITTER: float = 0.0           # no noise meander — straight downhill, not waddling
+const STREAM_TRACE_PROBE: float = 6.0            # wide gradient sample so the path follows the broad slope, not local bumps
+const STREAM_SLOPE_REF: float = 0.08             # slope (rise/run) that maps to "1.0" flow speed
+
+# --- Lake ---
+# A real basin carved into the heightmap at the downstream end of the traced
+# centerline. The stream water meets the lake at its rim, and the lake has its
+# own still-water surface, sand ring, and a multi-texture floor.
+const LAKE_ENABLED: bool = true
+const LAKE_RADIUS: float = 36.0                  # water surface radius
+const LAKE_BANK_RADIUS: float = 44.0             # outer carve radius (graded shore)
+const LAKE_SAND_INNER: float = 36.0              # sand ring matches water edge
+const LAKE_SAND_OUTER: float = 43.0
+const LAKE_DEPTH: float = 3.4                    # carved bed below the water surface
+const LAKE_WATER_BELOW_ORIGINAL: float = 1.6     # surface this far below the centerline-endpoint terrain
+const LAKE_FLOOR_LIFT: float = 0.05              # tiny lift above the carved bed (no z-fight)
+const LAKE_RING_SEGMENTS: int = 64               # circumference subdivision for lake meshes
+const LAKE_RADIAL_RINGS: int = 6                 # radial subdivision (more = smoother shading)
+const LAKE_BUFFER: float = 2.0                   # stream water stops this far before lake center
+# Basins below this cell count get carved but skip mesh generation — guards
+# against thousands of micro-pits blowing past Godot's RID owner limit.
+const MIN_BASIN_CELLS: int = 40
+# Forced lake fallback: when the stream's natural endpoint isn't deep enough
+# to flood into a basin >= MIN_BASIN_CELLS, carve a smooth bowl this big.
+const FORCED_LAKE_RADIUS_CELLS: int = 14
+const FORCED_LAKE_DEPTH: float = 4.0
+
+# Water tile streaming
+const WATER_TILE_SIZE: float = 60.0
+const WATER_STREAM_RADIUS: float = 220.0
+const WATER_REBUILD_THRESHOLD: float = 15.0
+const WATER_TILE_SPAWN_BUDGET: int = 1
+const WATER_SEG_PER_METER: float = 0.5    # segments along x per meter (2m apart)
+
+# --- Stones ---
+# Two systems, both deterministic per-tile and streamed around the camera
+# identically to trees: placement is pre-calculated from (seed, tx, tz), only
+# nearby tiles instantiate a MultiMesh.
+# 1) LAND stones: large + medium, scattered across the map driven by a
+#    placement noise. Excluded from the streambed.
+# 2) BROOK stones: medium + small, marched along the stream centerline so they
+#    outline both banks. Stacking is allowed (probabilistic 2nd stone above).
+## Land stones are kept to a small fixed roster so each tile only emits a few
+## MultiMeshInstance3Ds. More variants = more draw calls + AABB cull tests per
+## frame, with no visual win at this density.
+const STONE_LARGE_PATHS := [
+	"res://assets/kenney/nature-kit/Models/GLB format/stone_largeA.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/stone_largeD.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/stone_largeE.glb",
+]
+const STONE_MEDIUM_PATHS := [
+	"res://assets/kenney/nature-kit/Models/GLB format/stone_tallA.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/stone_tallD.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/stone_tallI.glb",
+]
+## Brook stones use ONLY Kenney's `stone_small*` family — smooth, rounded gray
+## river-stones, all in the same low-poly toon style as the trees/terrain. We
+## intentionally exclude `rock_*` (jagged/earthy) and `*Flat*` / `*Top*` (path
+## slabs / caps) so the bank reads as a single coherent family of cobbles.
+const BROOK_MEDIUM_PATHS := [
+	"res://assets/kenney/nature-kit/Models/GLB format/stone_smallA.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/stone_smallC.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/stone_smallE.glb",
+]
+const BROOK_SMALL_PATHS := [
+	"res://assets/kenney/nature-kit/Models/GLB format/stone_smallG.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/stone_smallI.glb",
+]
+
+## Larger tiles → fewer MMIs total across the streaming disk (~4× fewer tiles
+## than before at the same radius).
+const STONE_TILE_SIZE: float = 100.0
+const STONE_STREAM_RADIUS: float = 240.0
+const STONE_REBUILD_THRESHOLD: float = 20.0
+const STONE_TILE_SPAWN_BUDGET: int = 1
+## Land stones are now individual DestructibleStone bodies — spacing widened so
+## the per-node cost stays modest across the streaming disk.
+const STONE_LARGE_SPACING: float = 70.0
+const STONE_MEDIUM_SPACING: float = 38.0
+const STONE_PLACEMENT_FREQ: float = 0.012
+const STONE_LARGE_THRESHOLD: float = 0.82
+const STONE_MEDIUM_THRESHOLD: float = 0.74
+const STONE_MIN_NORMAL_Y: float = 0.55
+const STONE_MIN_ELEV: float = -2.0
+const STONE_MAX_ELEV: float = 130.0
+const STONE_BANK_EXCLUSION: float = 12.0
+const STONE_LARGE_SCALE_BASE: float = 5.5
+const STONE_LARGE_SCALE_JITTER: float = 3.0
+const STONE_MEDIUM_SCALE_BASE: float = 3.2
+const STONE_MEDIUM_SCALE_JITTER: float = 1.6
+const STONE_SINK: float = 0.45
+
+# Brook stones march along the centerline, anchored to the sandy edge so they
+# read as "stones outlining the water."
+## Brook stones are now individual DestructibleStone bodies — much heavier
+## per-instance than MultiMesh, so density drops to roughly one stone every
+## ~2 m of bank instead of multiple per meter.
+const BROOK_TILE_SIZE: float = 100.0
+const BROOK_STREAM_RADIUS: float = 160.0
+const BROOK_REBUILD_THRESHOLD: float = 20.0
+const BROOK_TILE_SPAWN_BUDGET: int = 1
+const BROOK_STEP: float = 1.8               # one base stone every ~1.8 m along the centerline
+const BROOK_BANK_OFFSET: float = 3.0        # center of the bank band (water edge ~2.2)
+const BROOK_LATERAL_JITTER: float = 1.4
+const BROOK_SKIP_CHANCE: float = 0.10
+const BROOK_STACK_CHANCE: float = 0.25      # stacks are real bodies too, kept rare
+const BROOK_MED_SCALE: float = 2.4
+const BROOK_SMALL_SCALE: float = 1.6
+const BROOK_MED_CHANCE: float = 0.7
+const BROOK_SINK: float = 0.20
+
+# --- Wildflowers ---
+# Tile-streamed MultiMesh fields of Kenney flower GLBs. Per-tile RNG picks a
+# "patch mode" (mono species / mono color family / mixed) so the map reads as a
+# mosaic of wildflower carpets, not one uniform sprinkle.
+const FLOWER_PATHS := [
+	"res://assets/kenney/nature-kit/Models/GLB format/flower_redA.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/flower_redB.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/flower_redC.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/flower_yellowA.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/flower_yellowB.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/flower_yellowC.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/flower_purpleA.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/flower_purpleB.glb",
+	"res://assets/kenney/nature-kit/Models/GLB format/flower_purpleC.glb",
+]
+const FLOWER_FAMILY_SIZE: int = 3            # A/B/C per color
+const FLOWER_TILE_SIZE: float = 40.0
+const FLOWER_STREAM_RADIUS: float = 220.0
+const FLOWER_REBUILD_THRESHOLD: float = 12.0
+const FLOWER_TILE_SPAWN_BUDGET: int = 1
+const FLOWER_DENSITY_SPACING: float = 1.4
+const FLOWER_PATCH_FREQ: float = 0.018
+const FLOWER_PATCH_THRESHOLD: float = 0.60
+const FLOWER_BANK_INFLUENCE: float = 28.0
+const FLOWER_BANK_BOOST: float = 0.22
+const FLOWER_BANK_EXCLUSION: float = 8.5
+const FLOWER_MIN_NORMAL_Y: float = 0.85
+const FLOWER_MIN_ELEV: float = -1.0
+const FLOWER_MAX_ELEV: float = 50.0
+const FLOWER_SCALE_BASE: float = 1.55
+const FLOWER_SCALE_JITTER: float = 0.8
+const FLOWER_SINK: float = 0.05
+# Per-tile density variation: each tile rolls a density multiplier in this range,
+# applied as an offset to FLOWER_PATCH_THRESHOLD. Negative = denser carpet,
+# positive = sparser scattering.
+const FLOWER_DENSITY_VARIATION: float = 0.18
+
 @export var noise_seed: int = 1337
 @export var flatten_origin: bool = true
 
@@ -120,10 +314,16 @@ var _grass_material_patch_short: ShaderMaterial
 var _grass_material_patch_tall: ShaderMaterial
 var _grass_material_patch_core: ShaderMaterial
 var _height_tex: ImageTexture
+var _centerline_z_tex: ImageTexture
 var _grass_patch_mmis: Array = []   # [short MMI, tall MMI]
 # Each tree variant is Array of {"mesh": Mesh, "xform": Transform3D} — parts of a multi-mesh GLB.
 var _tree_variants: Array = []
 var _heights: PackedFloat32Array
+# Terrain chunk streaming: Vector2i(cx,cz) -> MeshInstance3D.
+var _chunk_tiles: Dictionary = {}
+var _chunk_spawn_queue: Array = []
+var _last_chunk_stream_pos: Vector3 = Vector3.INF
+var _ground_material: Material
 # Streaming state: tile_coord (Vector2i) -> {"mmis": Array}
 var _grass_tiles: Dictionary = {}
 # FIFO of pending tile builds: [{"key": Vector2i, "tx": int, "tz": int}]
@@ -134,6 +334,62 @@ var _tree_tiles: Dictionary = {}
 var _tree_spawn_queue: Array = []
 var _last_tree_stream_pos: Vector3 = Vector3.INF
 var _tree_placement_noise: FastNoiseLite
+var _stream_noise: FastNoiseLite
+var _centerline_heights: PackedFloat32Array  # original terrain h at centerline per grid x column
+var _centerline_z_samples: PackedFloat32Array  # traced z per grid x column (INF outside [gx_start, gx_end])
+var _centerline_slope: PackedFloat32Array      # |dh/ds| along the path per gx column
+var _stream_gx_start: int = 0
+var _stream_gx_end: int = -1
+var _stream_x_start: float = 0.0
+var _stream_x_end: float = 0.0
+var _stream_x_water_end: float = 0.0           # where the stream ribbon stops (lake rim)
+var _stream_z_min: float = 0.0
+var _stream_z_max: float = 0.0
+# Basins generated by `_flood_basin` (priority-flood). Currently we only fire
+# one flood at the end of the monotonic stream tracer so the bottom-of-stream
+# lake takes its natural shape, but the machinery handles any number.
+var _basins: Array = []
+# Union of every basin's cells_set, for O(1) keepout lookups.
+var _all_basin_cells: Dictionary = {}
+var _lake_water_material: ShaderMaterial
+var _lake_floor_material: ShaderMaterial
+var _lake_sand_material: StandardMaterial3D
+var _water_normal_tex: NoiseTexture2D
+var _water_foam_tex: NoiseTexture2D
+var _water_material: ShaderMaterial
+var _sand_material: StandardMaterial3D
+var _water_tiles: Dictionary = {}
+var _water_spawn_queue: Array = []
+var _last_water_stream_pos: Vector3 = Vector3.INF
+# Stones: same per-variant structure as trees (Array of {"mesh","xform"} parts).
+var _stone_large_variants: Array = []
+var _stone_medium_variants: Array = []
+var _brook_medium_variants: Array = []
+var _brook_small_variants: Array = []
+var _stone_placement_noise: FastNoiseLite
+var _stone_tiles: Dictionary = {}
+var _stone_spawn_queue: Array = []
+var _last_stone_stream_pos: Vector3 = Vector3.INF
+var _brook_tiles: Dictionary = {}
+var _brook_spawn_queue: Array = []
+var _last_brook_stream_pos: Vector3 = Vector3.INF
+# Wildflowers — same {parts, aabb} structure as trees/stones.
+var _flower_variants: Array = []
+var _flower_tiles: Dictionary = {}
+var _flower_spawn_queue: Array = []
+var _last_flower_stream_pos: Vector3 = Vector3.INF
+var _flower_patch_noise: FastNoiseLite
+# Grass occluders: stumps, fallen logs, placed wood. Rasterized into a small
+# patch-centered mask texture each frame so the patch-grass vertex shader can
+# discard blades inside them. Keys are instance IDs so callers can remove
+# their entries without juggling indices.
+const OCC_MASK_SIZE: int = 256
+const OCC_MASK_EXTENT: float = 220.0       # matches PATCH_SIZE — covers full patch
+var _occluders: Dictionary = {}            # int id -> {pos: Vector2, radius: float}
+var _occ_dirty: bool = true
+var _occ_mask_img: Image
+var _occ_mask_tex: ImageTexture
+var _occ_last_center: Vector2 = Vector2(INF, INF)
 
 func _ready() -> void:
 	_heights = _generate_heights()
@@ -145,12 +401,22 @@ func _ready() -> void:
 	for i in _heights.size():
 		if _heights[i] < 0.0:
 			_heights[i] *= 0.5
-	_build_chunks(_heights)
+	_init_stream_noise()
+	_carve_stream(_heights)
+	_ground_material = _build_ground_material()
+	_build_far_terrain()
 	_attach_collision(_heights)
 	_build_height_texture()
 	_init_foliage_resources()
 	_build_grass_patch()
 	_init_tree_placement_noise()
+	_init_stone_resources()
+	_init_flower_resources()
+	_init_occluder_mask()
+	if STREAM_ENABLED:
+		_water_material = _build_water_material()
+		_sand_material = _build_sand_material()
+		_build_lake()
 
 func _process(_dt: float) -> void:
 	var cam: Camera3D = get_viewport().get_camera_3d()
@@ -197,16 +463,126 @@ func _process(_dt: float) -> void:
 				Vector3(pos.x - phalf, -200.0, pos.z - phalf),
 				Vector3(psize, 400.0, psize)
 			)
+		_update_occluder_mask(center)
 	# Tile streaming: only re-survey when the camera has moved enough, and
 	# never build more than GRASS_TILE_SPAWN_BUDGET tiles per frame.
+	if _last_chunk_stream_pos.x == INF or pos.distance_to(_last_chunk_stream_pos) >= CHUNK_REBUILD_THRESHOLD:
+		_last_chunk_stream_pos = pos
+		_stream_chunks(pos)
 	if _last_stream_pos.x == INF or pos.distance_to(_last_stream_pos) >= GRASS_REBUILD_THRESHOLD:
 		_last_stream_pos = pos
 		_stream_grass(pos)
 	if _last_tree_stream_pos.x == INF or pos.distance_to(_last_tree_stream_pos) >= TREE_REBUILD_THRESHOLD:
 		_last_tree_stream_pos = pos
 		_stream_trees(pos)
+	if STREAM_ENABLED and (_last_water_stream_pos.x == INF or pos.distance_to(_last_water_stream_pos) >= WATER_REBUILD_THRESHOLD):
+		_last_water_stream_pos = pos
+		_stream_water(pos)
+	if _last_stone_stream_pos.x == INF or pos.distance_to(_last_stone_stream_pos) >= STONE_REBUILD_THRESHOLD:
+		_last_stone_stream_pos = pos
+		_stream_stones(pos)
+	if STREAM_ENABLED and (_last_brook_stream_pos.x == INF or pos.distance_to(_last_brook_stream_pos) >= BROOK_REBUILD_THRESHOLD):
+		_last_brook_stream_pos = pos
+		_stream_brook(pos)
+	if _last_flower_stream_pos.x == INF or pos.distance_to(_last_flower_stream_pos) >= FLOWER_REBUILD_THRESHOLD:
+		_last_flower_stream_pos = pos
+		_stream_flowers(pos)
+	_flush_chunk_queue()
 	_flush_tile_queue()
 	_flush_tree_queue()
+	_flush_water_queue()
+	_flush_stone_queue()
+	_flush_brook_queue()
+	_flush_flower_queue()
+
+func _build_far_terrain() -> void:
+	var verts_side: int = int(SIZE / FAR_CELL) + 1
+	var n_verts: int = verts_side * verts_side
+	var verts := PackedVector3Array(); verts.resize(n_verts)
+	var normals := PackedVector3Array(); normals.resize(n_verts)
+	var uvs := PackedVector2Array(); uvs.resize(n_verts)
+	var indices := PackedInt32Array()
+	var half: float = SIZE * 0.5
+	for z in verts_side:
+		for x in verts_side:
+			var wx: float = float(x) * FAR_CELL - half
+			var wz: float = float(z) * FAR_CELL - half
+			var gx: int = clampi(int(round((wx + half) / CELL)), 0, GRID - 1)
+			var gz: int = clampi(int(round((wz + half) / CELL)), 0, GRID - 1)
+			var i: int = z * verts_side + x
+			# Min-pool over the FAR_CELL footprint so narrow features like the
+			# carved river trench pull the far mesh down with them — otherwise
+			# the 8m spacing skips over the ~5m trench and the far mesh hovers
+			# above the water (no collision, looks like green lumps in the river).
+			var radius_cells: int = int(ceil((FAR_CELL * 0.5) / CELL))
+			var h_min: float = _heights[gz * GRID + gx]
+			for dz in range(-radius_cells, radius_cells + 1):
+				var sz: int = clampi(gz + dz, 0, GRID - 1)
+				for dx in range(-radius_cells, radius_cells + 1):
+					var sx: int = clampi(gx + dx, 0, GRID - 1)
+					var hs: float = _heights[sz * GRID + sx]
+					if hs < h_min:
+						h_min = hs
+			verts[i] = Vector3(wx, h_min + FAR_Y_OFFSET, wz)
+			uvs[i] = Vector2(wx, wz) / SIZE
+			normals[i] = _heightmap_normal(_heights, gx, gz)
+	for z in verts_side - 1:
+		for x in verts_side - 1:
+			var tl: int = z * verts_side + x
+			var tr: int = tl + 1
+			var bl: int = tl + verts_side
+			var br: int = bl + 1
+			indices.append(tl); indices.append(tr); indices.append(bl)
+			indices.append(tr); indices.append(br); indices.append(bl)
+	var arrays := []; arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var arr := ArrayMesh.new()
+	arr.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	var mi := MeshInstance3D.new()
+	mi.mesh = arr
+	mi.material_override = _ground_material
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(mi)
+
+# World position at the stream's source — the high-ground cell where the
+# monotonic tracer begins. Returns Vector3.INF if the stream hasn't been
+# traced (so callers can fall back to the scene's default spawn).
+func get_source_spawn() -> Vector3:
+	if _centerline_z_samples.is_empty() or _stream_gx_end < _stream_gx_start:
+		return Vector3.INF
+	var half: float = SIZE * 0.5
+	var wx: float = float(_stream_gx_start) * CELL - half
+	var wz: float = _centerline_z_samples[_stream_gx_start]
+	var y: float = _sample_height(_heights, wx, wz) + 2.0
+	return Vector3(wx, y, wz)
+
+# Carve a smooth circular bowl into the heightmap centered on (cx, cz). The
+# rim height is taken from the highest point on the bowl's perimeter, and the
+# bowl floor sits FORCED_LAKE_DEPTH below the rim. Existing terrain that's
+# already lower than the bowl profile is left alone (min, never raise).
+func _carve_lake_bowl(heights: PackedFloat32Array, cx: int, cz: int) -> void:
+	var r: int = FORCED_LAKE_RADIUS_CELLS
+	var rim_h: float = -INF
+	for k in 32:
+		var a: float = float(k) / 32.0 * TAU
+		var px: int = clampi(cx + int(round(cos(a) * float(r))), 0, GRID - 1)
+		var pz: int = clampi(cz + int(round(sin(a) * float(r))), 0, GRID - 1)
+		rim_h = maxf(rim_h, heights[pz * GRID + px])
+	var floor_h: float = rim_h - FORCED_LAKE_DEPTH
+	for dz in range(-r, r + 1):
+		for dx in range(-r, r + 1):
+			var d2: int = dx * dx + dz * dz
+			if d2 > r * r:
+				continue
+			var gx: int = clampi(cx + dx, 0, GRID - 1)
+			var gz: int = clampi(cz + dz, 0, GRID - 1)
+			var t: float = sqrt(float(d2)) / float(r)
+			var target: float = lerpf(floor_h, rim_h - 0.5, t)
+			var idx: int = gz * GRID + gx
+			heights[idx] = minf(heights[idx], target)
 
 func _generate_heights() -> PackedFloat32Array:
 	var base := FastNoiseLite.new()
@@ -265,19 +641,64 @@ func _generate_heights() -> PackedFloat32Array:
 			heights[z * GRID + x] = b * BASE_AMP + mask * r * RIDGE_AMP + d * DETAIL_AMP
 	return heights
 
-# Build CHUNKS_PER_SIDE × CHUNKS_PER_SIDE MeshInstance3D children. Each chunk
-# covers CHUNK_CELLS × CHUNK_CELLS cells of the global heightmap and shares
-# its edge vertices with adjacent chunks (so no seam gaps). Per-vertex
-# normals are computed analytically from the GLOBAL heights, which means
-# chunk boundaries get matching normals — no visible seam shading.
-func _build_chunks(heights: PackedFloat32Array) -> void:
-	var mat := _build_ground_material()
-	for cz in CHUNKS_PER_SIDE:
-		for cx in CHUNKS_PER_SIDE:
-			var mi := MeshInstance3D.new()
-			mi.mesh = _build_chunk_mesh(heights, cx, cz)
-			mi.material_override = mat
-			add_child(mi)
+# Chunks are streamed lazily: only those within CHUNK_STREAM_RADIUS of the
+# camera are resident. This keeps RID/vertex counts proportional to view
+# distance, not world area, so SIZE can grow without exhausting RIDs.
+# Per-vertex normals are still sampled from the global heightmap so chunk
+# boundaries get matching normals (no visible seam shading).
+func _stream_chunks(pos: Vector3) -> void:
+	var half: float = SIZE * 0.5
+	var center_cx: int = int(floor((pos.x + half) / CHUNK_SIZE_M))
+	var center_cz: int = int(floor((pos.z + half) / CHUNK_SIZE_M))
+	var chunk_radius: int = int(ceil(CHUNK_STREAM_RADIUS / CHUNK_SIZE_M)) + 1
+	var radius_sq: float = CHUNK_STREAM_RADIUS * CHUNK_STREAM_RADIUS
+
+	var needed: Dictionary = {}
+	for dz in range(-chunk_radius, chunk_radius + 1):
+		for dx in range(-chunk_radius, chunk_radius + 1):
+			var cx: int = center_cx + dx
+			var cz: int = center_cz + dz
+			if cx < 0 or cz < 0 or cx >= CHUNKS_PER_SIDE or cz >= CHUNKS_PER_SIDE:
+				continue
+			var wcx: float = (float(cx) + 0.5) * CHUNK_SIZE_M - half
+			var wcz: float = (float(cz) + 0.5) * CHUNK_SIZE_M - half
+			var ddx: float = wcx - pos.x
+			var ddz: float = wcz - pos.z
+			if ddx * ddx + ddz * ddz > radius_sq:
+				continue
+			var key := Vector2i(cx, cz)
+			needed[key] = true
+			if not _chunk_tiles.has(key):
+				_chunk_spawn_queue.append({"key": key, "cx": cx, "cz": cz})
+
+	var to_remove: Array = []
+	for key in _chunk_tiles.keys():
+		if not needed.has(key):
+			to_remove.append(key)
+	for key in to_remove:
+		var mi: MeshInstance3D = _chunk_tiles[key]
+		if is_instance_valid(mi):
+			mi.queue_free()
+		_chunk_tiles.erase(key)
+
+	var pruned: Array = []
+	for entry in _chunk_spawn_queue:
+		if needed.has(entry.key) and not _chunk_tiles.has(entry.key):
+			pruned.append(entry)
+	_chunk_spawn_queue = pruned
+
+func _flush_chunk_queue() -> void:
+	var budget: int = CHUNK_SPAWN_BUDGET
+	while budget > 0 and not _chunk_spawn_queue.is_empty():
+		var entry: Dictionary = _chunk_spawn_queue.pop_front()
+		if _chunk_tiles.has(entry.key):
+			continue
+		var mi := MeshInstance3D.new()
+		mi.mesh = _build_chunk_mesh(_heights, entry.cx, entry.cz)
+		mi.material_override = _ground_material
+		add_child(mi)
+		_chunk_tiles[entry.key] = mi
+		budget -= 1
 
 func _build_chunk_mesh(heights: PackedFloat32Array, cx: int, cz: int) -> ArrayMesh:
 	var n_verts: int = CHUNK_VERTS * CHUNK_VERTS
@@ -368,6 +789,15 @@ func _build_height_texture() -> void:
 		GRID, GRID, false, Image.FORMAT_RF, _heights.to_byte_array()
 	)
 	_height_tex = ImageTexture.create_from_image(img)
+	# 1-D centerline z(x) lookup: lets the patch-grass vertex shader discard
+	# blades that fall inside the river/sand band.
+	var cz_data := PackedFloat32Array()
+	cz_data.resize(GRID)
+	for gx in GRID:
+		var wx: float = float(gx) * CELL - SIZE * 0.5
+		cz_data[gx] = _centerline_z(wx) if STREAM_ENABLED else 1.0e9
+	var cz_img := Image.create_from_data(GRID, 1, false, Image.FORMAT_RF, cz_data.to_byte_array())
+	_centerline_z_tex = ImageTexture.create_from_image(cz_img)
 
 func _build_grass_patch() -> void:
 	# Two stacked grids in LOCAL space. The patch node follows the camera; the
@@ -441,6 +871,1048 @@ func _init_tree_placement_noise() -> void:
 	_tree_placement_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
 	_tree_placement_noise.seed = noise_seed + 91
 	_tree_placement_noise.frequency = TREE_PLACEMENT_FREQ
+
+# --- Stream -------------------------------------------------------------------
+
+func _init_stream_noise() -> void:
+	_stream_noise = FastNoiseLite.new()
+	_stream_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_stream_noise.seed = noise_seed + 67
+	_stream_noise.frequency = STREAM_Z_FREQ
+	_stream_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_stream_noise.fractal_octaves = 2
+
+# Sentinel for "no stream at this column" — far enough that bank-distance checks
+# (`absf(wz - cz) < r`) always fail, so the rest of the world ignores it.
+const _NO_STREAM_Z: float = 1.0e9
+
+# z(x) lookup with linear interpolation across grid columns. Outside the traced
+# range, returns a sentinel so every consumer (carve, water builder, brook,
+# grass/tree exclusion) skips that column without special-casing.
+func _centerline_z(wx: float) -> float:
+	if _stream_gx_end < _stream_gx_start:
+		return _NO_STREAM_Z
+	var half: float = SIZE * 0.5
+	var fx: float = (wx + half) / CELL
+	if fx < float(_stream_gx_start) or fx > float(_stream_gx_end):
+		return _NO_STREAM_Z
+	var x0: int = clampi(int(fx), _stream_gx_start, _stream_gx_end - 1)
+	var t: float = clampf(fx - float(x0), 0.0, 1.0)
+	return lerpf(_centerline_z_samples[x0], _centerline_z_samples[x0 + 1], t)
+
+# True when a world point sits inside ANY simulated basin. Foliage / stones
+# placed there would float on the lake surface, so suppress them.
+func _in_lake_keepout(wx: float, wz: float, extra: float = 0.0) -> bool:
+	if _all_basin_cells.is_empty():
+		return false
+	var half: float = SIZE * 0.5
+	var fx: float = (wx + half) / CELL
+	var fz: float = (wz + half) / CELL
+	if fx < 0.0 or fx >= float(GRID) or fz < 0.0 or fz >= float(GRID):
+		return false
+	var gx: int = int(fx)
+	var gz: int = int(fz)
+	if _all_basin_cells.has(gz * GRID + gx):
+		return true
+	var r: int = maxi(0, int(ceil(extra)))
+	if r == 0:
+		return false
+	for dz in range(-r, r + 1):
+		for dx in range(-r, r + 1):
+			if dx * dx + dz * dz > r * r:
+				continue
+			var ngx: int = gx + dx
+			var ngz: int = gz + dz
+			if ngx < 0 or ngx >= GRID or ngz < 0 or ngz >= GRID:
+				continue
+			if _all_basin_cells.has(ngz * GRID + ngx):
+				return true
+	return false
+
+# Average rise/run along the stream tangent at this wx. Used to scale the water
+# shader's scroll speed so steep stretches read as rapids and flats as glassy.
+func _centerline_slope_at(wx: float) -> float:
+	if _stream_gx_end < _stream_gx_start:
+		return 0.0
+	var half: float = SIZE * 0.5
+	var fx: float = (wx + half) / CELL
+	if fx < float(_stream_gx_start) or fx > float(_stream_gx_end):
+		return 0.0
+	var x0: int = clampi(int(fx), _stream_gx_start, _stream_gx_end - 1)
+	var t: float = clampf(fx - float(x0), 0.0, 1.0)
+	return lerpf(_centerline_slope[x0], _centerline_slope[x0 + 1], t)
+
+# Binary min-heap used by the priority-flood basin filler. GDScript has no
+# built-in priority queue, so we keep a tiny one inline.
+class _MinHeap:
+	var data: Array = []   # entries: [priority: float, value]
+	func push(v, p: float) -> void:
+		data.append([p, v])
+		var i: int = data.size() - 1
+		while i > 0:
+			var par: int = (i - 1) >> 1
+			if data[par][0] > data[i][0]:
+				var tmp = data[i]; data[i] = data[par]; data[par] = tmp
+				i = par
+			else:
+				break
+	func pop():
+		var top = data[0]
+		var n: int = data.size()
+		if n == 1:
+			data.clear()
+		else:
+			data[0] = data[n - 1]
+			data.resize(n - 1)
+			n -= 1
+			var i: int = 0
+			while true:
+				var l: int = 2 * i + 1
+				var r: int = 2 * i + 2
+				var s: int = i
+				if l < n and data[l][0] < data[s][0]: s = l
+				if r < n and data[r][0] < data[s][0]: s = r
+				if s == i: break
+				var tmp = data[i]; data[i] = data[s]; data[s] = tmp
+				i = s
+		return top[1]
+	func is_empty() -> bool:
+		return data.is_empty()
+
+const _FLOW_NEIGHBORS: Array = [
+	Vector2i(-1, -1), Vector2i(0, -1), Vector2i(1, -1),
+	Vector2i(-1,  0),                  Vector2i(1,  0),
+	Vector2i(-1,  1), Vector2i(0,  1), Vector2i(1,  1),
+]
+
+# Monotonic +x gradient-descent tracer. The centerline is a single-valued
+# function of x: at every grid column we nudge z by -∂h/∂z (clamped) plus a
+# small noise jitter. Result is a smooth winding stream from one map edge to
+# the other. After the trace, fire one priority-flood from the endpoint cell
+# so the bottom-of-stream lake takes whatever natural polygon shape the
+# heightmap actually has.
+func _trace_stream_path(heights: PackedFloat32Array) -> void:
+	_centerline_z_samples = PackedFloat32Array()
+	_centerline_z_samples.resize(GRID)
+	_centerline_heights = PackedFloat32Array()
+	_centerline_heights.resize(GRID)
+	_centerline_slope = PackedFloat32Array()
+	_centerline_slope.resize(GRID)
+	for i in GRID:
+		_centerline_z_samples[i] = _NO_STREAM_Z
+		_centerline_heights[i] = 0.0
+		_centerline_slope[i] = 0.0
+	_basins = []
+	_all_basin_cells = {}
+
+	var half: float = SIZE * 0.5
+	_stream_gx_start = STREAM_TRACE_MARGIN
+	_stream_gx_end = GRID - 1 - STREAM_TRACE_MARGIN
+
+	# Source z: scan the upstream-edge column for the locally-highest band —
+	# gives the stream a "from the high ground" feel.
+	var best_z: float = 0.0
+	var best_h: float = -INF
+	var scan_x: float = float(_stream_gx_start) * CELL - half
+	var z_lo: float = -half + 40.0
+	var z_hi: float = half - 40.0
+	var samples: int = 48
+	for i in samples + 1:
+		var zt: float = lerpf(z_lo, z_hi, float(i) / float(samples))
+		var h: float = _sample_height(heights, scan_x, zt)
+		if h > best_h:
+			best_h = h
+			best_z = zt
+
+	var z: float = best_z
+	for gx in range(_stream_gx_start, _stream_gx_end + 1):
+		var wx: float = float(gx) * CELL - half
+		var h_plus: float = _sample_height(heights, wx, z + STREAM_TRACE_PROBE)
+		var h_minus: float = _sample_height(heights, wx, z - STREAM_TRACE_PROBE)
+		var dh_dz: float = (h_plus - h_minus) / (2.0 * STREAM_TRACE_PROBE)
+		var jitter: float = _stream_noise.get_noise_1d(wx) * STREAM_TRACE_JITTER
+		var dz: float = clampf(-dh_dz * STREAM_TRACE_GRAD_GAIN, -STREAM_TRACE_STEP_DZ_MAX, STREAM_TRACE_STEP_DZ_MAX) * CELL + jitter
+		z = clampf(z + dz, -half + 30.0, half - 30.0)
+		_centerline_z_samples[gx] = z
+		_centerline_heights[gx] = _sample_height(heights, wx, z)
+
+	# Heavy smoothing on the z path so consecutive segments agree on a
+	# direction. Without this the per-vertex tangent flips bank-to-bank and
+	# the surface flow looks like it's slooshing sideways instead of running
+	# downhill.
+	for _pass in 24:
+		var prev_z: float = _centerline_z_samples[_stream_gx_start]
+		for gx in range(_stream_gx_start + 1, _stream_gx_end):
+			var z_l: float = prev_z
+			var z_c: float = _centerline_z_samples[gx]
+			var z_r: float = _centerline_z_samples[gx + 1]
+			prev_z = z_c
+			_centerline_z_samples[gx] = 0.25 * z_l + 0.5 * z_c + 0.25 * z_r
+
+	# Resample heights along the smoothed path.
+	for gx in range(_stream_gx_start, _stream_gx_end + 1):
+		var wx_s: float = float(gx) * CELL - half
+		_centerline_heights[gx] = _sample_height(heights, wx_s, _centerline_z_samples[gx])
+
+	# Heavy low-pass on the height profile so the water surface and bed don't
+	# inherit terrain bumps along the path. A gentle running-min nudge keeps
+	# the profile from re-rising sharply (so flooding still flows downstream),
+	# but isn't aggressive enough to leave the bed far below surrounding ground.
+	for _hpass in 8:
+		var prev_h: float = _centerline_heights[_stream_gx_start]
+		for gx in range(_stream_gx_start + 1, _stream_gx_end):
+			var h_l: float = prev_h
+			var h_c: float = _centerline_heights[gx]
+			var h_r: float = _centerline_heights[gx + 1]
+			prev_h = h_c
+			_centerline_heights[gx] = 0.25 * h_l + 0.5 * h_c + 0.25 * h_r
+	# Gentle monotonic bias: each column can't rise more than 0.02m above the
+	# previous one. Lets the profile mostly follow terrain while preventing
+	# upstream-to-downstream "uphill" segments.
+	for gx in range(_stream_gx_start + 1, _stream_gx_end + 1):
+		_centerline_heights[gx] = minf(_centerline_heights[gx], _centerline_heights[gx - 1] + 0.02)
+
+	# z bounds for the tile-streamer's strip reject.
+	_stream_z_min = INF
+	_stream_z_max = -INF
+	for gx in range(_stream_gx_start, _stream_gx_end + 1):
+		var zs: float = _centerline_z_samples[gx]
+		if zs < _stream_z_min: _stream_z_min = zs
+		if zs > _stream_z_max: _stream_z_max = zs
+	_stream_x_start = float(_stream_gx_start) * CELL - half
+	_stream_x_end = float(_stream_gx_end) * CELL - half
+
+	# Per-column along-path slope (drives the running-water shader's flow factor).
+	for gx in range(_stream_gx_start, _stream_gx_end + 1):
+		var gx_prev: int = maxi(gx - 1, _stream_gx_start)
+		var gx_next: int = mini(gx + 1, _stream_gx_end)
+		var dh: float = _centerline_heights[gx_prev] - _centerline_heights[gx_next]
+		var dx_v: float = float(gx_next - gx_prev) * CELL
+		var dz_v: float = _centerline_z_samples[gx_next] - _centerline_z_samples[gx_prev]
+		var ds: float = maxf(0.001, sqrt(dx_v * dx_v + dz_v * dz_v))
+		_centerline_slope[gx] = maxf(0.0, dh / ds)
+
+	# Endpoint lake: priority-flood from the cell directly under the path's
+	# downstream end. Whatever depression the terrain has there becomes the
+	# lake — natural polygon, no hardcoded radius.
+	var end_wx: float = float(_stream_gx_end) * CELL - half
+	var end_wz: float = _centerline_z_samples[_stream_gx_end]
+	var end_gx: int = clampi(int((end_wx + half) / CELL), 0, GRID - 1)
+	var end_gz: int = clampi(int((end_wz + half) / CELL), 0, GRID - 1)
+	var endpoint := Vector2i(end_gx, end_gz)
+	var flood_visited: Dictionary = {}
+	var basin: Dictionary = _flood_basin(heights, endpoint, flood_visited)
+	# Guarantee a lake: if the natural endpoint depression is missing or too
+	# small, carve a bowl in-place and re-flood. The bowl is sized so the
+	# resulting basin is comfortably above MIN_BASIN_CELLS.
+	if basin.is_empty() or (basin.cells as Array).size() < MIN_BASIN_CELLS:
+		_carve_lake_bowl(heights, end_gx, end_gz)
+		flood_visited = {}
+		basin = _flood_basin(heights, endpoint, flood_visited)
+	if not basin.is_empty() and (basin.cells as Array).size() >= MIN_BASIN_CELLS:
+		_basins.append(basin)
+		# Extend stream-z-bounds to include basin so the water-tile streamer
+		# considers tiles overlapping the lake when meshing the bank ribbon.
+		var lo: Vector2 = basin.aabb_lo
+		var hi: Vector2 = basin.aabb_hi
+		_stream_z_min = minf(_stream_z_min, lo.y)
+		_stream_z_max = maxf(_stream_z_max, hi.y)
+		for cidx in (basin.cells_set as Dictionary):
+			_all_basin_cells[cidx] = true
+
+	# Keep one stream-water-end value for older code paths; the stream ribbon
+	# stops a little before the basin center (replaced by the lake mesh).
+	if _basins.is_empty():
+		_stream_x_water_end = _stream_x_end + CELL
+	else:
+		var bc: Vector2 = (_basins[0] as Dictionary).center
+		_stream_x_water_end = bc.x - LAKE_BUFFER
+
+# Write a visited cell into the centerline sample arrays (keyed by gx column).
+# Non-monotonic paths simply overwrite, which is fine — those columns end up
+# inside basins anyway, where the basin mesh covers everything.
+func _write_path_cell(c: Vector2i, heights: PackedFloat32Array) -> void:
+	var half: float = SIZE * 0.5
+	_centerline_z_samples[c.x] = float(c.y) * CELL - half
+	_centerline_heights[c.x] = heights[c.y * GRID + c.x]
+
+# Priority-flood a depression starting from a pit cell. Pop boundary cells in
+# order of terrain height; the first one with a strictly-lower neighbor
+# outside the growing basin IS the spill saddle (water level = its terrain).
+# Everything else gets absorbed into the basin.
+func _flood_basin(heights: PackedFloat32Array, pit: Vector2i, visited: Dictionary) -> Dictionary:
+	var basin_set: Dictionary = {pit.y * GRID + pit.x: true}
+	var basin_cells: Array = [pit]
+	var heap := _MinHeap.new()
+	for off in _FLOW_NEIGHBORS:
+		var n: Vector2i = pit + off
+		if n.x < 0 or n.x >= GRID or n.y < 0 or n.y >= GRID:
+			continue
+		var nidx: int = n.y * GRID + n.x
+		if not basin_set.has(nidx):
+			heap.push(n, heights[nidx])
+
+	var safety: int = 500000
+	while not heap.is_empty() and safety > 0:
+		safety -= 1
+		var cell: Vector2i = heap.pop()
+		var cidx: int = cell.y * GRID + cell.x
+		if basin_set.has(cidx):
+			continue
+		var ch: float = heights[cidx]
+		# Does `cell` have a strictly-lower neighbor outside the basin? If so
+		# it's the spill saddle and the basin overflows.
+		var spill: Vector2i = Vector2i(-1, -1)
+		var spill_h: float = INF
+		for off in _FLOW_NEIGHBORS:
+			var n: Vector2i = cell + off
+			if n.x < 0 or n.x >= GRID or n.y < 0 or n.y >= GRID:
+				continue
+			var nidx2: int = n.y * GRID + n.x
+			if basin_set.has(nidx2):
+				continue
+			var nh: float = heights[nidx2]
+			if nh < ch and nh < spill_h:
+				spill_h = nh
+				spill = n
+
+		if spill.x >= 0:
+			# Water level = ch; basin cells all have terrain ≤ ch by construction.
+			var water_y: float = ch - LAKE_WATER_BELOW_ORIGINAL
+			for bidx in basin_set:
+				visited[bidx] = true
+			var half: float = SIZE * 0.5
+			var aabb_lo := Vector2(INF, INF)
+			var aabb_hi := Vector2(-INF, -INF)
+			var sum := Vector2.ZERO
+			for bc in basin_cells:
+				var px: float = float(bc.x) * CELL - half
+				var pz: float = float(bc.y) * CELL - half
+				aabb_lo.x = minf(aabb_lo.x, px); aabb_lo.y = minf(aabb_lo.y, pz)
+				aabb_hi.x = maxf(aabb_hi.x, px); aabb_hi.y = maxf(aabb_hi.y, pz)
+				sum += Vector2(px, pz)
+			return {
+				"cells": basin_cells,
+				"cells_set": basin_set,
+				"water_y": water_y,
+				"terrain_y": ch,
+				"spill": spill,
+				"aabb_lo": aabb_lo,
+				"aabb_hi": aabb_hi,
+				"center": sum / float(basin_cells.size()),
+			}
+
+		# Otherwise: this cell is inside the basin (no outside-and-lower
+		# escape). Absorb it and keep flooding.
+		basin_set[cidx] = true
+		basin_cells.append(cell)
+		for off in _FLOW_NEIGHBORS:
+			var n: Vector2i = cell + off
+			if n.x < 0 or n.x >= GRID or n.y < 0 or n.y >= GRID:
+				continue
+			var nidx2: int = n.y * GRID + n.x
+			if not basin_set.has(nidx2):
+				heap.push(n, heights[nidx2])
+
+	return {}
+
+# Bilinear interp into the centerline-heights array. wx → grid x → linear blend.
+func _centerline_height_at(wx: float) -> float:
+	var half: float = SIZE * 0.5
+	var fx: float = clampf((wx + half) / CELL, 0.0, float(GRID - 1) - 0.001)
+	var x0: int = int(fx)
+	var t: float = fx - float(x0)
+	return lerpf(_centerline_heights[x0], _centerline_heights[x0 + 1], t)
+
+func _centerline_water_y(wx: float) -> float:
+	return _centerline_height_at(wx) - STREAM_WATER_BELOW_ORIGINAL
+
+# Carve an inverse-bell (Gaussian) divot along the centerline. Depth is
+# anchored to the ORIGINAL terrain at each centerline point, so the trench
+# follows the lay of the land rather than dropping to a fixed Y. min() so we
+# never raise terrain in already-low areas.
+func _carve_stream(heights: PackedFloat32Array) -> void:
+	if not STREAM_ENABLED:
+		return
+	_trace_stream_path(heights)
+	var half: float = SIZE * 0.5
+	var total_r: float = STREAM_BANK_HALF_WIDTH
+	# March along the centerline, stamping the trench perpendicular to the
+	# local tangent at each step. This makes the bed cross-section truly
+	# horizontal across the river width even where the path turns — every
+	# cell within the perpendicular band gets the same target Y, so the only
+	# slope is along the flow direction.
+	var perp_step: float = CELL * 0.4
+	for gx in range(_stream_gx_start, _stream_gx_end + 1):
+		var wx_col: float = float(gx) * CELL - half
+		var cz_col: float = _centerline_z_samples[gx]
+		var gx_prev: int = maxi(gx - 1, _stream_gx_start)
+		var gx_next: int = mini(gx + 1, _stream_gx_end)
+		var dcz_dx: float = (_centerline_z_samples[gx_next] - _centerline_z_samples[gx_prev]) / maxf(0.001, float(gx_next - gx_prev) * CELL)
+		var tang: Vector2 = Vector2(1.0, dcz_dx).normalized()
+		var perp: Vector2 = Vector2(-tang.y, tang.x)
+		var base: float = _centerline_heights[gx]
+		var water_y_col: float = base - STREAM_WATER_BELOW_ORIGINAL
+		var target_bed: float = water_y_col - (STREAM_BED_BELOW_ORIGINAL - STREAM_WATER_BELOW_ORIGINAL)
+		var n_perp: int = int(ceil(total_r / perp_step))
+		for k in range(-n_perp, n_perp + 1):
+			var d_signed: float = float(k) * perp_step
+			var d: float = absf(d_signed)
+			if d >= total_r:
+				continue
+			var falloff: float
+			if d <= STREAM_FLAT_HALF_WIDTH:
+				falloff = 1.0
+			else:
+				falloff = 1.0 - smoothstep(STREAM_FLAT_HALF_WIDTH, total_r, d)
+			var sx: float = wx_col + perp.x * d_signed
+			var sz: float = cz_col + perp.y * d_signed
+			var cx: int = clampi(int(round((sx + half) / CELL)), 0, GRID - 1)
+			var cz_cell: int = clampi(int(round((sz + half) / CELL)), 0, GRID - 1)
+			var idx: int = cz_cell * GRID + cx
+			var orig: float = heights[idx]
+			var carved: float = lerpf(orig, target_bed, falloff)
+			if carved < orig:
+				heights[idx] = minf(heights[idx], carved)
+	_carve_basins(heights)
+
+# Carve each simulated basin: every cell in the basin drops to bed_y so the
+# water surface sits above a real floor. Cells inherited at lower elevations
+# stay where they are (minf), so a basin that fell on a pre-existing pit
+# isn't artificially raised.
+func _carve_basins(heights: PackedFloat32Array) -> void:
+	for basin in _basins:
+		var bed_y: float = (basin.water_y as float) - LAKE_DEPTH
+		for c in basin.cells:
+			var idx: int = (c as Vector2i).y * GRID + (c as Vector2i).x
+			heights[idx] = minf(heights[idx], bed_y)
+
+# --- Water streaming ----------------------------------------------------------
+# Tile the world into WATER_TILE_SIZE cells. A tile builds a water ribbon only
+# if the meandering centerline actually passes through its z range. The
+# centerline is a 1D function of x, so most tiles will skip immediately.
+func _stream_water(pos: Vector3) -> void:
+	var center_tx: int = int(floor(pos.x / WATER_TILE_SIZE))
+	var center_tz: int = int(floor(pos.z / WATER_TILE_SIZE))
+	var tile_radius: int = int(ceil(WATER_STREAM_RADIUS / WATER_TILE_SIZE)) + 1
+	var radius_sq: float = WATER_STREAM_RADIUS * WATER_STREAM_RADIUS
+	var z_lo: float = _stream_z_min - STREAM_BANK_HALF_WIDTH
+	var z_hi: float = _stream_z_max + STREAM_BANK_HALF_WIDTH
+
+	var needed: Dictionary = {}
+	for dz in range(-tile_radius, tile_radius + 1):
+		for dx in range(-tile_radius, tile_radius + 1):
+			var tx: int = center_tx + dx
+			var tz: int = center_tz + dz
+			var cx: float = (float(tx) + 0.5) * WATER_TILE_SIZE
+			var cz: float = (float(tz) + 0.5) * WATER_TILE_SIZE
+			var ddx: float = cx - pos.x
+			var ddz: float = cz - pos.z
+			if ddx * ddx + ddz * ddz > radius_sq:
+				continue
+			# Quick reject: tile's x band is outside the traced stream range,
+			# or its z band can't possibly contain the path.
+			var tile_x0: float = float(tx) * WATER_TILE_SIZE
+			var tile_x1: float = float(tx + 1) * WATER_TILE_SIZE
+			if tile_x1 < _stream_x_start or tile_x0 > _stream_x_water_end:
+				continue
+			var tile_z0: float = float(tz) * WATER_TILE_SIZE
+			var tile_z1: float = float(tz + 1) * WATER_TILE_SIZE
+			if tile_z1 < z_lo or tile_z0 > z_hi:
+				continue
+			var key := Vector2i(tx, tz)
+			needed[key] = true
+			if not _water_tiles.has(key):
+				_water_spawn_queue.append({"key": key, "tx": tx, "tz": tz})
+
+	var to_remove: Array = []
+	for key in _water_tiles.keys():
+		if not needed.has(key):
+			to_remove.append(key)
+	for key in to_remove:
+		(_water_tiles[key] as MeshInstance3D).queue_free()
+		_water_tiles.erase(key)
+
+	var pruned: Array = []
+	for entry in _water_spawn_queue:
+		if needed.has(entry.key) and not _water_tiles.has(entry.key):
+			pruned.append(entry)
+	_water_spawn_queue = pruned
+
+func _flush_water_queue() -> void:
+	var budget: int = WATER_TILE_SPAWN_BUDGET
+	while budget > 0 and not _water_spawn_queue.is_empty():
+		var entry: Dictionary = _water_spawn_queue.pop_front()
+		if _water_tiles.has(entry.key):
+			continue
+		var mi: MeshInstance3D = _build_water_tile(entry.tx, entry.tz)
+		if mi != null:
+			add_child(mi)
+			_water_tiles[entry.key] = mi
+		budget -= 1
+
+func _build_water_tile(tx: int, tz: int) -> MeshInstance3D:
+	var half: float = SIZE * 0.5
+	var x0: float = maxf(float(tx) * WATER_TILE_SIZE, _stream_x_start)
+	var x1: float = minf(float(tx + 1) * WATER_TILE_SIZE, _stream_x_water_end)
+	x0 = maxf(x0, -half)
+	x1 = minf(x1, half)
+	if x1 - x0 < 0.5:
+		return null
+	var tile_z0: float = float(tz) * WATER_TILE_SIZE
+	var tile_z1: float = float(tz + 1) * WATER_TILE_SIZE
+
+	var seg_count: int = maxi(4, int((x1 - x0) * WATER_SEG_PER_METER))
+	# Reject tiles whose centerline z never enters tile z range.
+	var any_in: bool = false
+	for i in seg_count + 1:
+		var t: float = float(i) / float(seg_count)
+		var wx: float = lerpf(x0, x1, t)
+		var cz: float = _centerline_z(wx)
+		if cz >= tile_z0 and cz <= tile_z1:
+			any_in = true
+			break
+	if not any_in:
+		return null
+
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	# Sand ribbon (two strips, one per bank) — built alongside water using the
+	# same centerline frame so it lines up perfectly with the water edge.
+	var sand_verts := PackedVector3Array()
+	var sand_norms := PackedVector3Array()
+	var sand_uvs := PackedVector2Array()
+	var sand_indices := PackedInt32Array()
+	for i in seg_count + 1:
+		var t: float = float(i) / float(seg_count)
+		var wx: float = lerpf(x0, x1, t)
+		var cz: float = _centerline_z(wx)
+		# Central-difference tangent. Depends only on wx, so neighboring tiles
+		# produce identical positions at their shared boundary (no seam).
+		var eps: float = 0.5
+		var dcz: float = _centerline_z(wx + eps) - _centerline_z(wx - eps)
+		var tang: Vector2 = Vector2(2.0 * eps, dcz).normalized()
+		var perp := Vector2(-tang.y, tang.x)
+		var pos := Vector2(wx, cz)
+		var left := pos + perp * STREAM_HALF_WIDTH
+		var right := pos - perp * STREAM_HALF_WIDTH
+		var water_y: float = _centerline_water_y(wx)
+		verts.append(Vector3(left.x, water_y, left.y))
+		verts.append(Vector3(right.x, water_y, right.y))
+		norms.append(Vector3.UP)
+		norms.append(Vector3.UP)
+		# UV.V uses world wx so neighboring tiles' wave scroll lines up at seams.
+		var v: float = wx * 0.5
+		uvs.append(Vector2(0.0, v))
+		uvs.append(Vector2(1.0, v))
+		# Bake per-vertex flow speed from the local downhill slope. The water
+		# shader reads COLOR.r and uses it to scale wave scroll + turbulence,
+		# so steep stretches read as rapids and flat reaches as glassy.
+		var slope: float = _centerline_slope_at(wx)
+		var flow: float = clampf(slope / STREAM_SLOPE_REF, 0.85, 2.4)
+		# Bake the local downstream tangent (XZ unit vector) into COLOR.gb so
+		# the shader can scroll waves/foam along the meandering centerline
+		# instead of a fixed world axis. Encode from [-1,1] → [0,1].
+		var c := Color(flow, tang.x * 0.5 + 0.5, tang.y * 0.5 + 0.5, 1.0)
+		colors.append(c)
+		colors.append(c)
+
+		# Sand strip vertices: outer_left, inner_left, inner_right, outer_right.
+		# Y follows actual terrain so the bank hugs the ground.
+		var outer_left := pos + perp * SAND_HALF_WIDTH
+		var outer_right := pos - perp * SAND_HALF_WIDTH
+		var inner_left_y: float = _sample_height(_heights, left.x, left.y) + SAND_Y_OFFSET
+		var outer_left_y: float = _sample_height(_heights, outer_left.x, outer_left.y) + SAND_Y_OFFSET
+		var inner_right_y: float = _sample_height(_heights, right.x, right.y) + SAND_Y_OFFSET
+		var outer_right_y: float = _sample_height(_heights, outer_right.x, outer_right.y) + SAND_Y_OFFSET
+		sand_verts.append(Vector3(outer_left.x, outer_left_y, outer_left.y))
+		sand_verts.append(Vector3(left.x, inner_left_y, left.y))
+		sand_verts.append(Vector3(right.x, inner_right_y, right.y))
+		sand_verts.append(Vector3(outer_right.x, outer_right_y, outer_right.y))
+		for _k in 4:
+			sand_norms.append(Vector3.UP)
+		var sv: float = wx * 0.18
+		sand_uvs.append(Vector2(0.0, sv))
+		sand_uvs.append(Vector2(1.0, sv))
+		sand_uvs.append(Vector2(1.0, sv))
+		sand_uvs.append(Vector2(0.0, sv))
+	for i in seg_count:
+		var bl: int = i * 2
+		var br: int = bl + 1
+		var tl: int = bl + 2
+		var tr: int = bl + 3
+		indices.append_array([bl, tl, br, br, tl, tr])
+		# Left bank strip: outer_left(0), inner_left(1) → next row outer_left(4), inner_left(5)
+		var s0: int = i * 4
+		sand_indices.append_array([
+			s0, s0 + 4, s0 + 1, s0 + 1, s0 + 4, s0 + 5,         # left bank
+			s0 + 2, s0 + 6, s0 + 3, s0 + 3, s0 + 6, s0 + 7,     # right bank
+		])
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = norms
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_COLOR] = colors
+	arr[Mesh.ARRAY_INDEX] = indices
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	var mi := MeshInstance3D.new()
+	mi.mesh = am
+	mi.material_override = _water_material
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	var sand_arr := []
+	sand_arr.resize(Mesh.ARRAY_MAX)
+	sand_arr[Mesh.ARRAY_VERTEX] = sand_verts
+	sand_arr[Mesh.ARRAY_NORMAL] = sand_norms
+	sand_arr[Mesh.ARRAY_TEX_UV] = sand_uvs
+	sand_arr[Mesh.ARRAY_INDEX] = sand_indices
+	var sand_am := ArrayMesh.new()
+	sand_am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, sand_arr)
+	var sand_mi := MeshInstance3D.new()
+	sand_mi.mesh = sand_am
+	sand_mi.material_override = _sand_material
+	sand_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.add_child(sand_mi)
+	return mi
+
+## Procedurally generated tangent-space normal map: simplex FastNoiseLite fed
+## into a seamless NoiseTexture2D with `as_normal_map=true`. Tiles cleanly,
+## gives us proper bumped normals instead of GPU sin() ripples.
+func _build_water_normal_tex() -> NoiseTexture2D:
+	var fn := FastNoiseLite.new()
+	fn.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	fn.seed = noise_seed + 211
+	fn.frequency = 0.015
+	fn.fractal_type = FastNoiseLite.FRACTAL_FBM
+	fn.fractal_octaves = 3
+	fn.fractal_lacunarity = 2.0
+	fn.fractal_gain = 0.55
+	var tex := NoiseTexture2D.new()
+	tex.width = 512
+	tex.height = 512
+	tex.seamless = true
+	tex.seamless_blend_skirt = 0.15
+	tex.as_normal_map = true
+	tex.bump_strength = 4.0
+	tex.noise = fn
+	return tex
+
+## Cellular noise → makes natural-looking foam splotches.
+func _build_water_foam_tex() -> NoiseTexture2D:
+	var fn := FastNoiseLite.new()
+	fn.noise_type = FastNoiseLite.TYPE_CELLULAR
+	fn.seed = noise_seed + 311
+	fn.frequency = 0.04
+	fn.cellular_return_type = FastNoiseLite.RETURN_DISTANCE
+	fn.cellular_distance_function = FastNoiseLite.DISTANCE_EUCLIDEAN
+	var tex := NoiseTexture2D.new()
+	tex.width = 256
+	tex.height = 256
+	tex.seamless = true
+	tex.seamless_blend_skirt = 0.1
+	tex.as_normal_map = false
+	tex.noise = fn
+	return tex
+
+# Running water. Ported from the CC0 "Absorption Based Stylized Water" shader
+# on godotshaders.com — same architecture but trimmed to what we need and
+# wired to our per-vertex flow factor (COLOR.r). Scrolling tangent-space
+# normal-map waves drive the lighting, screen-space refraction wobbles the
+# bed, Beer-Lambert absorption tints the bed by water-column depth, and edge
+# foam appears where the column is thin. The same shader serves the lake —
+# COLOR.r=0 + flow_factor_bias on that material kills the rapids motion.
+func _build_water_material() -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+render_mode blend_mix, depth_draw_opaque, specular_schlick_ggx, cull_disabled;
+
+uniform vec3  absorption_color : source_color = vec3(0.55, 0.18, 0.04);
+uniform vec3  shallow_tint     : source_color = vec3(0.50, 0.78, 0.78);
+uniform vec3  fresnel_color    : source_color = vec3(0.55, 0.80, 0.85);
+uniform vec3  foam_color       : source_color = vec3(0.97, 0.99, 1.0);
+uniform float beers_law        = 3.2;
+uniform float depth_distance   = 3.2;       // meters of water for full absorption
+uniform float fresnel_power    = 4.0;
+uniform float refraction       = 0.035;
+uniform float scroll_speed     = 0.42;      // base scroll rate, multiplied by v_flow
+uniform vec2  normal_scale     = vec2(0.26);
+uniform float normal_strength  = 1.35;
+uniform float roughness_base   = 0.06;
+uniform float specular_base    = 0.70;
+uniform float edge_foam_depth  = 0.80;      // foam where water column < this (m)
+uniform float foam_intensity   = 1.35;
+uniform vec2  foam_scale       = vec2(0.55);
+uniform float foam_scroll      = 0.85;
+// Lake-vs-stream knobs.
+uniform float flow_factor_scale = 1.0;
+uniform float flow_factor_bias  = 0.45;
+
+uniform sampler2D normal_map : hint_normal, filter_linear_mipmap, repeat_enable;
+uniform sampler2D foam_tex   : filter_linear_mipmap, repeat_enable;
+uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+uniform sampler2D depth_tex  : hint_depth_texture, filter_linear;
+
+varying float v_flow;
+varying vec2  v_dir;
+varying vec3  v_world;
+
+void vertex() {
+	v_flow = COLOR.r;
+	// Decode downstream tangent baked per-vertex (gb in [0,1] → xz in [-1,1]).
+	v_dir = COLOR.gb * 2.0 - 1.0;
+	v_world = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+
+void fragment() {
+	float flow = max(0.0, v_flow * flow_factor_scale + flow_factor_bias);
+	float t = TIME * scroll_speed * max(0.25, flow);
+
+	// Two scrolling normal-map samples at different scales/directions — the
+	// crossbeat kills the obvious tile and reads as living water. World-XZ
+	// sampling means meanders in the ribbon don't distort the waves.
+	// Scroll along the per-vertex downstream tangent — waves follow the
+	// meandering centerline so water always flows the way gravity pulls.
+	// Subtracting the offset advances the pattern in +tangent direction.
+	vec2 flow_dir = length(v_dir) > 0.01 ? normalize(v_dir) : vec2(1.0, 0.0);
+	// Pure downstream scroll on both layers — any cross component reads as
+	// sideways slosh on straight stretches. Different speeds + scales is
+	// enough to break the tiled look without lateral drift.
+	vec3 n1 = texture(normal_map, v_world.xz * normal_scale - flow_dir * t).xyz;
+	vec3 n2 = texture(normal_map, v_world.xz * normal_scale * 1.7 - flow_dir * (t * 1.35)).xyz;
+	vec3 nrm_ts = mix(n1, n2, 0.5);
+	NORMAL_MAP = nrm_ts;
+	NORMAL_MAP_DEPTH = normal_strength * clamp(0.55 + 0.7 * flow, 0.0, 2.0);
+	vec3 nrm_decoded = nrm_ts * 2.0 - 1.0;
+
+	// Water column = bed view-Z minus surface view-Z. Drives both refraction
+	// strength and edge-foam masking.
+	float bed_d = texture(depth_tex, SCREEN_UV).r;
+	vec4 bed_view = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, bed_d, 1.0);
+	bed_view.xyz /= bed_view.w;
+	vec4 surf_view = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, FRAGCOORD.z, 1.0);
+	surf_view.xyz /= surf_view.w;
+	float water_col = max(0.0, -bed_view.z + surf_view.z);
+
+	// Screen-space refraction of the bed, depth-scaled so shallows stay sharp.
+	vec2 ref_uv = SCREEN_UV + nrm_decoded.xy * refraction * clamp(water_col * 0.8 + 0.2, 0.2, 1.6);
+	vec3 bed_col = texture(screen_tex, ref_uv).rgb;
+
+	// Beer-Lambert: water removes wavelengths over depth. What survives at
+	// full depth is the complement of absorption_color.
+	float depth_t = 1.0 - exp(-water_col / max(0.05, depth_distance) * beers_law);
+	vec3 absorbed = clamp(bed_col - absorption_color * depth_t, vec3(0.0), vec3(1.0));
+	vec3 deep_through = mix(absorbed, vec3(1.0) - absorption_color, depth_t * depth_t);
+	vec3 refracted = mix(deep_through, shallow_tint, clamp(depth_t * 0.35, 0.0, 0.35));
+
+	// Fresnel reflectance.
+	float f = pow(1.0 - clamp(dot(VIEW, NORMAL), 0.0, 1.0), fresnel_power);
+	vec3 surface = mix(refracted, fresnel_color, f * 0.55);
+
+	// Foam: shore mask from shallow water-column + rapid mask from a flow-
+	// gated noise threshold. Both scroll downstream.
+	vec2 fuv = v_world.xz * foam_scale - flow_dir * (t * foam_scroll);
+	float fnoise = texture(foam_tex, fuv).r;
+	float edge_mask = 1.0 - smoothstep(0.0, edge_foam_depth, water_col);
+	float edge_f = edge_mask * smoothstep(0.30, 0.65, fnoise);
+	float rapid_f = smoothstep(0.40, 0.78, fnoise) * smoothstep(0.15, 0.9, flow);
+	float foam = clamp((edge_f + rapid_f) * foam_intensity, 0.0, 1.0);
+
+	vec3 final_rgb = mix(surface, foam_color, foam);
+
+	// Shallows fade smoothly into the bed; foam is opaque.
+	float alpha = clamp(max(foam, depth_t * 0.85 + 0.18), 0.0, 1.0);
+
+	ALBEDO = final_rgb;
+	ALPHA = alpha;
+	ROUGHNESS = mix(roughness_base, 0.55, foam);
+	METALLIC = 0.0;
+	SPECULAR = mix(specular_base, 0.2, foam);
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = sh
+	if _water_normal_tex == null:
+		_water_normal_tex = _build_water_normal_tex()
+	if _water_foam_tex == null:
+		_water_foam_tex = _build_water_foam_tex()
+	mat.set_shader_parameter("normal_map", _water_normal_tex)
+	mat.set_shader_parameter("foam_tex", _water_foam_tex)
+	return mat
+
+func _build_sand_material() -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(0.74, 0.64, 0.44)
+	m.roughness = 0.95
+	m.metallic = 0.0
+	m.vertex_color_use_as_albedo = false
+	return m
+
+# --- Lake ---------------------------------------------------------------------
+# A single fixed-location set of meshes built once at startup: a water disc
+# (same shader as the stream but with the per-vertex flow factor pinned to 0
+# so it reads as still), a procedurally-shaded floor disc just above the
+# carved bed, and a sand ring matching the bank carve. No per-frame work.
+
+func _build_lake_water_material() -> ShaderMaterial:
+	# Same shader as the stream, retuned for still water: deeper greener
+	# absorption tint, slow scroll, soft normal map, and no rapids foam (the
+	# shallow-water edge foam still appears naturally where the lake meets
+	# the carved shore).
+	var mat: ShaderMaterial = _build_water_material()
+	mat.set_shader_parameter("absorption_color", Color(0.45, 0.10, 0.02))
+	mat.set_shader_parameter("shallow_tint", Color(0.40, 0.62, 0.60))
+	mat.set_shader_parameter("fresnel_color", Color(0.55, 0.78, 0.82))
+	mat.set_shader_parameter("depth_distance", 4.5)
+	mat.set_shader_parameter("beers_law", 2.6)
+	# Lake mesh writes COLOR.r=0; bias keeps a whisper of motion.
+	mat.set_shader_parameter("flow_factor_scale", 1.0)
+	mat.set_shader_parameter("flow_factor_bias", 0.18)
+	mat.set_shader_parameter("scroll_speed", 0.04)
+	mat.set_shader_parameter("normal_scale", Vector2(0.09, 0.09))
+	mat.set_shader_parameter("normal_strength", 0.35)
+	mat.set_shader_parameter("refraction", 0.012)
+	# Edge foam stays on (nice shoreline), rapids foam off (no fast flow).
+	mat.set_shader_parameter("edge_foam_depth", 0.35)
+	mat.set_shader_parameter("foam_intensity", 0.6)
+	return mat
+
+func _build_lake_floor_material() -> ShaderMaterial:
+	# Procedural floor: warm sand base, pebbled darker patches via one noise
+	# threshold, mossy green where a second noise crosses, and a radial depth
+	# tint (lighter at the rim, darker toward the deep center). All in one
+	# fragment shader — no textures, ~free at this disc's tri count.
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+render_mode cull_back, specular_disabled;
+
+uniform vec4  sand_color   : source_color = vec4(0.78, 0.66, 0.46, 1.0);
+uniform vec4  pebble_color : source_color = vec4(0.32, 0.28, 0.24, 1.0);
+uniform vec4  moss_color   : source_color = vec4(0.20, 0.36, 0.22, 1.0);
+uniform vec4  deep_tint    : source_color = vec4(0.05, 0.10, 0.12, 1.0);
+uniform float pebble_freq  = 0.55;
+uniform float moss_freq    = 0.22;
+
+// Cheap value-noise (hash + bilinear). Plenty for a static floor.
+float hash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+float vnoise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	float a = hash(i);
+	float b = hash(i + vec2(1.0, 0.0));
+	float c = hash(i + vec2(0.0, 1.0));
+	float d = hash(i + vec2(1.0, 1.0));
+	vec2 u = f * f * (3.0 - 2.0 * f);
+	return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+void fragment() {
+	// UV.x = world x, UV.y = world z (set on the mesh). UV.z (stored in COLOR.r)
+	// = radial 0..1 from rim → center.
+	vec2 p = UV;
+	float pebble = vnoise(p * pebble_freq) * 0.7 + vnoise(p * pebble_freq * 2.3) * 0.3;
+	float moss   = vnoise(p * moss_freq + vec2(13.7, 4.2));
+	float radial = clamp(COLOR.r, 0.0, 1.0);
+
+	vec3 col = sand_color.rgb;
+	col = mix(col, pebble_color.rgb, smoothstep(0.55, 0.78, pebble));
+	col = mix(col, moss_color.rgb,   smoothstep(0.62, 0.78, moss) * (0.65 + 0.35 * radial));
+	col = mix(col, deep_tint.rgb,    radial * 0.55);
+
+	ALBEDO = col;
+	ROUGHNESS = 0.92;
+	METALLIC = 0.0;
+	SPECULAR = 0.15;
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = sh
+	return mat
+
+## Build a water surface + floor + sand ring for every basin produced by the
+## priority-flood simulation. Cell-rasterized polygons mean the shapes are
+## whatever the terrain actually produced — round, oblong, branching, whatever.
+func _build_lake() -> void:
+	if _basins.is_empty():
+		return
+	if _lake_water_material == null:
+		_lake_water_material = _build_lake_water_material()
+	if _lake_floor_material == null:
+		_lake_floor_material = _build_lake_floor_material()
+	if _lake_sand_material == null:
+		_lake_sand_material = _build_sand_material()
+	for basin in _basins:
+		# Skip micro-basins (just 1-handful of cells). They've already been
+		# carved by _carve_basins so the bed exists; the stream ribbon will
+		# read as continuous water across them. Building a mesh per pit
+		# blows past Godot's RID owner limit on noisy terrain.
+		if (basin.cells as Array).size() < MIN_BASIN_CELLS:
+			continue
+		var basin_root := Node3D.new()
+		add_child(basin_root)
+		basin_root.add_child(_make_basin_water_mesh(basin))
+		basin_root.add_child(_make_basin_floor_mesh(basin))
+		basin_root.add_child(_make_basin_sand_ring(basin))
+
+# Rasterize a basin's cells as a flat surface at the given y. Each cell becomes
+# two triangles; vertices are deduplicated across shared cell corners so the
+# mesh is a clean polygon (no z-fighting at quad seams).
+func _make_basin_surface_mesh(
+	basin: Dictionary,
+	y_func: Callable,          # (wx, wz, radial01) -> y
+	uv_func: Callable,          # (wx, wz, radial01) -> Vector2
+	color_func: Callable,       # (wx, wz, radial01) -> Color
+) -> ArrayMesh:
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	var vert_index: Dictionary = {}   # (gx + gz * (GRID + 1)) -> vert idx
+	var half: float = SIZE * 0.5
+	var cells_set: Dictionary = basin.cells_set
+	var center: Vector2 = basin.center
+	# Use the basin's diagonal as the "radius" denominator for the radial coord.
+	var diag: Vector2 = (basin.aabb_hi as Vector2) - (basin.aabb_lo as Vector2)
+	var max_r: float = maxf(1.0, 0.5 * diag.length())
+	# Each cell occupies vertices at its 4 corners.
+	for c_v in basin.cells:
+		var c: Vector2i = c_v
+		var corners := [
+			Vector2i(c.x,     c.y),
+			Vector2i(c.x + 1, c.y),
+			Vector2i(c.x,     c.y + 1),
+			Vector2i(c.x + 1, c.y + 1),
+		]
+		var local_idx: PackedInt32Array
+		local_idx.resize(4)
+		for i in 4:
+			var v: Vector2i = corners[i]
+			var key: int = v.x + v.y * (GRID + 1)
+			if vert_index.has(key):
+				local_idx[i] = vert_index[key]
+				continue
+			var wx: float = float(v.x) * CELL - half
+			var wz: float = float(v.y) * CELL - half
+			var dx_c: float = wx - center.x
+			var dz_c: float = wz - center.y
+			var radial: float = clampf(1.0 - sqrt(dx_c * dx_c + dz_c * dz_c) / max_r, 0.0, 1.0)
+			var y: float = y_func.call(wx, wz, radial)
+			verts.append(Vector3(wx, y, wz))
+			norms.append(Vector3.UP)
+			uvs.append(uv_func.call(wx, wz, radial))
+			colors.append(color_func.call(wx, wz, radial))
+			vert_index[key] = verts.size() - 1
+			local_idx[i] = verts.size() - 1
+		# Two triangles: (0,2,1) and (1,2,3). CCW from above.
+		indices.append_array([local_idx[0], local_idx[2], local_idx[1],
+							  local_idx[1], local_idx[2], local_idx[3]])
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = norms
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_COLOR] = colors
+	arr[Mesh.ARRAY_INDEX] = indices
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	return am
+
+func _make_basin_water_mesh(basin: Dictionary) -> MeshInstance3D:
+	var water_y: float = basin.water_y
+	var y_func := func(_wx: float, _wz: float, _r: float) -> float:
+		return water_y
+	var uv_func := func(wx: float, wz: float, _r: float) -> Vector2:
+		return Vector2(wx * 0.08, wz * 0.08)
+	var color_func := func(_wx: float, _wz: float, _r: float) -> Color:
+		return Color(0.0, 0.0, 0.0, 1.0)   # COLOR.r = 0 → flow factor zeroed
+	var am: ArrayMesh = _make_basin_surface_mesh(basin, y_func, uv_func, color_func)
+	var mi := MeshInstance3D.new()
+	mi.mesh = am
+	mi.material_override = _lake_water_material
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return mi
+
+func _make_basin_floor_mesh(basin: Dictionary) -> MeshInstance3D:
+	var y_func := func(wx: float, wz: float, _r: float) -> float:
+		return _sample_height(_heights, wx, wz) + LAKE_FLOOR_LIFT
+	var uv_func := func(wx: float, wz: float, _r: float) -> Vector2:
+		return Vector2(wx, wz)
+	var color_func := func(_wx: float, _wz: float, r: float) -> Color:
+		return Color(r, 0.0, 0.0, 1.0)
+	var am: ArrayMesh = _make_basin_surface_mesh(basin, y_func, uv_func, color_func)
+	var mi := MeshInstance3D.new()
+	mi.mesh = am
+	mi.material_override = _lake_floor_material
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return mi
+
+# Sand ring = cells just outside the basin (dry cells whose 8-neighborhood
+# contains at least one basin cell). Rasterized as flat quads at terrain h.
+func _make_basin_sand_ring(basin: Dictionary) -> MeshInstance3D:
+	var cells_set: Dictionary = basin.cells_set
+	var ring_cells: Dictionary = {}
+	for c_v in basin.cells:
+		var c: Vector2i = c_v
+		for off in _FLOW_NEIGHBORS:
+			var n: Vector2i = c + off
+			if n.x < 0 or n.x >= GRID or n.y < 0 or n.y >= GRID:
+				continue
+			var nidx: int = n.y * GRID + n.x
+			if cells_set.has(nidx) or ring_cells.has(nidx):
+				continue
+			ring_cells[nidx] = n
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	var vert_index: Dictionary = {}
+	var half: float = SIZE * 0.5
+	for nidx in ring_cells:
+		var c: Vector2i = ring_cells[nidx]
+		var corners := [
+			Vector2i(c.x,     c.y),
+			Vector2i(c.x + 1, c.y),
+			Vector2i(c.x,     c.y + 1),
+			Vector2i(c.x + 1, c.y + 1),
+		]
+		var li: PackedInt32Array
+		li.resize(4)
+		for i in 4:
+			var v: Vector2i = corners[i]
+			var key: int = v.x + v.y * (GRID + 1)
+			if vert_index.has(key):
+				li[i] = vert_index[key]; continue
+			var wx: float = float(v.x) * CELL - half
+			var wz: float = float(v.y) * CELL - half
+			var y: float = _sample_height(_heights, wx, wz) + SAND_Y_OFFSET
+			verts.append(Vector3(wx, y, wz))
+			norms.append(Vector3.UP)
+			uvs.append(Vector2(wx * 0.2, wz * 0.2))
+			vert_index[key] = verts.size() - 1
+			li[i] = verts.size() - 1
+		indices.append_array([li[0], li[2], li[1], li[1], li[2], li[3]])
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = norms
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_INDEX] = indices
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	var mi := MeshInstance3D.new()
+	mi.mesh = am
+	mi.material_override = _lake_sand_material
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return mi
 
 # --- Grass streaming ----------------------------------------------------------
 # Maintain a disk of grass tiles centered on the camera. Tile coords are
@@ -523,6 +1995,12 @@ func _build_grass_tile(tx: int, tz: int) -> Array:
 			var wx: float = x0 + (float(ix) + rng.randf()) * GRASS_SPACING
 			var wz: float = z0 + (float(iz) + rng.randf()) * GRASS_SPACING
 			if wx < -half or wx > half or wz < -half or wz > half:
+				continue
+			# Keep grass out of the river/sand band so the sandy bank is visible
+			# and water doesn't appear to float over hidden blades.
+			if STREAM_ENABLED and absf(wz - _centerline_z(wx)) < GRASS_BANK_EXCLUSION:
+				continue
+			if _in_lake_keepout(wx, wz, -1.0):
 				continue
 			var n: Vector3 = _sample_normal(_heights, wx, wz)
 			if n.y < GRASS_MIN_NORMAL_Y:
@@ -621,8 +2099,9 @@ func _stream_trees(pos: Vector3) -> void:
 		if not needed.has(key):
 			to_remove.append(key)
 	for key in to_remove:
-		for mmi in (_tree_tiles[key] as Dictionary).mmis:
-			(mmi as MultiMeshInstance3D).queue_free()
+		for b in (_tree_tiles[key] as Dictionary).bodies:
+			if is_instance_valid(b):
+				(b as Node).queue_free()
 		_tree_tiles.erase(key)
 
 	var pruned: Array = []
@@ -637,10 +2116,10 @@ func _flush_tree_queue() -> void:
 		var entry: Dictionary = _tree_spawn_queue.pop_front()
 		if _tree_tiles.has(entry.key):
 			continue
-		var mmis: Array = _build_tree_tile(entry.tx, entry.tz)
-		for mmi in mmis:
-			add_child(mmi)
-		_tree_tiles[entry.key] = {"mmis": mmis}
+		var bodies: Array = _build_tree_tile(entry.tx, entry.tz)
+		for b in bodies:
+			add_child(b)
+		_tree_tiles[entry.key] = {"bodies": bodies}
 		budget -= 1
 
 func _build_tree_tile(tx: int, tz: int) -> Array:
@@ -649,15 +2128,14 @@ func _build_tree_tile(tx: int, tz: int) -> Array:
 	var half: float = SIZE * 0.5
 	if x0 + TREE_TILE_SIZE < -half or x0 > half or z0 + TREE_TILE_SIZE < -half or z0 > half:
 		return []
+	if _tree_variants.is_empty():
+		return []
 	var rng := RandomNumberGenerator.new()
 	rng.seed = noise_seed * 104729 + tz * 100003 + tx
 	var n_side: int = int(TREE_TILE_SIZE / TREE_SPACING)
+	var tree_script: GDScript = preload("res://entities/tree/tree.gd")
 
-	var per_variant: Array = []
-	per_variant.resize(_tree_variants.size())
-	for i in _tree_variants.size():
-		per_variant[i] = []
-
+	var out: Array = []
 	for iz in n_side:
 		for ix in n_side:
 			var wx: float = x0 + (float(ix) + rng.randf()) * TREE_SPACING
@@ -665,7 +2143,17 @@ func _build_tree_tile(tx: int, tz: int) -> Array:
 			if wx < -half or wx > half or wz < -half or wz > half:
 				continue
 			var p: float = (_tree_placement_noise.get_noise_2d(wx, wz) + 1.0) * 0.5
-			if p < TREE_PLACEMENT_THRESHOLD:
+			var bank_boost: float = 0.0
+			if STREAM_ENABLED:
+				if _in_lake_keepout(wx, wz, -0.5):
+					continue
+				var dz_center: float = absf(wz - _centerline_z(wx))
+				if dz_center < TREE_BANK_EXCLUSION:
+					continue
+				if dz_center < TREE_BANK_INFLUENCE:
+					var falloff_t: float = (dz_center - TREE_BANK_EXCLUSION) / (TREE_BANK_INFLUENCE - TREE_BANK_EXCLUSION)
+					bank_boost = TREE_BANK_BOOST * (1.0 - clampf(falloff_t, 0.0, 1.0))
+			if p < TREE_PLACEMENT_THRESHOLD - bank_boost:
 				continue
 			var n: Vector3 = _sample_normal(_heights, wx, wz)
 			if n.y < TREE_MIN_NORMAL_Y:
@@ -674,38 +2162,19 @@ func _build_tree_tile(tx: int, tz: int) -> Array:
 			if h < TREE_MIN_ELEV or h > TREE_MAX_ELEV:
 				continue
 			var variant: int = rng.randi() % _tree_variants.size()
-			var up: Vector3 = n.lerp(Vector3.UP, 0.7).normalized()
+			var var_data: Dictionary = _tree_variants[variant]
+			# Trees stand mostly upright (slight ground-align lean) so the fall
+			# animation pivots around a near-vertical trunk. Yaw is per-instance.
+			var up: Vector3 = n.lerp(Vector3.UP, 0.85).normalized()
 			var align := Basis(Quaternion(Vector3.UP, up))
 			var yaw := Basis(Vector3.UP, rng.randf() * TAU)
 			var s: float = TREE_SCALE_BASE + rng.randf() * TREE_SCALE_JITTER
-			var scale := Basis().scaled(Vector3(s, s + rng.randf() * 0.4, s))
-			(per_variant[variant] as Array).append(
-				Transform3D(align * yaw * scale, Vector3(wx, h - 0.1, wz))
-			)
-
-	var aabb := AABB(
-		Vector3(x0, -10.0, z0),
-		Vector3(TREE_TILE_SIZE, 400.0, TREE_TILE_SIZE)
-	)
-	var out: Array = []
-	for i in _tree_variants.size():
-		var ts: Array = per_variant[i]
-		if ts.is_empty():
-			continue
-		var parts: Array = _tree_variants[i]
-		# One MultiMesh per sub-part of the tree (trunk, leaves...) so each keeps
-		# its imported material.
-		for part in parts:
-			var mm := MultiMesh.new()
-			mm.transform_format = MultiMesh.TRANSFORM_3D
-			mm.mesh = part.mesh
-			mm.instance_count = ts.size()
-			for j in ts.size():
-				mm.set_instance_transform(j, (ts[j] as Transform3D) * (part.xform as Transform3D))
-			var mmi := MultiMeshInstance3D.new()
-			mmi.multimesh = mm
-			mmi.custom_aabb = aabb
-			out.append(mmi)
+			var scale_vec := Vector3(s, s + rng.randf() * 0.4, s)
+			# StaticBody3D stays unscaled — visual + collider take the scale.
+			var tree := tree_script.new() as StaticBody3D
+			tree.transform = Transform3D(align * yaw, Vector3(wx, h - 0.1, wz))
+			tree.call("setup", var_data.parts, scale_vec, var_data.aabb as AABB)
+			out.append(tree)
 	return out
 
 # --- Procedural grass blade ---------------------------------------------------
@@ -861,8 +2330,12 @@ shader_type spatial;
 render_mode cull_disabled, diffuse_burley, specular_disabled, world_vertex_coords;
 
 uniform sampler2D heightmap : filter_linear, repeat_disable;
+uniform sampler2D centerline_z_tex : filter_linear, repeat_disable;
+uniform sampler2D occluder_mask : filter_nearest, repeat_disable;
+uniform float occluder_extent = 220.0;  // world extent (m) covered by the mask
 uniform float terrain_size = 1024.0;
 uniform float terrain_cell = 1.0;
+uniform float bank_exclusion = 0.0;   // 0 disables river-band discard
 uniform vec2  patch_center = vec2(0.0);
 uniform float fade_inner   = 5.5;
 uniform float fade_outer   = 7.0;
@@ -947,6 +2420,18 @@ void vertex() {
 	float elev = 1.0 - smoothstep(max_elev - 5.0, max_elev, h);
 	float slope_keep = step(min_normal_y, ny);
 	keep *= elev * slope_keep;
+	if (bank_exclusion > 0.0) {
+		float u = (anchored.x + terrain_size * 0.5) / terrain_size;
+		float cz_at = texture(centerline_z_tex, vec2(u, 0.5)).r;
+		float dz_riv = abs(anchored.y - cz_at);
+		keep *= step(bank_exclusion, dz_riv);
+	}
+	// Occluder mask: stumps, fallen logs, placed wood. Anywhere the mask is
+	// non-zero, this blade is inside an object — drop it (the trailing VERTEX
+	// collapse below maps it to a degenerate triangle).
+	vec2 occ_uv = (anchored - patch_center) / occluder_extent + vec2(0.5);
+	float occluded = step(0.5, texture(occluder_mask, occ_uv).r);
+	keep *= (1.0 - occluded);
 
 	vec2 local_xz = (VERTEX.xz - wo.xz) * sw;
 	float c = cos(yaw); float s = sin(yaw);
@@ -962,6 +2447,11 @@ void vertex() {
 	VERTEX.x = anchored.x + local_xz.x + sway.x + lean.x;
 	VERTEX.z = anchored.y + local_xz.y + sway.y + lean.y;
 	VERTEX.y = h + local_y - bend2 * (abs(sway.x) + abs(sway.y) + abs(lean.x) + abs(lean.y)) * 0.18;
+	// Hard-collapse culled blades (rocky slope / river band / past fade) to a
+	// single point — degenerate triangles aren't rasterized. Without this, a
+	// keep=0 blade still spreads horizontally via local_xz/sway/lean and reads
+	// as a sprout poking through the ground on rocky terrain or the bank.
+	VERTEX = mix(vec3(anchored.x, h, anchored.y), VERTEX, keep);
 
 	COLOR.r = bend;
 	COLOR.g = dry;
@@ -1000,6 +2490,8 @@ void fragment() {
 	var mat := ShaderMaterial.new()
 	mat.shader = sh
 	mat.set_shader_parameter("heightmap", _height_tex)
+	mat.set_shader_parameter("centerline_z_tex", _centerline_z_tex)
+	mat.set_shader_parameter("bank_exclusion", GRASS_BANK_EXCLUSION if STREAM_ENABLED else 0.0)
 	mat.set_shader_parameter("terrain_size", SIZE)
 	mat.set_shader_parameter("terrain_cell", CELL)
 	mat.set_shader_parameter("fade_inner", PATCH_FADE_INNER)
@@ -1103,13 +2595,9 @@ void fragment() {
 # --- Tree loading -------------------------------------------------------------
 
 func _load_tree_variants() -> Array:
-	var paths := _discover_tree_paths()
-	var out: Array = []
-	for p in paths:
-		var parts := _load_tree_parts(p)
-		if not parts.is_empty():
-			out.append(parts)
-	return out
+	# Same loader as stones: shifts each tree's parts so the trunk base is at
+	# local y=0, and stores the unioned AABB on each variant for collision sizing.
+	return _load_glb_variants(_discover_tree_paths())
 
 func _discover_tree_paths() -> Array:
 	var paths: Array = []
@@ -1172,3 +2660,606 @@ func _sample_normal(heights: PackedFloat32Array, wx: float, wz: float) -> Vector
 	var gz: int = clampi(int((wz + half) / CELL), 0, GRID - 1)
 	return _heightmap_normal(heights, gx, gz)
 
+# --- Stones -------------------------------------------------------------------
+
+# --- Grass occluders ----------------------------------------------------------
+# Public API used by stumps, fallen logs, and placed wood. Each occluder is a
+# (world XZ, radius) disk. Inside the disk, patch grass blades are dropped.
+# IDs are arbitrary — callers pass any int they can recall later (typically
+# get_instance_id()) so they can remove their own entry on free.
+
+func add_grass_occluder(id: int, world_xz: Vector2, radius: float) -> void:
+	_occluders[id] = {"pos": world_xz, "radius": radius}
+	_occ_dirty = true
+
+func remove_grass_occluder(id: int) -> void:
+	if _occluders.erase(id):
+		_occ_dirty = true
+
+func _init_occluder_mask() -> void:
+	_occ_mask_img = Image.create(OCC_MASK_SIZE, OCC_MASK_SIZE, false, Image.FORMAT_R8)
+	_occ_mask_img.fill(Color(0, 0, 0))
+	_occ_mask_tex = ImageTexture.create_from_image(_occ_mask_img)
+	# Wire into every patch-grass material so the vertex shader can sample it.
+	for mat in [_grass_material_patch_short, _grass_material_patch_tall, _grass_material_patch_core]:
+		if mat != null:
+			mat.set_shader_parameter("occluder_mask", _occ_mask_tex)
+			mat.set_shader_parameter("occluder_extent", OCC_MASK_EXTENT)
+
+# Re-rasterizes the visible occluder disks centered on `patch_center`. Cheap
+# (each disk paints O(r²) texels, max ~50 disks within the patch) and only
+# runs when either the set changed or the patch slid more than half a texel.
+func _update_occluder_mask(patch_center: Vector2) -> void:
+	var moved: bool = _occ_last_center.distance_to(patch_center) > (OCC_MASK_EXTENT / float(OCC_MASK_SIZE)) * 0.5
+	if not _occ_dirty and not moved:
+		return
+	_occ_last_center = patch_center
+	_occ_dirty = false
+	_occ_mask_img.fill(Color(0, 0, 0))
+	var half: float = OCC_MASK_EXTENT * 0.5
+	var ppm: float = float(OCC_MASK_SIZE) / OCC_MASK_EXTENT
+	for occ in _occluders.values():
+		var local: Vector2 = (occ.pos as Vector2) - patch_center
+		var r: float = occ.radius as float
+		if absf(local.x) > half + r or absf(local.y) > half + r:
+			continue
+		var cu: int = int((local.x + half) * ppm)
+		var cv: int = int((local.y + half) * ppm)
+		var r_pix: int = int(ceil(r * ppm)) + 1   # +1 for safety against texel rounding
+		var r_pix_sq: int = r_pix * r_pix
+		for dv in range(-r_pix, r_pix + 1):
+			for du in range(-r_pix, r_pix + 1):
+				if du * du + dv * dv > r_pix_sq:
+					continue
+				var pu: int = cu + du
+				var pv: int = cv + dv
+				if pu < 0 or pu >= OCC_MASK_SIZE or pv < 0 or pv >= OCC_MASK_SIZE:
+					continue
+				_occ_mask_img.set_pixel(pu, pv, Color(1, 1, 1))
+	_occ_mask_tex.update(_occ_mask_img)
+
+func _init_stone_resources() -> void:
+	_stone_large_variants = _load_glb_variants(STONE_LARGE_PATHS)
+	_stone_medium_variants = _load_glb_variants(STONE_MEDIUM_PATHS)
+	_brook_medium_variants = _load_glb_variants(BROOK_MEDIUM_PATHS)
+	_brook_small_variants = _load_glb_variants(BROOK_SMALL_PATHS)
+	_stone_placement_noise = FastNoiseLite.new()
+	_stone_placement_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_stone_placement_noise.seed = noise_seed + 131
+	_stone_placement_noise.frequency = STONE_PLACEMENT_FREQ
+
+## Loads each GLB, finds the unioned mesh-space AABB, and shifts every part's
+## xform down so the lowest point sits at local y=0. Placement code therefore
+## just sets the body origin at ground height — no per-variant min_y math at
+## placement time, and rotating around the body origin pivots cleanly around
+## the mesh base (used for the tree fall animation).
+func _load_glb_variants(paths: Array) -> Array:
+	var out: Array = []
+	for p in paths:
+		if not ResourceLoader.exists(p):
+			continue
+		var parts: Array = _load_tree_parts(p)
+		if parts.is_empty():
+			continue
+		# Pass 1: find min_y across the union.
+		var min_y: float = INF
+		for part in parts:
+			var aabb: AABB = (part.mesh as Mesh).get_aabb()
+			var xf: Transform3D = part.xform
+			for i in 8:
+				var c: Vector3 = xf * aabb.get_endpoint(i)
+				if c.y < min_y:
+					min_y = c.y
+		# Pass 2: shift parts so union bottom is at y=0; compute the shifted
+		# union AABB (used by destructible bodies to size their collider).
+		var shifted: Array = []
+		var union_aabb: AABB
+		var first := true
+		for part in parts:
+			var xf: Transform3D = part.xform
+			var new_xf := Transform3D(xf.basis, xf.origin - Vector3(0, min_y, 0))
+			shifted.append({"mesh": part.mesh, "xform": new_xf})
+			var aabb: AABB = (part.mesh as Mesh).get_aabb()
+			for i in 8:
+				var c: Vector3 = new_xf * aabb.get_endpoint(i)
+				if first:
+					union_aabb = AABB(c, Vector3.ZERO)
+					first = false
+				else:
+					union_aabb = union_aabb.expand(c)
+		out.append({"parts": shifted, "aabb": union_aabb})
+	return out
+
+# --- Land stones: streamed disk of tiles, deterministic per (seed,tx,tz) ------
+
+func _stream_stones(pos: Vector3) -> void:
+	if _stone_large_variants.is_empty() and _stone_medium_variants.is_empty():
+		return
+	var center_tx: int = int(floor(pos.x / STONE_TILE_SIZE))
+	var center_tz: int = int(floor(pos.z / STONE_TILE_SIZE))
+	var tile_radius: int = int(ceil(STONE_STREAM_RADIUS / STONE_TILE_SIZE)) + 1
+	var radius_sq: float = STONE_STREAM_RADIUS * STONE_STREAM_RADIUS
+
+	var needed: Dictionary = {}
+	for dz in range(-tile_radius, tile_radius + 1):
+		for dx in range(-tile_radius, tile_radius + 1):
+			var tx: int = center_tx + dx
+			var tz: int = center_tz + dz
+			var cx: float = (float(tx) + 0.5) * STONE_TILE_SIZE
+			var cz: float = (float(tz) + 0.5) * STONE_TILE_SIZE
+			var ddx: float = cx - pos.x
+			var ddz: float = cz - pos.z
+			if ddx * ddx + ddz * ddz > radius_sq:
+				continue
+			var key := Vector2i(tx, tz)
+			needed[key] = true
+			if not _stone_tiles.has(key):
+				_stone_spawn_queue.append({"key": key, "tx": tx, "tz": tz})
+
+	var to_remove: Array = []
+	for key in _stone_tiles.keys():
+		if not needed.has(key):
+			to_remove.append(key)
+	for key in to_remove:
+		for b in (_stone_tiles[key] as Dictionary).bodies:
+			if is_instance_valid(b):
+				(b as Node).queue_free()
+		_stone_tiles.erase(key)
+
+	var pruned: Array = []
+	for entry in _stone_spawn_queue:
+		if needed.has(entry.key) and not _stone_tiles.has(entry.key):
+			pruned.append(entry)
+	_stone_spawn_queue = pruned
+
+func _flush_stone_queue() -> void:
+	var budget: int = STONE_TILE_SPAWN_BUDGET
+	while budget > 0 and not _stone_spawn_queue.is_empty():
+		var entry: Dictionary = _stone_spawn_queue.pop_front()
+		if _stone_tiles.has(entry.key):
+			continue
+		var bodies: Array = _build_stone_tile(entry.tx, entry.tz)
+		for b in bodies:
+			add_child(b)
+		_stone_tiles[entry.key] = {"bodies": bodies}
+		budget -= 1
+
+# Per-cell jittered grid: decide whether each cell hosts a large or medium
+# stone via placement noise, then spawn a DestructibleStone body in-place.
+func _build_stone_tile(tx: int, tz: int) -> Array:
+	var x0: float = float(tx) * STONE_TILE_SIZE
+	var z0: float = float(tz) * STONE_TILE_SIZE
+	var half: float = SIZE * 0.5
+	if x0 + STONE_TILE_SIZE < -half or x0 > half or z0 + STONE_TILE_SIZE < -half or z0 > half:
+		return []
+	var rng := RandomNumberGenerator.new()
+	rng.seed = noise_seed * 13331 + tz * 100193 + tx
+	var stone_script: GDScript = preload("res://entities/stone/stone.gd")
+	var out: Array = []
+
+	# Pass 1: large stones — coarse grid.
+	if not _stone_large_variants.is_empty():
+		var ln_side: int = maxi(1, int(STONE_TILE_SIZE / STONE_LARGE_SPACING))
+		for iz in ln_side:
+			for ix in ln_side:
+				var wx: float = x0 + (float(ix) + rng.randf()) * STONE_LARGE_SPACING
+				var wz: float = z0 + (float(iz) + rng.randf()) * STONE_LARGE_SPACING
+				if wx < -half or wx > half or wz < -half or wz > half:
+					continue
+				if not _stone_placement_ok(wx, wz, rng, STONE_LARGE_THRESHOLD):
+					continue
+				var v: int = rng.randi() % _stone_large_variants.size()
+				var var_data: Dictionary = _stone_large_variants[v]
+				var xf: Transform3D = _stone_transform(
+					wx, wz, rng,
+					STONE_LARGE_SCALE_BASE, STONE_LARGE_SCALE_JITTER,
+					STONE_SINK
+				)
+				out.append(_make_stone_body(stone_script, var_data, xf))
+
+	# Pass 2: medium stones — finer grid.
+	if not _stone_medium_variants.is_empty():
+		var mn_side: int = maxi(1, int(STONE_TILE_SIZE / STONE_MEDIUM_SPACING))
+		for iz in mn_side:
+			for ix in mn_side:
+				var wx2: float = x0 + (float(ix) + rng.randf()) * STONE_MEDIUM_SPACING
+				var wz2: float = z0 + (float(iz) + rng.randf()) * STONE_MEDIUM_SPACING
+				if wx2 < -half or wx2 > half or wz2 < -half or wz2 > half:
+					continue
+				if not _stone_placement_ok(wx2, wz2, rng, STONE_MEDIUM_THRESHOLD):
+					continue
+				var v2: int = rng.randi() % _stone_medium_variants.size()
+				var var_data2: Dictionary = _stone_medium_variants[v2]
+				var xf2: Transform3D = _stone_transform(
+					wx2, wz2, rng,
+					STONE_MEDIUM_SCALE_BASE, STONE_MEDIUM_SCALE_JITTER,
+					STONE_SINK
+				)
+				out.append(_make_stone_body(stone_script, var_data2, xf2))
+	return out
+
+# Shared body-builder for brook + land stones: pulls the rotation out of the
+# scale-bearing transform, hands the scale + shifted parts + AABB to the
+# stone's setup() so the StaticBody3D itself stays unscaled.
+func _make_stone_body(script: GDScript, var_data: Dictionary, xf: Transform3D) -> StaticBody3D:
+	var stone := script.new() as StaticBody3D
+	stone.transform = Transform3D(xf.basis.orthonormalized(), xf.origin)
+	var scale_vec := Vector3(
+		xf.basis.x.length(),
+		xf.basis.y.length(),
+		xf.basis.z.length()
+	)
+	stone.call("setup", var_data.parts, scale_vec, var_data.aabb as AABB)
+	return stone
+
+func _stone_placement_ok(wx: float, wz: float, rng: RandomNumberGenerator, threshold: float) -> bool:
+	# Keep land stones out of the stream/sand band and out of the lake.
+	if _in_lake_keepout(wx, wz, 0.0):
+		return false
+	if STREAM_ENABLED and absf(wz - _centerline_z(wx)) < STONE_BANK_EXCLUSION:
+		return false
+	var p: float = (_stone_placement_noise.get_noise_2d(wx, wz) + 1.0) * 0.5
+	# A small RNG hop breaks the noise grid — stones don't appear on tidy lines.
+	p += (rng.randf() - 0.5) * 0.18
+	if p < threshold:
+		return false
+	var n: Vector3 = _sample_normal(_heights, wx, wz)
+	if n.y < STONE_MIN_NORMAL_Y:
+		return false
+	var h: float = _sample_height(_heights, wx, wz)
+	if h < STONE_MIN_ELEV or h > STONE_MAX_ELEV:
+		return false
+	return true
+
+func _stone_transform(
+	wx: float, wz: float, rng: RandomNumberGenerator,
+	scale_base: float, scale_jitter: float, sink: float
+) -> Transform3D:
+	var n: Vector3 = _sample_normal(_heights, wx, wz)
+	var up: Vector3 = n.lerp(Vector3.UP, 0.35).normalized()
+	var align := Basis(Quaternion(Vector3.UP, up))
+	var yaw := Basis(Vector3.UP, rng.randf() * TAU)
+	var s: float = scale_base + rng.randf() * scale_jitter
+	var sxz: float = s * (0.88 + rng.randf() * 0.24)
+	var sy: float = s * (0.85 + rng.randf() * 0.30)
+	var scale_basis := Basis().scaled(Vector3(sxz, sy, sxz))
+	# Parts are pre-shifted in _load_glb_variants so mesh-local y=0 is the
+	# bottom — placement origin is just ground level minus sink.
+	var h: float = _sample_height(_heights, wx, wz)
+	return Transform3D(align * yaw * scale_basis, Vector3(wx, h - sink, wz))
+
+# Bundle a per-variant transform list into one MultiMesh per sub-mesh part —
+# mirrors how trees are emitted so each part keeps its imported material.
+func _emit_variant_mmis(variants: Array, per_variant: Array, aabb: AABB, out: Array) -> void:
+	for i in variants.size():
+		var ts: Array = per_variant[i]
+		if ts.is_empty():
+			continue
+		var parts: Array = (variants[i] as Dictionary).parts
+		for part in parts:
+			var mm := MultiMesh.new()
+			mm.transform_format = MultiMesh.TRANSFORM_3D
+			mm.mesh = part.mesh
+			mm.instance_count = ts.size()
+			for j in ts.size():
+				mm.set_instance_transform(j, (ts[j] as Transform3D) * (part.xform as Transform3D))
+			var mmi := MultiMeshInstance3D.new()
+			mmi.multimesh = mm
+			mmi.custom_aabb = aabb
+			out.append(mmi)
+
+# --- Brook stones: march along the centerline, outline both banks -------------
+# Each tile owns the x range [tx*BROOK_TILE_SIZE, (tx+1)*BROOK_TILE_SIZE]. We
+# only build tiles whose x range overlaps the world, and quickly skip tiles
+# whose z range can't possibly intersect the meandering centerline.
+func _stream_brook(pos: Vector3) -> void:
+	if _brook_medium_variants.is_empty() and _brook_small_variants.is_empty():
+		return
+	var center_tx: int = int(floor(pos.x / BROOK_TILE_SIZE))
+	var center_tz: int = int(floor(pos.z / BROOK_TILE_SIZE))
+	var tile_radius: int = int(ceil(BROOK_STREAM_RADIUS / BROOK_TILE_SIZE)) + 1
+	var radius_sq: float = BROOK_STREAM_RADIUS * BROOK_STREAM_RADIUS
+	var z_lo: float = _stream_z_min - (BROOK_BANK_OFFSET + 2.0)
+	var z_hi: float = _stream_z_max + (BROOK_BANK_OFFSET + 2.0)
+
+	var needed: Dictionary = {}
+	for dz in range(-tile_radius, tile_radius + 1):
+		for dx in range(-tile_radius, tile_radius + 1):
+			var tx: int = center_tx + dx
+			var tz: int = center_tz + dz
+			var cx: float = (float(tx) + 0.5) * BROOK_TILE_SIZE
+			var cz: float = (float(tz) + 0.5) * BROOK_TILE_SIZE
+			var ddx: float = cx - pos.x
+			var ddz: float = cz - pos.z
+			if ddx * ddx + ddz * ddz > radius_sq:
+				continue
+			var tile_z0: float = float(tz) * BROOK_TILE_SIZE
+			var tile_z1: float = float(tz + 1) * BROOK_TILE_SIZE
+			if tile_z1 < z_lo or tile_z0 > z_hi:
+				continue
+			var key := Vector2i(tx, tz)
+			needed[key] = true
+			if not _brook_tiles.has(key):
+				_brook_spawn_queue.append({"key": key, "tx": tx, "tz": tz})
+
+	var to_remove: Array = []
+	for key in _brook_tiles.keys():
+		if not needed.has(key):
+			to_remove.append(key)
+	for key in to_remove:
+		# Bodies may already be freed (player destroyed them). is_instance_valid
+		# guards against double-free on the queue_free side too.
+		for b in (_brook_tiles[key] as Dictionary).bodies:
+			if is_instance_valid(b):
+				(b as Node).queue_free()
+		_brook_tiles.erase(key)
+
+	var pruned: Array = []
+	for entry in _brook_spawn_queue:
+		if needed.has(entry.key) and not _brook_tiles.has(entry.key):
+			pruned.append(entry)
+	_brook_spawn_queue = pruned
+
+func _flush_brook_queue() -> void:
+	var budget: int = BROOK_TILE_SPAWN_BUDGET
+	while budget > 0 and not _brook_spawn_queue.is_empty():
+		var entry: Dictionary = _brook_spawn_queue.pop_front()
+		if _brook_tiles.has(entry.key):
+			continue
+		var bodies: Array = _build_brook_tile(entry.tx, entry.tz)
+		for b in bodies:
+			add_child(b)
+		_brook_tiles[entry.key] = {"bodies": bodies}
+		budget -= 1
+
+# March the centerline at BROOK_STEP intervals; at each step spawn at most one
+# DestructibleStone per bank. Returns the list of bodies; the streaming layer
+# adds them to the tree and tracks them per-tile for cleanup. Tile ownership of
+# a step is decided by the centerline z at that wx falling in the tile's z
+# range — exact same rule as the water mesh, so banks never duplicate at seams.
+func _build_brook_tile(tx: int, tz: int) -> Array:
+	if not STREAM_ENABLED:
+		return []
+	if _brook_medium_variants.is_empty() and _brook_small_variants.is_empty():
+		return []
+	var half: float = SIZE * 0.5
+	var x0: float = maxf(float(tx) * BROOK_TILE_SIZE, -half)
+	var x1: float = minf(float(tx + 1) * BROOK_TILE_SIZE, half)
+	if x1 - x0 < BROOK_STEP:
+		return []
+	var tile_z0: float = float(tz) * BROOK_TILE_SIZE
+	var tile_z1: float = float(tz + 1) * BROOK_TILE_SIZE
+	var rng := RandomNumberGenerator.new()
+	rng.seed = noise_seed * 7547 + tz * 100129 + tx
+
+	var out: Array = []
+	var steps: int = int(floor((x1 - x0) / BROOK_STEP))
+	for i in steps:
+		var wx: float = x0 + (float(i) + 0.5) * BROOK_STEP
+		# Skip stones that would fall inside the lake — they'd float on water.
+		if wx < _stream_x_start or wx > _stream_x_water_end:
+			continue
+		var cz: float = _centerline_z(wx)
+		if cz < tile_z0 or cz >= tile_z1:
+			continue
+		var eps: float = 0.5
+		var dcz: float = _centerline_z(wx + eps) - _centerline_z(wx - eps)
+		var tang := Vector2(2.0 * eps, dcz).normalized()
+		var perp := Vector2(-tang.y, tang.x)
+		for side in [-1.0, 1.0]:
+			if rng.randf() < BROOK_SKIP_CHANCE:
+				continue
+			var lateral: float = BROOK_BANK_OFFSET + (rng.randf() - 0.5) * BROOK_LATERAL_JITTER
+			var sx: float = wx + perp.x * lateral * side + tang.x * (rng.randf() - 0.5) * BROOK_STEP * 0.5
+			var sz: float = cz + perp.y * lateral * side + tang.y * (rng.randf() - 0.5) * BROOK_STEP * 0.5
+			var use_med: bool = (rng.randf() < BROOK_MED_CHANCE) and not _brook_medium_variants.is_empty()
+			var ground_h: float = _sample_height(_heights, sx, sz)
+			var scale_base: float = BROOK_MED_SCALE if use_med else BROOK_SMALL_SCALE
+			var variant_pool: Array = _brook_medium_variants if use_med else _brook_small_variants
+			if variant_pool.is_empty():
+				continue
+			var base_v: int = rng.randi() % variant_pool.size()
+			var base_var: Dictionary = variant_pool[base_v]
+			var base_xform: Transform3D = _brook_stone_transform(sx, sz, ground_h, rng, scale_base, BROOK_SINK)
+			var stone_script: GDScript = preload("res://entities/stone/stone.gd")
+			out.append(_make_stone_body(stone_script, base_var, base_xform))
+
+			# Stack: a smaller stone perched on top. Top-of-base ≈
+			# body_y + aabb.size.y * scale.y; place the stack body there.
+			if rng.randf() < BROOK_STACK_CHANCE and not _brook_small_variants.is_empty():
+				var stack_v: int = rng.randi() % _brook_small_variants.size()
+				var stack_var: Dictionary = _brook_small_variants[stack_v]
+				var base_scale_y: float = base_xform.basis.y.length()
+				var top_y: float = base_xform.origin.y + (base_var.aabb as AABB).size.y * base_scale_y * 0.95
+				var stack_xform: Transform3D = _brook_stack_transform(
+					sx + (rng.randf() - 0.5) * 0.5,
+					sz + (rng.randf() - 0.5) * 0.5,
+					top_y, rng, scale_base * 0.72
+				)
+				out.append(_make_stone_body(stone_script, stack_var, stack_xform))
+	return out
+
+func _brook_stone_transform(
+	wx: float, wz: float, h: float, rng: RandomNumberGenerator,
+	scale_base: float, sink: float
+) -> Transform3D:
+	var n: Vector3 = _sample_normal(_heights, wx, wz)
+	var up: Vector3 = n.lerp(Vector3.UP, 0.45).normalized()
+	var align := Basis(Quaternion(Vector3.UP, up))
+	var yaw := Basis(Vector3.UP, rng.randf() * TAU)
+	var sxz: float = scale_base * (0.85 + rng.randf() * 0.30)
+	var sy: float = scale_base * (0.75 + rng.randf() * 0.30)
+	var scale_basis := Basis().scaled(Vector3(sxz, sy, sxz))
+	return Transform3D(align * yaw * scale_basis, Vector3(wx, h - sink, wz))
+
+func _brook_stack_transform(
+	wx: float, wz: float, y: float, rng: RandomNumberGenerator, scale_base: float
+) -> Transform3D:
+	var yaw := Basis(Vector3.UP, rng.randf() * TAU)
+	var ang: float = rng.randf() * TAU
+	var lean_axis := Vector3(cos(ang), 0.0, sin(ang))
+	var lean := Basis(lean_axis, (rng.randf() * 0.18) + 0.04)
+	var sxz: float = scale_base * (0.85 + rng.randf() * 0.30)
+	var sy: float = scale_base * (0.75 + rng.randf() * 0.30)
+	var scale_basis := Basis().scaled(Vector3(sxz, sy, sxz))
+	return Transform3D(lean * yaw * scale_basis, Vector3(wx, y, wz))
+
+
+# --- Wildflowers --------------------------------------------------------------
+# MultiMesh-streamed flower fields. Each tile picks a "patch mode" from its
+# seed: a single species, a single color family, or a mixed wild meadow. Inside
+# the patch, a low-freq noise gates placement so flowers form irregular blobs
+# rather than carpeting every tile. Bank-bonus mirrors trees — wildflowers
+# crowd the riverbank.
+
+func _init_flower_resources() -> void:
+	_flower_variants = _load_glb_variants(FLOWER_PATHS)
+	_flower_patch_noise = FastNoiseLite.new()
+	_flower_patch_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_flower_patch_noise.seed = noise_seed + 173
+	_flower_patch_noise.frequency = FLOWER_PATCH_FREQ
+	_flower_patch_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_flower_patch_noise.fractal_octaves = 2
+
+func _stream_flowers(pos: Vector3) -> void:
+	if _flower_variants.is_empty():
+		return
+	var center_tx: int = int(floor(pos.x / FLOWER_TILE_SIZE))
+	var center_tz: int = int(floor(pos.z / FLOWER_TILE_SIZE))
+	var tile_radius: int = int(ceil(FLOWER_STREAM_RADIUS / FLOWER_TILE_SIZE)) + 1
+	var radius_sq: float = FLOWER_STREAM_RADIUS * FLOWER_STREAM_RADIUS
+
+	var needed: Dictionary = {}
+	for dz in range(-tile_radius, tile_radius + 1):
+		for dx in range(-tile_radius, tile_radius + 1):
+			var tx: int = center_tx + dx
+			var tz: int = center_tz + dz
+			var cx: float = (float(tx) + 0.5) * FLOWER_TILE_SIZE
+			var cz: float = (float(tz) + 0.5) * FLOWER_TILE_SIZE
+			var ddx: float = cx - pos.x
+			var ddz: float = cz - pos.z
+			if ddx * ddx + ddz * ddz > radius_sq:
+				continue
+			var key := Vector2i(tx, tz)
+			needed[key] = true
+			if not _flower_tiles.has(key):
+				_flower_spawn_queue.append({"key": key, "tx": tx, "tz": tz})
+
+	var to_remove: Array = []
+	for key in _flower_tiles.keys():
+		if not needed.has(key):
+			to_remove.append(key)
+	for key in to_remove:
+		for mmi in (_flower_tiles[key] as Dictionary).mmis:
+			(mmi as MultiMeshInstance3D).queue_free()
+		_flower_tiles.erase(key)
+
+	var pruned: Array = []
+	for entry in _flower_spawn_queue:
+		if needed.has(entry.key) and not _flower_tiles.has(entry.key):
+			pruned.append(entry)
+	_flower_spawn_queue = pruned
+
+func _flush_flower_queue() -> void:
+	var budget: int = FLOWER_TILE_SPAWN_BUDGET
+	while budget > 0 and not _flower_spawn_queue.is_empty():
+		var entry: Dictionary = _flower_spawn_queue.pop_front()
+		if _flower_tiles.has(entry.key):
+			continue
+		var mmis: Array = _build_flower_tile(entry.tx, entry.tz)
+		for mmi in mmis:
+			add_child(mmi)
+		_flower_tiles[entry.key] = {"mmis": mmis}
+		budget -= 1
+
+func _build_flower_tile(tx: int, tz: int) -> Array:
+	var x0: float = float(tx) * FLOWER_TILE_SIZE
+	var z0: float = float(tz) * FLOWER_TILE_SIZE
+	var half: float = SIZE * 0.5
+	if x0 + FLOWER_TILE_SIZE < -half or x0 > half or z0 + FLOWER_TILE_SIZE < -half or z0 > half:
+		return []
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = noise_seed * 86413 + tz * 100069 + tx
+	# Patch mode: 0 = single species, 1 = single color family, 2 = mixed.
+	# Weights bias toward more visually-distinct mono patches.
+	var roll: float = rng.randf()
+	var mode: int = 0 if roll < 0.45 else (1 if roll < 0.80 else 2)
+	var mode_variant: int = rng.randi() % _flower_variants.size()
+	var mode_family: int = rng.randi() % 3   # 0=red, 1=yellow, 2=purple
+	# Per-tile density offset. A symmetric range centered on 0 — half the tiles
+	# end up denser than the mean threshold, half sparser. Skewed slightly
+	# toward "denser" so the visual is more "fields" than "scattering".
+	var density_offset: float = (rng.randf() - 0.35) * FLOWER_DENSITY_VARIATION * 2.0
+	var tile_threshold: float = FLOWER_PATCH_THRESHOLD + density_offset
+
+	var per_variant: Array = []
+	per_variant.resize(_flower_variants.size())
+	for i in _flower_variants.size():
+		per_variant[i] = []
+
+	var n_side: int = int(FLOWER_TILE_SIZE / FLOWER_DENSITY_SPACING)
+	for iz in n_side:
+		for ix in n_side:
+			var wx: float = x0 + (float(ix) + rng.randf()) * FLOWER_DENSITY_SPACING
+			var wz: float = z0 + (float(iz) + rng.randf()) * FLOWER_DENSITY_SPACING
+			if wx < -half or wx > half or wz < -half or wz > half:
+				continue
+			var bank_boost: float = 0.0
+			if STREAM_ENABLED:
+				if _in_lake_keepout(wx, wz, 0.0):
+					continue
+				var dz_center: float = absf(wz - _centerline_z(wx))
+				if dz_center < FLOWER_BANK_EXCLUSION:
+					continue
+				if dz_center < FLOWER_BANK_INFLUENCE:
+					var ft: float = (dz_center - FLOWER_BANK_EXCLUSION) / (FLOWER_BANK_INFLUENCE - FLOWER_BANK_EXCLUSION)
+					bank_boost = FLOWER_BANK_BOOST * (1.0 - clampf(ft, 0.0, 1.0))
+			var p: float = (_flower_patch_noise.get_noise_2d(wx, wz) + 1.0) * 0.5
+			if p < tile_threshold - bank_boost:
+				continue
+			var n: Vector3 = _sample_normal(_heights, wx, wz)
+			if n.y < FLOWER_MIN_NORMAL_Y:
+				continue
+			var h: float = _sample_height(_heights, wx, wz)
+			if h < FLOWER_MIN_ELEV or h > FLOWER_MAX_ELEV:
+				continue
+			var variant: int
+			if mode == 0:
+				variant = mode_variant
+			elif mode == 1:
+				variant = mode_family * FLOWER_FAMILY_SIZE + (rng.randi() % FLOWER_FAMILY_SIZE)
+			else:
+				variant = rng.randi() % _flower_variants.size()
+			var up: Vector3 = n.lerp(Vector3.UP, 0.6).normalized()
+			var align := Basis(Quaternion(Vector3.UP, up))
+			var yaw := Basis(Vector3.UP, rng.randf() * TAU)
+			var s: float = FLOWER_SCALE_BASE + rng.randf() * FLOWER_SCALE_JITTER
+			var scale_basis := Basis().scaled(Vector3(s, s + rng.randf() * 0.35, s))
+			(per_variant[variant] as Array).append(
+				Transform3D(align * yaw * scale_basis, Vector3(wx, h - FLOWER_SINK, wz))
+			)
+
+	var aabb := AABB(
+		Vector3(x0, -10.0, z0),
+		Vector3(FLOWER_TILE_SIZE, 200.0, FLOWER_TILE_SIZE)
+	)
+	var out: Array = []
+	for v in _flower_variants.size():
+		var ts: Array = per_variant[v]
+		if ts.is_empty():
+			continue
+		var parts: Array = (_flower_variants[v] as Dictionary).parts
+		for part in parts:
+			var mm := MultiMesh.new()
+			mm.transform_format = MultiMesh.TRANSFORM_3D
+			mm.mesh = part.mesh
+			mm.instance_count = ts.size()
+			for j in ts.size():
+				mm.set_instance_transform(j, (ts[j] as Transform3D) * (part.xform as Transform3D))
+			var mmi := MultiMeshInstance3D.new()
+			mmi.multimesh = mm
+			mmi.custom_aabb = aabb
+			mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			out.append(mmi)
+	return out
