@@ -76,7 +76,7 @@ const GRASS_TALL_HEIGHT_SCALE: float = 2.1
 const GRASS_TALL_WIDTH_SCALE: float = 1.3
 const GRASS_BLADE_HEIGHT: float = 0.58
 const GRASS_BLADE_WIDTH: float = 0.05
-const GRASS_BLADE_SEGMENTS: int = 7
+const GRASS_BLADE_SEGMENTS: int = 3
 const GRASS_MIN_NORMAL_Y: float = 0.78        # matches ground shader's rock_mask onset — no grass on stone
 const GRASS_MAX_ELEV: float = 55.0
 const GRASS_ELEV_FADE: float = 14.0
@@ -89,10 +89,10 @@ const PATCH_SHORT_GRID: int = 833          # ~15/m² (2/3 of prior density)
 const PATCH_TALL_GRID: int = 277          # +1/3 density vs prior
 # Inner "core" — a small ultra-dense patch right at the player's feet. Always
 # inside FADE_INNER, so the shader's taper never culls it.
-const PATCH_CORE_SIZE: float = 60.0
+const PATCH_CORE_SIZE: float = 80.0
 const PATCH_CORE_GRID: int = 820
 const PATCH_CORE_FADE_INNER: float = 22.0
-const PATCH_CORE_FADE_OUTER: float = 30.0
+const PATCH_CORE_FADE_OUTER: float = 40.0
 const PATCH_SNAP: float = 1.0              # snap follow to whole meters (no shimmer)
 # Density profile: full inside FADE_INNER, tapers smoothly to zero at FADE_OUTER
 # via per-blade probabilistic skip — no visible ring at the boundary.
@@ -313,6 +313,7 @@ var _grass_material_tall: ShaderMaterial
 var _grass_material_patch_short: ShaderMaterial
 var _grass_material_patch_tall: ShaderMaterial
 var _grass_material_patch_core: ShaderMaterial
+var _sun_light: DirectionalLight3D
 var _height_tex: ImageTexture
 var _centerline_z_tex: ImageTexture
 var _grass_patch_mmis: Array = []   # [short MMI, tall MMI]
@@ -417,8 +418,245 @@ func _ready() -> void:
 		_water_material = _build_water_material()
 		_sand_material = _build_sand_material()
 		_build_lake()
+	var parent := get_parent()
+	if parent:
+		_sun_light = parent.get_node_or_null("DirectionalLight3D") as DirectionalLight3D
+	_spawn_fps_overlay()
+	# _spawn_tile_grass_controls()
+	_spawn_loading_screen()
+
+var _fps_label: Label
+var _coord_label: Label
+var _loading_overlay: ColorRect
+var _loading_label: Label
+var _loading_t: float = 0.0
+var _loading_done: bool = false
+
+func _spawn_loading_screen() -> void:
+	var canvas := CanvasLayer.new()
+	canvas.layer = 100
+	add_child(canvas)
+	_loading_overlay = ColorRect.new()
+	_loading_overlay.color = Color(0.04, 0.05, 0.07, 1.0)
+	_loading_overlay.anchor_right = 1.0
+	_loading_overlay.anchor_bottom = 1.0
+	canvas.add_child(_loading_overlay)
+	_loading_label = Label.new()
+	_loading_label.text = "Loading…"
+	_loading_label.add_theme_font_size_override("font_size", 48)
+	_loading_label.add_theme_color_override("font_color", Color(0.9, 0.92, 0.95, 1.0))
+	_loading_label.anchor_left = 0.5
+	_loading_label.anchor_top = 0.5
+	_loading_label.anchor_right = 0.5
+	_loading_label.anchor_bottom = 0.5
+	_loading_label.offset_left = -120
+	_loading_label.offset_top = -32
+	_loading_label.offset_right = 120
+	_loading_label.offset_bottom = 32
+	_loading_overlay.add_child(_loading_label)
+
+func _streaming_queue_total() -> int:
+	return _chunk_spawn_queue.size() + _tile_spawn_queue.size() + \
+		_tree_spawn_queue.size() + _water_spawn_queue.size() + \
+		_stone_spawn_queue.size() + _brook_spawn_queue.size() + \
+		_flower_spawn_queue.size()
+
+func _update_loading_screen(dt: float) -> void:
+	if _loading_done or _loading_overlay == null:
+		return
+	_loading_t += dt
+	# Wait until streaming has caught up, or 8s max so we never strand the player.
+	var queue_total := _streaming_queue_total()
+	var queue_quiet: bool = _loading_t > 1.0 and queue_total <= 4
+	var timeout: bool = _loading_t > 8.0
+	if queue_quiet or timeout:
+		# Fade out over 0.6s.
+		var fade_t: float = (_loading_t - max(1.0, _loading_t)) / 0.6
+		_loading_overlay.color.a = max(0.0, 1.0 - _loading_t / 0.6 + (1.0 if _loading_t < 1.0 else 0.0))
+		# Simpler: linear fade out 0.6s after we hit the "quiet" condition.
+		if not _loading_overlay.has_meta("fade_start"):
+			_loading_overlay.set_meta("fade_start", _loading_t)
+		var fs: float = _loading_overlay.get_meta("fade_start")
+		var alpha: float = 1.0 - clamp((_loading_t - fs) / 0.6, 0.0, 1.0)
+		_loading_overlay.color.a = alpha
+		_loading_label.modulate.a = alpha
+		if alpha <= 0.0:
+			_loading_done = true
+			_loading_overlay.queue_free()
+			_loading_overlay = null
+			_loading_label = null
+	else:
+		_loading_label.text = "Loading…  (%d tiles)" % queue_total
+
+func _spawn_fps_overlay() -> void:
+	var canvas := CanvasLayer.new()
+	add_child(canvas)
+	_fps_label = Label.new()
+	_fps_label.position = Vector2(12, 8)
+	_fps_label.add_theme_color_override("font_color", Color(1, 1, 1, 1))
+	_fps_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+	_fps_label.add_theme_constant_override("outline_size", 4)
+	canvas.add_child(_fps_label)
+	_coord_label = Label.new()
+	_coord_label.position = Vector2(12, 28)
+	_coord_label.add_theme_color_override("font_color", Color(1, 1, 1, 1))
+	_coord_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+	_coord_label.add_theme_constant_override("outline_size", 4)
+	canvas.add_child(_coord_label)
+
+func _spawn_tile_grass_controls() -> void:
+	if not _grass_material_short:
+		return
+	var canvas := CanvasLayer.new()
+	add_child(canvas)
+	# Three side-by-side scrollable panels — CLOSE patch (inside fade_inner),
+	# TAPER patch (between fade_inner and fade_outer), DISTANT tile grass.
+	var hb := HBoxContainer.new()
+	hb.position = Vector2(20, 40)
+	canvas.add_child(hb)
+	var patch_mats: Array = [
+		_grass_material_patch_short,
+		_grass_material_patch_tall,
+		_grass_material_patch_core,
+	]
+	var tile_mats: Array = [_grass_material_short, _grass_material_tall]
+	# Region 1 = CORE + SHORT/TALL inside 22m (no panel — fine as-is).
+	# Region 2 = SHORT/TALL color override past color_zone_outer.
+	_build_grass_panel_taper(hb, "REGION 2 (mid annulus)", patch_mats)
+	# Region 3 = tile grass, fades in 56→106m.
+	_build_grass_panel(hb, "REGION 3 (distant)", tile_mats, "")
+
+func _build_grass_panel(parent: Node, title_text: String, materials: Array, suffix: String) -> void:
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(330, 560)
+	parent.add_child(scroll)
+	var panel := PanelContainer.new()
+	scroll.add_child(panel)
+	var vb := VBoxContainer.new()
+	panel.add_child(vb)
+	var title := Label.new()
+	title.text = title_text
+	vb.add_child(title)
+	_add_grass_slider(vb, materials, "albedo_boost" + suffix, 0.5, 3.0, 1.0)
+	_add_grass_slider(vb, materials, "flat_emission" + suffix, 0.0, 0.30, 0.0)
+	_add_grass_slider(vb, materials, "tile_fade_in_inner", 0.0, 200.0, 56.0)
+	_add_grass_slider(vb, materials, "tile_fade_in_outer", 0.0, 200.0, 106.0)
+	_add_grass_slider(vb, materials, "backlight_strength", 0.0, 3.0, 0.6)
+	_add_grass_slider(vb, materials, "roughness_val", 0.05, 1.0, 0.60)
+	_add_grass_slider(vb, materials, "specular_val", 0.0, 1.0, 0.10)
+	_add_grass_slider(vb, materials, "normal_flatten", 0.0, 1.0, 0.30)
+	_add_grass_slider(vb, materials, "hemi_tilt", 0.0, 1.2, 0.55)
+	_add_grass_slider(vb, materials, "yellow_chance", 0.0, 0.6, 0.18)
+	_add_grass_slider(vb, materials, "wind_strength", 0.0, 1.5, 0.55)
+	_add_grass_slider(vb, materials, "wind_speed", 0.0, 4.0, 1.1)
+	_add_grass_color(vb, materials, "base_color" + suffix, Color(0.05, 0.09, 0.05))
+	_add_grass_color(vb, materials, "tip_lush", Color(0.18, 0.32, 0.10))
+	_add_grass_color(vb, materials, "tip_meadow" + suffix, Color(0.24, 0.36, 0.14))
+	_add_grass_color(vb, materials, "tip_dry" + suffix, Color(0.34, 0.40, 0.16))
+	_add_grass_color(vb, materials, "tip_yellow" + suffix, Color(0.48, 0.42, 0.12))
+	_add_grass_color(vb, materials, "sss_tint", Color(0.95, 1.0, 0.45))
+
+func _build_grass_panel_taper(parent: Node, title_text: String, materials: Array) -> void:
+	# Only the taper-affected params: colors + brightness. Material/geometry
+	# params are shared with the CLOSE panel.
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(330, 560)
+	parent.add_child(scroll)
+	var panel := PanelContainer.new()
+	scroll.add_child(panel)
+	var vb := VBoxContainer.new()
+	panel.add_child(vb)
+	var title := Label.new()
+	title.text = title_text
+	vb.add_child(title)
+	# Radius sliders apply only to SHORT/TALL patch materials, not CORE
+	# (CORE keeps color_zone at ∞ so it always reads as Region 1).
+	var short_tall_only: Array = [_grass_material_patch_short, _grass_material_patch_tall]
+	var core_only: Array = [_grass_material_patch_core]
+	_add_grass_slider(vb, short_tall_only, "color_zone_inner", 0.0, 200.0, 22.0)
+	_add_grass_slider(vb, short_tall_only, "color_zone_outer", 0.0, 200.0, 56.0)
+	# SHORT/TALL fade-IN — they grow from 0 → full density across this range,
+	# matching CORE's fade-out so combined density stays flat.
+	_add_grass_slider(vb, short_tall_only, "fade_in_inner", 0.0, 200.0, 22.0)
+	_add_grass_slider(vb, short_tall_only, "fade_in_outer", 0.0, 200.0, 56.0)
+	_add_grass_slider(vb, short_tall_only, "fade_inner", 0.0, 200.0, 56.0)
+	_add_grass_slider(vb, short_tall_only, "fade_outer", 0.0, 200.0, 106.0)
+	# CORE fade controls — how dense-grass density tapers out. Wider = softer
+	# transition between Region 1 and Region 2 (the visible "hard cutoff").
+	_add_grass_slider(vb, core_only, "fade_inner", 0.0, 100.0, 22.0)
+	_add_grass_slider(vb, core_only, "fade_outer", 0.0, 100.0, 56.0)
+	_add_grass_slider(vb, materials, "albedo_boost_taper", 0.5, 3.0, 1.0)
+	_add_grass_slider(vb, materials, "flat_emission_taper", 0.0, 0.30, 0.0)
+	_add_grass_slider(vb, materials, "ao_min_taper", 0.0, 1.0, 0.45)
+	_add_grass_color(vb, materials, "base_color_taper", Color(0.05, 0.09, 0.05))
+	_add_grass_color(vb, materials, "tip_meadow_taper", Color(0.24, 0.36, 0.14))
+	_add_grass_color(vb, materials, "tip_dry_taper", Color(0.34, 0.40, 0.16))
+	_add_grass_color(vb, materials, "tip_yellow_taper", Color(0.48, 0.42, 0.12))
+
+func _add_grass_slider(parent: Node, materials: Array, param: String, lo: float, hi: float, initial: float) -> void:
+	var row := HBoxContainer.new()
+	parent.add_child(row)
+	var lbl := Label.new()
+	lbl.text = param
+	lbl.custom_minimum_size = Vector2(130, 0)
+	row.add_child(lbl)
+	var slider := HSlider.new()
+	slider.min_value = lo
+	slider.max_value = hi
+	slider.step = (hi - lo) / 100.0
+	slider.value = initial
+	slider.custom_minimum_size = Vector2(120, 18)
+	row.add_child(slider)
+	var val := Label.new()
+	val.text = "%.3f" % initial
+	val.custom_minimum_size = Vector2(56, 0)
+	row.add_child(val)
+	slider.value_changed.connect(func(v: float) -> void:
+		val.text = "%.3f" % v
+		for mat in materials:
+			if mat:
+				(mat as ShaderMaterial).set_shader_parameter(param, v)
+	)
+
+func _add_grass_color(parent: Node, materials: Array, param: String, initial: Color) -> void:
+	var row := HBoxContainer.new()
+	parent.add_child(row)
+	var lbl := Label.new()
+	lbl.text = param
+	lbl.custom_minimum_size = Vector2(130, 0)
+	row.add_child(lbl)
+	var btn := ColorPickerButton.new()
+	btn.color = initial
+	btn.custom_minimum_size = Vector2(120, 22)
+	btn.edit_alpha = false
+	row.add_child(btn)
+	btn.color_changed.connect(func(c: Color) -> void:
+		for mat in materials:
+			if mat:
+				(mat as ShaderMaterial).set_shader_parameter(param, c)
+	)
 
 func _process(_dt: float) -> void:
+	_update_loading_screen(_dt)
+	if _fps_label:
+		_fps_label.text = "%d fps" % Engine.get_frames_per_second()
+	if _coord_label:
+		var c: Camera3D = get_viewport().get_camera_3d()
+		if c:
+			var p: Vector3 = c.global_position
+			_coord_label.text = "x %.1f  y %.1f  z %.1f  (r %.1f from origin)" % [p.x, p.y, p.z, Vector2(p.x, p.z).length()]
+	if _sun_light:
+		var sun_dir: Vector3 = _sun_light.global_basis.z.normalized()
+		if _grass_material_short:
+			_grass_material_short.set_shader_parameter("sun_dir_world", sun_dir)
+		if _grass_material_tall:
+			_grass_material_tall.set_shader_parameter("sun_dir_world", sun_dir)
+		if _grass_material_patch_short:
+			_grass_material_patch_short.set_shader_parameter("sun_dir_world", sun_dir)
+		if _grass_material_patch_tall:
+			_grass_material_patch_tall.set_shader_parameter("sun_dir_world", sun_dir)
+		if _grass_material_patch_core:
+			_grass_material_patch_core.set_shader_parameter("sun_dir_world", sun_dir)
 	var cam: Camera3D = get_viewport().get_camera_3d()
 	if cam == null:
 		return
@@ -432,14 +670,14 @@ func _process(_dt: float) -> void:
 		# snapping the MMI to 1m would only desync each layer's coverage with
 		# the patch position (each layer's cell_step is different, none divides
 		# 1m evenly). Continuous follow + per-layer offset = smooth.
-		var center := Vector2(pos.x, pos.z)
-		var step_short: float = PATCH_SIZE / float(PATCH_SHORT_GRID)
-		var step_tall: float = PATCH_SIZE / float(PATCH_TALL_GRID)
-		var step_core: float = PATCH_CORE_SIZE / float(PATCH_CORE_GRID)
 		# Patches stay at world origin; the shader anchors blades to integer
 		# world cells via wo + patch_cell_offset. Sliding patch_cell_offset
 		# per frame moves the visible disc with the player without moving
 		# the MMI (which would risk float-precision loss in wo extraction).
+		var center := Vector2(pos.x, pos.z)
+		var step_short: float = PATCH_SIZE / float(PATCH_SHORT_GRID)
+		var step_tall: float = PATCH_SIZE / float(PATCH_TALL_GRID)
+		var step_core: float = PATCH_CORE_SIZE / float(PATCH_CORE_GRID)
 		_grass_material_patch_short.set_shader_parameter("patch_center", center)
 		_grass_material_patch_tall.set_shader_parameter("patch_center", center)
 		_grass_material_patch_core.set_shader_parameter("patch_center", center)
@@ -452,8 +690,11 @@ func _process(_dt: float) -> void:
 		_grass_material_patch_core.set_shader_parameter(
 			"patch_cell_offset", Vector2(round(pos.x / step_core), round(pos.z / step_core))
 		)
-		# Update each MMI's custom_aabb to a player-centered box so Godot's
-		# frustum culling still works (the MMI itself stays at world origin).
+		# Tile shaders cull blades inside the close-patch radius around the player.
+		_grass_material_short.set_shader_parameter("tile_cull_center", center)
+		_grass_material_tall.set_shader_parameter("tile_cull_center", center)
+		# AABB tracks the player so Godot's frustum culling stays accurate even
+		# though the MMI itself stays at world origin.
 		for mmi in _grass_patch_mmis:
 			var m := mmi as MultiMeshInstance3D
 			var psize: float = float(m.get_meta("patch_size"))
@@ -775,11 +1016,41 @@ func _init_foliage_resources() -> void:
 	_grass_mesh_tall = _build_grass_blade_mesh(GRASS_TALL_HEIGHT_SCALE, GRASS_TALL_WIDTH_SCALE)
 	_grass_material_short = _build_grass_material(false)
 	_grass_material_tall = _build_grass_material(true)
+	# Sparse tile grass reads dark against mountain backdrop; lift its
+	# albedo a touch and give it a tiny flat emission so individual blades
+	# pop. Tweakable via the runtime UI controls.
+	_grass_material_short.set_shader_parameter("albedo_boost", 1.25)
+	_grass_material_short.set_shader_parameter("flat_emission", 0.04)
+	_grass_material_tall.set_shader_parameter("albedo_boost", 1.25)
+	_grass_material_tall.set_shader_parameter("flat_emission", 0.04)
+	# Tile blades fade in probabilistically from `tile_fade_in_inner` →
+	# `tile_fade_in_outer`. Matches the SHORT/TALL patch fade-out range so
+	# the two systems crossfade in the same 56→106m ring.
+	_grass_material_short.set_shader_parameter("tile_fade_in_inner", PATCH_FADE_INNER)
+	_grass_material_short.set_shader_parameter("tile_fade_in_outer", PATCH_FADE_OUTER)
+	_grass_material_tall.set_shader_parameter("tile_fade_in_inner", PATCH_FADE_INNER)
+	_grass_material_tall.set_shader_parameter("tile_fade_in_outer", PATCH_FADE_OUTER)
 	_grass_material_patch_short = _build_grass_patch_material(false)
 	_grass_material_patch_tall = _build_grass_patch_material(true)
 	_grass_material_patch_core = _build_grass_patch_material(false)
 	_grass_material_patch_core.set_shader_parameter("fade_inner", PATCH_CORE_FADE_INNER)
 	_grass_material_patch_core.set_shader_parameter("fade_outer", PATCH_CORE_FADE_OUTER)
+	# CORE always reads as REGION 1 — push the color zone far out so v_taper
+	# stays 0 across CORE's visible range (0–30m).
+	_grass_material_patch_core.set_shader_parameter("color_zone_inner", 1.0e6)
+	_grass_material_patch_core.set_shader_parameter("color_zone_outer", 1.0e6 + 1.0)
+	# SHORT/TALL fade IN across the same range CORE fades OUT (22→30m now).
+	# Together the combined density stays roughly flat across the handoff,
+	# eliminating the geometric cliff. The magnitude mismatch (187 vs 16
+	# blades/m²) still creates a visible thinning, but it's smooth, not a step.
+	_grass_material_patch_short.set_shader_parameter("fade_in_inner", PATCH_CORE_FADE_INNER)
+	_grass_material_patch_short.set_shader_parameter("fade_in_outer", PATCH_CORE_FADE_OUTER)
+	_grass_material_patch_tall.set_shader_parameter("fade_in_inner", PATCH_CORE_FADE_INNER)
+	_grass_material_patch_tall.set_shader_parameter("fade_in_outer", PATCH_CORE_FADE_OUTER)
+	# Clump-density modulation: SHORT/TALL patches use the fBm clump noise to
+	# thin out dry-biome cells. CORE stays uniformly dense at the player's feet.
+	_grass_material_patch_short.set_shader_parameter("clump_strength", 0.85)
+	_grass_material_patch_tall.set_shader_parameter("clump_strength", 0.85)
 	_tree_variants = _load_tree_variants()
 
 func _build_height_texture() -> void:
@@ -2218,12 +2489,29 @@ func _build_grass_material(with_wind: bool) -> ShaderMaterial:
 shader_type spatial;
 render_mode cull_disabled, diffuse_burley, specular_disabled;
 
-uniform vec3 base_color   : source_color = vec3(0.03, 0.10, 0.03);
-uniform vec3 tip_lush     : source_color = vec3(0.30, 0.60, 0.16);
-uniform vec3 tip_meadow   : source_color = vec3(0.42, 0.66, 0.22);
-uniform vec3 tip_dry      : source_color = vec3(0.55, 0.88, 0.20);
-uniform vec3 tip_yellow   : source_color = vec3(0.82, 0.74, 0.18);
+uniform vec3 base_color   : source_color = vec3(0.05, 0.09, 0.05);
+uniform vec3 tip_lush     : source_color = vec3(0.18, 0.32, 0.10);
+uniform vec3 tip_meadow   : source_color = vec3(0.24, 0.36, 0.14);
+uniform vec3 tip_dry      : source_color = vec3(0.34, 0.40, 0.16);
+uniform vec3 tip_yellow   : source_color = vec3(0.48, 0.42, 0.12);
+uniform vec3 sss_tint     : source_color = vec3(0.95, 1.05, 0.45);
 uniform float yellow_chance = 0.18;
+uniform float backlight_strength = 0.6;
+// Tweakable runtime params for sparse-tile-grass appearance.
+uniform float albedo_boost = 1.0;
+uniform float flat_emission = 0.0;
+uniform float roughness_val = 0.60;
+uniform float specular_val = 0.10;
+uniform float normal_flatten = 0.30;
+uniform float hemi_tilt = 0.55;
+// Tile density fades in linearly across `tile_fade_in_inner..outer`. Inside
+// `inner`, no tile blades. Past `outer`, full density. Default 0/0 = full.
+uniform vec2  tile_cull_center = vec2(0.0);
+uniform float tile_fade_in_inner = 0.0;
+uniform float tile_fade_in_outer = 0.0;
+// Direction TOWARD the sun in world space, set per-frame from the
+// DirectionalLight3D. Default = straight up so first frame isn't black.
+uniform vec3  sun_dir_world = vec3(0.0, 1.0, 0.0);
 uniform float wind_speed     = 1.1;
 uniform float wind_strength  = 0.55;
 uniform vec2  wind_dir       = vec2(0.7, 0.7);
@@ -2252,11 +2540,26 @@ float fbm(vec2 p) {
 
 varying vec3 v_world_pos;
 varying float v_patch;
+// Hemisphere normal basis: pull world-space "across" and "out-of-blade"
+// directions from the instance's MODEL_MATRIX columns (yaw is baked into
+// the instance basis on the CPU side).
+varying vec3 v_blade_x_world;
+varying vec3 v_blade_n_world;
 
 void vertex() {
 	vec3 wo = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 	v_world_pos = wo;
 	v_patch = fbm(wo.xz * patch_scale);
+	// Mesh-local +X = across the blade; +Z = blade normal (out of the plane).
+	// Guard against a zero MODEL_MATRIX (briefly-uninit'd streaming instance)
+	// producing NaN through normalize() — that NaN propagates to EMISSION and
+	// becomes a giant one-frame bloom flash on screen.
+	vec3 mx = (MODEL_MATRIX * vec4(1.0, 0.0, 0.0, 0.0)).xyz;
+	vec3 mn = (MODEL_MATRIX * vec4(0.0, 0.0, 1.0, 0.0)).xyz;
+	float lx = length(mx);
+	float ln = length(mn);
+	v_blade_x_world = lx > 0.0001 ? mx / lx : vec3(1.0, 0.0, 0.0);
+	v_blade_n_world = ln > 0.0001 ? mn / ln : vec3(0.0, 0.0, 1.0);
 
 	float bend = UV.y;
 	float bend2 = bend * bend;
@@ -2274,6 +2577,21 @@ void vertex() {
 }
 
 void fragment() {
+	// Soft fade-in: tile blades are probabilistically discarded based on
+	// their distance to `tile_cull_center`. Inside `tile_fade_in_inner` →
+	// 100% culled. Past `tile_fade_in_outer` → 100% kept. Linear interp
+	// in between, with the per-blade hash determining which side of the
+	// threshold this blade lands on.
+	if (tile_fade_in_outer > tile_fade_in_inner) {
+		float r = length(v_world_pos.xz - tile_cull_center);
+		float keep_p = smoothstep(tile_fade_in_inner, tile_fade_in_outer, r);
+		// Per-blade deterministic hash from the instance's world origin
+		// (v_world_pos.xz is constant across the blade since all the
+		// blade's vertices share the same instance origin).
+		vec2 p = floor(v_world_pos.xz * 7.13);
+		float surv = fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+		if (surv > keep_p) discard;
+	}
 	float bend = COLOR.r;
 	float dry  = COLOR.g;
 	float hue  = COLOR.b;
@@ -2285,21 +2603,31 @@ void fragment() {
 	// Minority yellow blades scattered across the field.
 	tip = mix(tip, tip_yellow, step(1.0 - yellow_chance, hue));
 
-	vec3 col = mix(base_color, tip, bend);
-	// Per-instance dryness pulls toward dry tip color
-	col = mix(col, mix(base_color * 0.85, tip_dry, bend), dry * 0.7);
-	// Per-instance hue jitter
-	col *= mix(0.85, 1.15, hue);
-	// Base AO so root area reads dark
-	col *= mix(0.55, 1.0, bend);
+	float t_bend = pow(max(bend, 0.0), 1.5);
+	vec3 col = mix(base_color, tip, t_bend);
+	col = mix(col, mix(base_color * 0.85, tip_dry, t_bend), dry * 0.7);
+	col *= mix(0.92, 1.08, hue);
+	// Stronger micro-AO at the base; real shadow pass handles patch occlusion.
+	col *= mix(0.45, 1.0, bend);
 
-	ALBEDO = col;
-	ROUGHNESS = 0.95;
-	SPECULAR = 0.05;
-	// Backlit tip: lift emission when sun behind the blade (cheap SSS fake).
-	EMISSION = tip * 0.06 * bend;
-	// Normal soften toward up so the field reads as a mass.
-	NORMAL = normalize(mix(NORMAL, vec3(0.0, 1.0, 0.0), bend * 0.65));
+	ALBEDO = col * albedo_boost;
+	ROUGHNESS = roughness_val;
+	SPECULAR = specular_val;
+	// Hemisphere normal: tilt outward across the blade so the ribbon reads as
+	// a curved cylinder. tilt at ~31° peak.
+	float tilt = clamp((UV.x - 0.5) * 2.0, -1.0, 1.0) * hemi_tilt;
+	vec3 hemi_world = normalize(v_blade_n_world * cos(tilt) + v_blade_x_world * sin(tilt));
+	hemi_world = normalize(mix(hemi_world, vec3(0.0, 1.0, 0.0), bend * normal_flatten));
+	// Distance-based normal flatten — kills specular aliasing on far blades.
+	float view_dist = length(VERTEX);
+	float far_flat = smoothstep(20.0, 60.0, view_dist);
+	hemi_world = normalize(mix(hemi_world, vec3(0.0, 1.0, 0.0), far_flat * 0.6));
+	NORMAL = normalize(mat3(VIEW_MATRIX) * hemi_world);
+	// Backlit translucency (cheap SSS).
+	vec3 view_dir_world = normalize(mat3(INV_VIEW_MATRIX) * VIEW);
+	float back = max(0.0, -dot(view_dir_world, sun_dir_world));
+	float sss = pow(max(back, 0.0), 4.0) * (0.3 + 0.7 * max(bend, 0.0)) * backlight_strength;
+	EMISSION = sss_tint * tip * sss + tip * flat_emission;
 }
 """
 	var wind_block: String
@@ -2351,12 +2679,49 @@ uniform int   grid_i       = 820;
 // position. World cell = INSTANCE_CUSTOM.xy + patch_cell_offset. CPU-computed
 // with doubles so the world-cell mapping is exact and never collides.
 uniform vec2  patch_cell_offset = vec2(0.0);
+// 0 = no clump density modulation (CORE — full density right at player).
+// 1 = full clump modulation (SHORT/TALL — dry patches sparser).
+uniform float clump_strength = 0.0;
 
-uniform vec3  base_color  : source_color = vec3(0.03, 0.10, 0.03);
-uniform vec3  tip_meadow  : source_color = vec3(0.40, 0.66, 0.20);
-uniform vec3  tip_dry     : source_color = vec3(0.55, 0.88, 0.20);
-uniform vec3  tip_yellow  : source_color = vec3(0.82, 0.74, 0.18);
+uniform vec3  base_color  : source_color = vec3(0.05, 0.09, 0.05);
+uniform vec3  tip_meadow  : source_color = vec3(0.24, 0.36, 0.14);
+uniform vec3  tip_dry     : source_color = vec3(0.34, 0.40, 0.16);
+uniform vec3  tip_yellow  : source_color = vec3(0.48, 0.42, 0.12);
+uniform vec3  sss_tint    : source_color = vec3(0.95, 1.05, 0.45);
 uniform float yellow_chance = 0.18;
+uniform float backlight_strength = 0.6;
+// Tweakable runtime params for tile-grass-style controls on the patch.
+uniform float albedo_boost = 1.0;
+uniform float flat_emission = 0.0;
+uniform float roughness_val = 0.60;
+uniform float specular_val = 0.10;
+uniform float normal_flatten = 0.30;
+uniform float hemi_tilt = 0.55;
+// REGION 2 uniforms — SHORT/TALL blades smoothly lerp from the primary
+// (region 1) uniforms above to these across `color_zone_inner..outer`.
+// On the CORE material we set the zone to ∞ so CORE stays in region 1.
+uniform vec3  base_color_taper   : source_color = vec3(0.05, 0.09, 0.05);
+uniform vec3  tip_meadow_taper   : source_color = vec3(0.24, 0.36, 0.14);
+uniform vec3  tip_dry_taper      : source_color = vec3(0.34, 0.40, 0.16);
+uniform vec3  tip_yellow_taper   : source_color = vec3(0.48, 0.42, 0.12);
+uniform float albedo_boost_taper = 1.0;
+uniform float flat_emission_taper = 0.0;
+// AO floor — sets how dark blade bases get. 1.0 = no AO. Lerped between
+// region 1 (ao_min) and region 2 (ao_min_taper) by v_taper.
+uniform float ao_min = 0.45;
+uniform float ao_min_taper = 0.45;
+uniform float color_zone_inner = 22.0;
+uniform float color_zone_outer = 56.0;
+// Density fade-in: blades inside this range are probabilistically culled
+// (smoothly grows from 0 → full density). Defaults make the formula a no-op
+// (fade_in_outer ≤ fade_in_inner → smoothstep returns 1 everywhere). CORE
+// uses defaults; SHORT/TALL sets fade_in to match CORE's fade-out range so
+// total density stays roughly constant across the CORE→SHORT/TALL handoff.
+uniform float fade_in_inner = -1.0;
+uniform float fade_in_outer = 0.0;
+// Direction TOWARD the sun in world space, set per-frame from the
+// DirectionalLight3D. Default = straight up so first frame isn't black.
+uniform vec3  sun_dir_world = vec3(0.0, 1.0, 0.0);
 uniform float wind_speed     = 1.1;
 uniform float wind_strength  = 0.55;
 uniform vec2  wind_dir       = vec2(0.7, 0.7);
@@ -2379,6 +2744,33 @@ vec2 h22(vec2 p) {
 	p3 += dot(p3, p3.yzx + 33.33);
 	return fract(vec2((p3.x + p3.y) * p3.z, (p3.x + p3.z) * p3.y));
 }
+
+// 2D value noise + 5-octave fBm for large-scale color clumping across the
+// meadow. Same as the tile shader's noise.
+float vnoise2(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	float a = h12(i);
+	float b = h12(i + vec2(1.0, 0.0));
+	float c = h12(i + vec2(0.0, 1.0));
+	float d = h12(i + vec2(1.0, 1.0));
+	vec2 u = f * f * (3.0 - 2.0 * f);
+	return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+}
+float fbm2(vec2 p) {
+	float v = 0.0; float a = 0.5;
+	for (int i = 0; i < 4; i++) { v += a * vnoise2(p); p *= 2.05; a *= 0.5; }
+	return v;
+}
+
+// Hemisphere normal: each fragment's UV.x tells us where across the blade
+// we are; we tilt the world-space normal outward as if the blade were a
+// curved cylinder rather than a flat ribbon.
+varying vec3 v_blade_x_world;
+varying vec3 v_blade_n_world;
+varying float v_clump;   // large-scale color biome noise sampled per-instance
+varying float v_slope_y; // smoothed terrain normal Y at the blade — feeds dryness shift
+varying float v_taper;   // 0 inside fade_inner (close), 1 past fade_outer (no-grass land)
 
 void vertex() {
 	// World-anchored blade. Each instance owns a fixed LOCAL cell index
@@ -2404,6 +2796,13 @@ void vertex() {
 	vec2  lean_c = (h22(cell + 11.0) * 2.0 - 1.0) * 0.7;
 	float surv   = h12(cell + 17.0);
 
+	// World-space basis for the blade ribbon. Mesh-local +X = across the blade,
+	// +Z = blade normal (out of the ribbon plane). After yaw rotation around Y:
+	float cy = cos(yaw);
+	float sy_yaw = sin(yaw);
+	v_blade_x_world = vec3(cy, 0.0, sy_yaw);
+	v_blade_n_world = vec3(-sy_yaw, 0.0, cy);
+
 	float h = sample_h(anchored);
 
 	float h_l = sample_h(anchored + vec2(-terrain_cell, 0.0));
@@ -2413,9 +2812,25 @@ void vertex() {
 	float dx = (h_r - h_l) / (2.0 * terrain_cell);
 	float dz = (h_u - h_d) / (2.0 * terrain_cell);
 	float ny = 1.0 / sqrt(dx*dx + dz*dz + 1.0);
+	v_slope_y = ny;
+	// Large-scale fBm sampled at the blade's WORLD position. ~30m feature size
+	// so the meadow reads as patches of lush/dry rather than a uniform tint.
+	v_clump = fbm2(anchored * 0.033);
 
 	float r = length(anchored - patch_center);
-	float density = 1.0 - smoothstep(fade_inner, fade_outer, r);
+	// Color region blend — independent of density taper. CORE sets the zone
+	// to ~∞ so v_taper stays 0 (region 1). SHORT/TALL uses 22→30 so the
+	// color transitions across the CORE-fading ring.
+	v_taper = smoothstep(color_zone_inner, color_zone_outer, r);
+	// Density: fade-in × fade-out. SHORT/TALL fades in over the same range
+	// CORE fades out so total density (CORE + SHORT/TALL) stays nearly flat.
+	float fade_in = smoothstep(fade_in_inner, fade_in_outer, r);
+	float density = fade_in * (1.0 - smoothstep(fade_inner, fade_outer, r));
+	// Clump density: at clump_strength=0 (CORE) no modulation; at 1.0 the
+	// dry patches drop to ~0.3 density, lush patches stay 1.0. Driven by the
+	// same fBm that tints color so dry areas read sparser AND yellower.
+	float clump_dense = mix(1.0, mix(0.3, 1.0, smoothstep(0.35, 0.65, v_clump)), clump_strength);
+	density *= clump_dense;
 	float keep = step(surv, density);
 	float elev = 1.0 - smoothstep(max_elev - 5.0, max_elev, h);
 	float slope_keep = step(min_normal_y, ny);
@@ -2462,16 +2877,44 @@ void fragment() {
 	float bend = COLOR.r;
 	float dry  = COLOR.g;
 	float hue  = COLOR.b;
-	vec3 dry_tip = mix(tip_dry, tip_yellow, step(1.0 - yellow_chance, hue));
-	vec3 tip = mix(tip_meadow, dry_tip, dry);
-	vec3 col = mix(base_color, tip, bend);
-	col *= mix(0.85, 1.15, hue);
-	col *= mix(0.55, 1.0, bend);
-	ALBEDO = col;
-	ROUGHNESS = 0.95;
-	SPECULAR = 0.05;
-	EMISSION = tip * 0.06 * bend;
-	NORMAL = normalize(mix(NORMAL, vec3(0.0, 1.0, 0.0), bend * 0.65));
+	// Region blend: 0 at center (close, full density) → 1 at fade_outer
+	// (taper, where patch fades to nothing). Each color/brightness param
+	// lerps from its primary value to its `_taper` variant by v_taper.
+	vec3 base_eff   = mix(base_color, base_color_taper, v_taper);
+	vec3 tipM_eff   = mix(tip_meadow, tip_meadow_taper, v_taper);
+	vec3 tipD_eff   = mix(tip_dry,    tip_dry_taper,    v_taper);
+	vec3 tipY_eff   = mix(tip_yellow, tip_yellow_taper, v_taper);
+	float boost_eff = mix(albedo_boost, albedo_boost_taper, v_taper);
+	float fe_eff    = mix(flat_emission, flat_emission_taper, v_taper);
+	float ao_eff    = mix(ao_min, ao_min_taper, v_taper);
+	// Slope-based wetness shift: steep ground (lower ny) reads slightly
+	// drier/yellower. v_slope_y is 1 on flat, dropping to ~0.7 on slopes.
+	float slope_dry = clamp((1.0 - v_slope_y) * 2.0, 0.0, 1.0);
+	float biome_dry = clamp(v_clump * 1.4 - 0.2, 0.0, 1.0);
+	float combined_dry = clamp(dry * 0.5 + biome_dry * 0.6 + slope_dry * 0.4, 0.0, 1.0);
+	vec3 dry_tip = mix(tipD_eff, tipY_eff, step(1.0 - yellow_chance, hue));
+	vec3 tip = mix(tipM_eff, dry_tip, combined_dry);
+	float t_bend = pow(max(bend, 0.0), 1.5);
+	vec3 col = mix(base_eff, tip, t_bend);
+	col *= mix(0.92, 1.08, hue);
+	col *= mix(ao_eff, 1.0, bend);
+	ALBEDO = col * boost_eff;
+	ROUGHNESS = roughness_val;
+	SPECULAR = specular_val;
+	// Hemisphere normal: blade reads as curved cylinder, not flat ribbon.
+	float tilt = clamp((UV.x - 0.5) * 2.0, -1.0, 1.0) * hemi_tilt;
+	vec3 hemi_world = normalize(v_blade_n_world * cos(tilt) + v_blade_x_world * sin(tilt));
+	hemi_world = normalize(mix(hemi_world, vec3(0.0, 1.0, 0.0), bend * normal_flatten));
+	// Distance-based normal flatten: at far view distance, lerp toward up so
+	// far blades read as a mass instead of producing specular aliasing.
+	float view_dist = length(VERTEX);
+	float far_flat = smoothstep(20.0, 60.0, view_dist);
+	hemi_world = normalize(mix(hemi_world, vec3(0.0, 1.0, 0.0), far_flat * 0.6));
+	NORMAL = normalize(mat3(VIEW_MATRIX) * hemi_world);
+	vec3 view_dir_world = normalize(mat3(INV_VIEW_MATRIX) * VIEW);
+	float back = max(0.0, -dot(view_dir_world, sun_dir_world));
+	float sss = pow(max(back, 0.0), 4.0) * (0.3 + 0.7 * max(bend, 0.0)) * backlight_strength;
+	EMISSION = sss_tint * tip * sss + tip * fe_eff;
 }
 """
 	var wind_block: String
@@ -2508,8 +2951,8 @@ func _build_ground_material() -> ShaderMaterial:
 shader_type spatial;
 render_mode diffuse_burley, specular_schlick_ggx;
 
-uniform vec3 grass_lush  : source_color = vec3(0.18, 0.30, 0.08);
-uniform vec3 grass_dry   : source_color = vec3(0.42, 0.44, 0.18);
+uniform vec3 grass_lush  : source_color = vec3(0.180, 0.247, 0.063);
+uniform vec3 grass_dry   : source_color = vec3(0.32, 0.36, 0.20);
 uniform vec3 dirt_dark   : source_color = vec3(0.20, 0.13, 0.07);
 uniform vec3 dirt_light  : source_color = vec3(0.42, 0.30, 0.18);
 uniform vec3 rock_dark   : source_color = vec3(0.22, 0.21, 0.20);
