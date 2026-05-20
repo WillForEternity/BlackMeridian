@@ -93,6 +93,14 @@ const PATCH_CORE_SIZE: float = 80.0
 const PATCH_CORE_GRID: int = 820
 const PATCH_CORE_FADE_INNER: float = 22.0
 const PATCH_CORE_FADE_OUTER: float = 40.0
+# SUPER_CORE — even smaller, even denser, layered on top of CORE. Adds blades
+# in the few-meter region around the player so top-down views read as a solid
+# carpet (CORE's ~105 blades/m² shows gaps when looking straight down). Static
+# mesh, no wind shader; fades within its own patch boundary.
+const PATCH_SUPER_CORE_SIZE: float = 14.0
+const PATCH_SUPER_CORE_GRID: int = 350       # 350² blades / 14² m² ≈ 625 blades/m²
+const PATCH_SUPER_CORE_FADE_INNER: float = 5.0
+const PATCH_SUPER_CORE_FADE_OUTER: float = 7.0
 const PATCH_SNAP: float = 1.0              # snap follow to whole meters (no shimmer)
 # Density profile: full inside FADE_INNER, tapers smoothly to zero at FADE_OUTER
 # via per-blade probabilistic skip — no visible ring at the boundary.
@@ -129,7 +137,13 @@ const TREE_TILE_SPAWN_BUDGET: int = 1
 # Carve uses a Gaussian falloff (real "inverse bell" cross-section) and tracks
 # the ORIGINAL terrain height at each centerline x, so the water surface rests
 # just below the natural ground level rather than at a fixed Y.
-const STREAM_ENABLED: bool = true
+## OLD river system disabled while the new flow-accumulation river is built.
+## Setting this to false:
+##  - skips the trench carving (no more 2.2 m bed + 4.8 m vertical banks)
+##  - skips lake basin carving + the lake mesh build
+##  - skips the water + brook stone tile streamers
+##  - drops the grass/tree/stone/flower bank-exclusion masks so foliage fills in
+const STREAM_ENABLED: bool = false
 const STREAM_WATER_BELOW_ORIGINAL: float = 1.4   # deeper water — surface this far below original terrain
 const STREAM_BED_BELOW_ORIGINAL: float = 2.2     # bed deeper than water surface so it doesn't read flat
 const STREAM_HALF_WIDTH: float = 3.4             # water surface fills the flat bed (just inside FLAT_HALF_WIDTH)
@@ -313,6 +327,7 @@ var _grass_material_tall: ShaderMaterial
 var _grass_material_patch_short: ShaderMaterial
 var _grass_material_patch_tall: ShaderMaterial
 var _grass_material_patch_core: ShaderMaterial
+var _grass_material_patch_super_core: ShaderMaterial
 var _sun_light: DirectionalLight3D
 var _height_tex: ImageTexture
 var _centerline_z_tex: ImageTexture
@@ -404,6 +419,10 @@ func _ready() -> void:
 			_heights[i] *= 0.5
 	_init_stream_noise()
 	_carve_stream(_heights)
+	_compute_river_flow()
+	_extract_river_network()
+	_smooth_and_resample_polylines()
+	_draw_river_debug()
 	_ground_material = _build_ground_material()
 	_build_far_terrain()
 	_attach_collision(_heights)
@@ -503,6 +522,33 @@ func _spawn_fps_overlay() -> void:
 	_coord_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
 	_coord_label.add_theme_constant_override("outline_size", 4)
 	canvas.add_child(_coord_label)
+
+func _spawn_super_core_controls() -> void:
+	if not _grass_material_patch_super_core:
+		return
+	var canvas := CanvasLayer.new()
+	add_child(canvas)
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(330, 560)
+	scroll.position = Vector2(20, 60)
+	canvas.add_child(scroll)
+	var panel := PanelContainer.new()
+	scroll.add_child(panel)
+	var vb := VBoxContainer.new()
+	panel.add_child(vb)
+	var title := Label.new()
+	title.text = "SUPER_CORE (14m dense patch)"
+	vb.add_child(title)
+	var mats: Array = [_grass_material_patch_super_core]
+	_add_grass_slider(vb, mats, "albedo_boost", 0.2, 1.5, 0.75)
+	_add_grass_slider(vb, mats, "ao_min", 0.0, 1.0, 0.30)
+	_add_grass_slider(vb, mats, "flat_emission", 0.0, 0.30, 0.0)
+	_add_grass_slider(vb, mats, "yellow_chance", 0.0, 0.6, 0.0)
+	_add_grass_slider(vb, mats, "fade_inner", 0.0, 14.0, PATCH_SUPER_CORE_FADE_INNER)
+	_add_grass_slider(vb, mats, "fade_outer", 0.0, 14.0, PATCH_SUPER_CORE_FADE_OUTER)
+	_add_grass_color(vb, mats, "base_color", Color(0.05, 0.09, 0.05))
+	_add_grass_color(vb, mats, "tip_meadow", Color(0.24, 0.36, 0.14))
+	_add_grass_color(vb, mats, "tip_dry", Color(0.24, 0.36, 0.14))
 
 func _spawn_tile_grass_controls() -> void:
 	if not _grass_material_short:
@@ -636,8 +682,35 @@ func _add_grass_color(parent: Node, materials: Array, param: String, initial: Co
 				(mat as ShaderMaterial).set_shader_parameter(param, c)
 	)
 
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_P:
+			var cam: Camera3D = get_viewport().get_camera_3d()
+			if cam != null:
+				_start_user_alg_at(cam.global_position.x, cam.global_position.z)
+		elif event.keycode == KEY_R:
+			_clear_user_alg()
+
 func _process(_dt: float) -> void:
 	_update_loading_screen(_dt)
+	if not _user_alg_autostart_done and USER_ALG_AUTOSTART != Vector2.INF and not _heights.is_empty():
+		_user_alg_autostart_done = true
+		_start_user_alg_at(USER_ALG_AUTOSTART.x, USER_ALG_AUTOSTART.y)
+	if _user_alg_active and not _user_alg_done:
+		_user_alg_cooldown -= _dt
+		while _user_alg_cooldown <= 0.0 and not _user_alg_done:
+			_user_alg_cooldown += USER_ALG_STEP_INTERVAL
+			for _i in USER_ALG_STEPS_PER_TICK:
+				if _user_alg_done:
+					break
+				_user_alg_done = _user_alg_step()
+			_update_user_alg_visual()
+		if _user_alg_label:
+			var lake_n: int = _user_alg_total_lake_cells()
+			_user_alg_label.text = "ALG  river=%d  lake=%d  %s" % [
+				_user_alg_river.size(), lake_n,
+				"[DONE]" if _user_alg_done else ("[LAKE]" if _user_alg_mode == 1 else "[DESCENT]"),
+			]
 	if _fps_label:
 		_fps_label.text = "%d fps" % Engine.get_frames_per_second()
 	if _coord_label:
@@ -657,6 +730,8 @@ func _process(_dt: float) -> void:
 			_grass_material_patch_tall.set_shader_parameter("sun_dir_world", sun_dir)
 		if _grass_material_patch_core:
 			_grass_material_patch_core.set_shader_parameter("sun_dir_world", sun_dir)
+		if _grass_material_patch_super_core:
+			_grass_material_patch_super_core.set_shader_parameter("sun_dir_world", sun_dir)
 	var cam: Camera3D = get_viewport().get_camera_3d()
 	if cam == null:
 		return
@@ -678,9 +753,11 @@ func _process(_dt: float) -> void:
 		var step_short: float = PATCH_SIZE / float(PATCH_SHORT_GRID)
 		var step_tall: float = PATCH_SIZE / float(PATCH_TALL_GRID)
 		var step_core: float = PATCH_CORE_SIZE / float(PATCH_CORE_GRID)
+		var step_super: float = PATCH_SUPER_CORE_SIZE / float(PATCH_SUPER_CORE_GRID)
 		_grass_material_patch_short.set_shader_parameter("patch_center", center)
 		_grass_material_patch_tall.set_shader_parameter("patch_center", center)
 		_grass_material_patch_core.set_shader_parameter("patch_center", center)
+		_grass_material_patch_super_core.set_shader_parameter("patch_center", center)
 		_grass_material_patch_short.set_shader_parameter(
 			"patch_cell_offset", Vector2(round(pos.x / step_short), round(pos.z / step_short))
 		)
@@ -689,6 +766,9 @@ func _process(_dt: float) -> void:
 		)
 		_grass_material_patch_core.set_shader_parameter(
 			"patch_cell_offset", Vector2(round(pos.x / step_core), round(pos.z / step_core))
+		)
+		_grass_material_patch_super_core.set_shader_parameter(
+			"patch_cell_offset", Vector2(round(pos.x / step_super), round(pos.z / step_super))
 		)
 		# Tile shaders cull blades inside the close-patch radius around the player.
 		_grass_material_short.set_shader_parameter("tile_cull_center", center)
@@ -1039,14 +1119,43 @@ func _init_foliage_resources() -> void:
 	# stays 0 across CORE's visible range (0–30m).
 	_grass_material_patch_core.set_shader_parameter("color_zone_inner", 1.0e6)
 	_grass_material_patch_core.set_shader_parameter("color_zone_outer", 1.0e6 + 1.0)
+	# SUPER_CORE: stays Region 1 like CORE, but with its own tight fade radii
+	# that hold full density across the entire 14 m patch (no internal taper).
+	# Albedo is knocked down to compensate for the denser blade overlap —
+	# without real inter-blade AO, every extra blade adds a "tip" pixel and
+	# the patch otherwise reads visibly brighter than CORE around it.
+	_grass_material_patch_super_core = _build_grass_patch_material(false)
+	_grass_material_patch_super_core.set_shader_parameter("fade_inner", PATCH_SUPER_CORE_FADE_INNER)
+	_grass_material_patch_super_core.set_shader_parameter("fade_outer", PATCH_SUPER_CORE_FADE_OUTER)
+	_grass_material_patch_super_core.set_shader_parameter("color_zone_inner", 1.0e6)
+	_grass_material_patch_super_core.set_shader_parameter("color_zone_outer", 1.0e6 + 1.0)
+	_grass_material_patch_super_core.set_shader_parameter("albedo_boost", 0.75)
+	_grass_material_patch_super_core.set_shader_parameter("ao_min", 0.30)
+	# At 6× CORE's density, most pixels in the patch are blade tips, so the
+	# tip palette's yellow lean dominates the visual. Tips dialed in to match
+	# CORE around the patch — no yellow blades, both tip colors hand-picked.
+	_grass_material_patch_super_core.set_shader_parameter("yellow_chance", 0.0)
+	_grass_material_patch_super_core.set_shader_parameter("tip_meadow", Color8(0x2b, 0x46, 0x17))
+	_grass_material_patch_super_core.set_shader_parameter("tip_dry",    Color8(0x49, 0x5c, 0x24))
 	# SHORT/TALL fade IN across the same range CORE fades OUT (22→30m now).
 	# Together the combined density stays roughly flat across the handoff,
 	# eliminating the geometric cliff. The magnitude mismatch (187 vs 16
 	# blades/m²) still creates a visible thinning, but it's smooth, not a step.
 	_grass_material_patch_short.set_shader_parameter("fade_in_inner", PATCH_CORE_FADE_INNER)
 	_grass_material_patch_short.set_shader_parameter("fade_in_outer", PATCH_CORE_FADE_OUTER)
-	_grass_material_patch_tall.set_shader_parameter("fade_in_inner", PATCH_CORE_FADE_INNER)
-	_grass_material_patch_tall.set_shader_parameter("fade_in_outer", PATCH_CORE_FADE_OUTER)
+	# TALL patch: full density everywhere (fade_in_outer <= fade_in_inner
+	# means smoothstep returns 1). Sparse 1.5 blades/m² so it doesn't stack
+	# heavily with CORE, but tall blades visible right next to the player.
+	_grass_material_patch_tall.set_shader_parameter("fade_in_inner", -1.0)
+	_grass_material_patch_tall.set_shader_parameter("fade_in_outer", 0.0)
+	# AND fade OUT past PATCH_FADE_OUTER — otherwise the shader's default
+	# fade_inner=5.5/fade_outer=7.0 culls every SHORT/TALL blade past 7 m,
+	# which made the patch's outer ring (and all the tall blades there)
+	# invisible.
+	_grass_material_patch_short.set_shader_parameter("fade_inner", PATCH_FADE_INNER)
+	_grass_material_patch_short.set_shader_parameter("fade_outer", PATCH_FADE_OUTER)
+	_grass_material_patch_tall.set_shader_parameter("fade_inner", PATCH_FADE_INNER)
+	_grass_material_patch_tall.set_shader_parameter("fade_outer", PATCH_FADE_OUTER)
 	# Clump-density modulation: SHORT/TALL patches use the fBm clump noise to
 	# thin out dry-biome cells. CORE stays uniformly dense at the player's feet.
 	_grass_material_patch_short.set_shader_parameter("clump_strength", 0.85)
@@ -1085,6 +1194,11 @@ func _build_grass_patch() -> void:
 	# shader's radial taper never culls any of these blades.
 	_grass_patch_mmis.append(
 		_make_patch_layer(PATCH_CORE_SIZE, PATCH_CORE_GRID, _grass_mesh, _grass_material_patch_core, 2)
+	)
+	# Super-core: tiny 14m patch (~625 blades/m²) layered on top of CORE so
+	# top-down views show a solid carpet instead of CORE's visible gaps.
+	_grass_patch_mmis.append(
+		_make_patch_layer(PATCH_SUPER_CORE_SIZE, PATCH_SUPER_CORE_GRID, _grass_mesh, _grass_material_patch_super_core, 3)
 	)
 	for mmi in _grass_patch_mmis:
 		add_child(mmi)
@@ -1847,19 +1961,32 @@ void fragment() {
 	// Two scrolling normal-map samples at different scales/directions — the
 	// crossbeat kills the obvious tile and reads as living water. World-XZ
 	// sampling means meanders in the ribbon don't distort the waves.
-	// Scroll along the per-vertex downstream tangent — waves follow the
-	// meandering centerline so water always flows the way gravity pulls.
-	// Subtracting the offset advances the pattern in +tangent direction.
 	vec2 flow_dir = length(v_dir) > 0.01 ? normalize(v_dir) : vec2(1.0, 0.0);
-	// Pure downstream scroll on both layers — any cross component reads as
-	// sideways slosh on straight stretches. Different speeds + scales is
-	// enough to break the tiled look without lateral drift.
-	vec3 n1 = texture(normal_map, v_world.xz * normal_scale - flow_dir * t).xyz;
-	vec3 n2 = texture(normal_map, v_world.xz * normal_scale * 1.7 - flow_dir * (t * 1.35)).xyz;
-	vec3 nrm_ts = mix(n1, n2, 0.5);
-	NORMAL_MAP = nrm_ts;
-	NORMAL_MAP_DEPTH = normal_strength * clamp(0.55 + 0.7 * flow, 0.0, 2.0);
-	vec3 nrm_decoded = nrm_ts * 2.0 - 1.0;
+	// Valve flow-map trick: two phases offset by 0.5 with a sawtooth crossfade
+	// (weight peaks at the seam, zero at mid-cycle) so the pattern never
+	// "snaps back" to the start. Reads as continuous flowing motion.
+	float phase0 = fract(t);
+	float phase1 = fract(t + 0.5);
+	float phase_w = abs(0.5 - phase0) * 2.0;  // 1 at the seam, 0 mid-cycle
+	vec2 uv0 = v_world.xz * normal_scale;
+	vec2 uv1 = v_world.xz * normal_scale * 1.7 + vec2(0.37, 0.19);
+	// Layer A: low-freq, both phases — kills tiling.
+	vec3 na0 = texture(normal_map, uv0 - flow_dir * phase0).xyz;
+	vec3 na1 = texture(normal_map, uv0 - flow_dir * phase1).xyz;
+	vec3 na  = mix(na0, na1, phase_w);
+	// Layer B: high-freq, faster scroll, same phase trick.
+	vec3 nb0 = texture(normal_map, uv1 - flow_dir * (phase0 * 1.35)).xyz;
+	vec3 nb1 = texture(normal_map, uv1 - flow_dir * (phase1 * 1.35)).xyz;
+	vec3 nb  = mix(nb0, nb1, phase_w);
+	// UDN blend: add the xy detail from both layers, multiply z. Preserves
+	// detail at any flow speed (Ben Cloward).
+	vec3 ad = na * 2.0 - 1.0;
+	vec3 bd = nb * 2.0 - 1.0;
+	vec3 nrm_decoded = normalize(vec3(ad.xy + bd.xy, ad.z * bd.z));
+	NORMAL_MAP = nrm_decoded * 0.5 + 0.5;
+	// Flow speed shapes the normal: slow → lazy ripples, fast → choppier.
+	float chop = clamp(flow, 0.0, 1.0);
+	NORMAL_MAP_DEPTH = normal_strength * mix(0.45, 1.6, chop);
 
 	// Water column = bed view-Z minus surface view-Z. Drives both refraction
 	// strength and edge-foam masking.
@@ -1885,13 +2012,15 @@ void fragment() {
 	float f = pow(1.0 - clamp(dot(VIEW, NORMAL), 0.0, 1.0), fresnel_power);
 	vec3 surface = mix(refracted, fresnel_color, f * 0.55);
 
-	// Foam: shore mask from shallow water-column + rapid mask from a flow-
-	// gated noise threshold. Both scroll downstream.
-	vec2 fuv = v_world.xz * foam_scale - flow_dir * (t * foam_scroll);
-	float fnoise = texture(foam_tex, fuv).r;
+	// Foam: shore mask + rapid mask, both gated by a stylized hard-edged
+	// noise (step on the noise instead of smoothstep — Sea of Thieves'
+	// signature crisp foam silhouettes).
+	vec2 fuv0 = v_world.xz * foam_scale - flow_dir * (phase0 * foam_scroll);
+	vec2 fuv1 = v_world.xz * foam_scale - flow_dir * (phase1 * foam_scroll);
+	float fnoise = mix(texture(foam_tex, fuv0).r, texture(foam_tex, fuv1).r, phase_w);
 	float edge_mask = 1.0 - smoothstep(0.0, edge_foam_depth, water_col);
-	float edge_f = edge_mask * smoothstep(0.30, 0.65, fnoise);
-	float rapid_f = smoothstep(0.40, 0.78, fnoise) * smoothstep(0.15, 0.9, flow);
+	float edge_f = edge_mask * smoothstep(0.45, 0.55, fnoise);
+	float rapid_f = smoothstep(0.55, 0.65, fnoise) * smoothstep(0.30, 0.9, chop);
 	float foam = clamp((edge_f + rapid_f) * foam_intensity, 0.0, 1.0);
 
 	vec3 final_rgb = mix(surface, foam_color, foam);
@@ -1901,9 +2030,14 @@ void fragment() {
 
 	ALBEDO = final_rgb;
 	ALPHA = alpha;
-	ROUGHNESS = mix(roughness_base, 0.55, foam);
+	// Faster water reads rougher (more chop scatters the highlight).
+	ROUGHNESS = mix(mix(roughness_base, 0.22, chop), 0.55, foam);
 	METALLIC = 0.0;
 	SPECULAR = mix(specular_base, 0.2, foam);
+	// Anisotropic highlight stretched along the flow direction — the signature
+	// "moving water" sun-glare cue.
+	ANISOTROPY = chop * 0.85;
+	ANISOTROPY_FLOW = flow_dir;
 }
 """
 	var mat := ShaderMaterial.new()
@@ -3002,14 +3136,26 @@ void fragment() {
 	float patch  = fbm(wp.xz * patch_scale);
 	float detail = fbm(wp.xz * detail_scale);
 
-	// Grass color varies across the meadow (lush in valleys → dry on shoulders).
-	vec3 grass = mix(grass_lush, grass_dry, smoothstep(0.35, 0.75, patch));
-	grass *= mix(0.85, 1.10, detail);
+	// Single flat grass color — earlier patch/detail mixing produced bright
+	// spots that revealed where individual blades were sparse, defeating the
+	// "ground matches grass" goal.
+	vec3 grass = grass_lush;
 
-	// Dirt patches: appear where high-freq noise spikes, OR on moderate slopes.
+	// "Where would the grass shader actually place blades?" — match the
+	// grass placement test so we don't paint brown dirt under green grass.
+	// Grass needs flat-ish ground (slope ≥ grass_normal_y) AND not-too-high
+	// elevation (the grass shader culls past ~55m for elev fade).
+	float grass_friendly = smoothstep(grass_normal_y - 0.05, grass_normal_y + 0.05, slope)
+		* (1.0 - smoothstep(50.0, 55.0, elev));
+
+	// Dirt: appears on slopes too steep for grass, AND in noise spikes when
+	// the spot wasn't grass-friendly to begin with. In grass-friendly spots,
+	// dirt patches are suppressed so the visible ground matches the blade
+	// color all the way down to where sparse blades let the ground peek through.
 	vec3 dirt = mix(dirt_dark, dirt_light, fbm(wp.xz * 0.4));
 	float dirt_patch = smoothstep(0.62, 0.78, fbm(wp.xz * 0.08));
 	float dirt_slope = smoothstep(grass_normal_y, grass_normal_y - 0.12, slope);
+	dirt_patch *= (1.0 - grass_friendly * 0.9);
 	float dirt_mask  = max(dirt_patch * 0.6, dirt_slope);
 
 	vec3 ground = mix(grass, dirt, dirt_mask);
@@ -3080,6 +3226,976 @@ func _load_tree_parts(path: String) -> Array:
 	root.free()
 	return parts
 
+# --- River network: D8 flow accumulation (NEW) -------------------------------
+# Replaces the old monotonic gradient-descent tracer with a real hydrology
+# algorithm. Procedure:
+#   1. Sample _heights into a 257×257 (4 m cells) low-res grid. Rivers don't
+#      care about features below their own width, and a min-heap priority
+#      flood at full 1025² would push 1 M items through GDScript — too slow.
+#   2. Priority-flood-with-ε (Barnes 2014): pop cells from low to high,
+#      assigning each unvisited neighbor a flow direction back to the popped
+#      cell and "filling" depressions by clamping neighbor heights to
+#      max(raw, popped + ε). Every cell ends up with a flow path that
+#      eventually exits the map.
+#   3. Walk the pop order in reverse (peaks → outlets) to accumulate
+#      upstream contributing area per cell. Cells with high acc are rivers.
+#   4. Above a threshold, trace centerlines from every "head" cell (river
+#      cell with no upstream river cell) downstream until merging into a
+#      bigger river or hitting the map edge / a basin.
+
+const RIVER_GRID: int = 257
+const RIVER_CELL: float = SIZE / float(RIVER_GRID - 1)
+const RIVER_FILL_EPS: float = 0.001
+# Cells with at least this many upstream cells are considered river cells.
+# Higher → fewer / larger streams. 400 cells at low-res ≈ 6400 m² catchment,
+# matches a small stream / brook in real hydrology.
+const RIVER_ACC_THRESHOLD: float = 400.0
+const RIVER_SMOOTH_PASSES: int = 8          # box-blur passes on XZ — kills stair-step zigzag
+const RIVER_RESAMPLE_STEP: float = 0.25     # output vertex spacing in meters
+# Keep ONLY the polyline that passes through the global max-accumulation cell
+# (the trunk). All tributaries get discarded.
+const RIVER_TRUNK_ONLY: bool = true
+
+# Low-res buffers (sized RIVER_GRID * RIVER_GRID).
+var _river_filled_h: PackedFloat32Array
+var _river_flow_dir: PackedInt32Array       # 0-7 (per _FLOW_NEIGHBORS), -1 if uninitialized
+var _river_accumulation: PackedFloat32Array
+
+# Resolved river network — raw cell indices, head → mouth. Used internally as
+# the input to the smoothing/resampling pass.
+var _river_polylines: Array = []
+# Smoothed & resampled polylines. Each entry is an Array of dicts:
+#   { wpos: Vector2, h: float, acc: float }
+# `h` is the FILLED elevation (monotonically non-increasing along the
+# polyline), so the water surface never climbs.
+var _river_polylines_smoothed: Array = []
+
+# --- Per-trace river/lake finder ---------------------------------------------
+# Press P to start (or R to reset) from the camera's current XZ.
+# Algorithm:
+#   1. Steepest descent on raw _heights, skipping cells already on the river
+#      or in any lake.
+#   2. When descent fails (no fresh downhill, or the steepest target is
+#      already on the river / in a lake), start a lake at the current cell.
+#   3. Lake pour-over: pop the lowest unvisited 8-neighbor of any lake cell.
+#      - If it's already in another lake → merge the two lakes.
+#      - Otherwise add it to the active lake. If the newly added cell's
+#        steepest descent points to a cell OUTSIDE the lake, that's the
+#        spillover — resume descent from there.
+const USER_ALG_STEP_INTERVAL: float = 0.01    # seconds per render tick
+const USER_ALG_STEPS_PER_TICK: int = 80       # algorithm steps per tick (fast)
+const USER_ALG_AUTOSTART: Vector2 = Vector2(294.4, 426.4)
+# Terminate once the active lake's vertical extent (max cell height − min
+# cell height) exceeds this. Anything shallower is treated as a small dip
+# that gets bridged; anything deeper is the "final" lake.
+const USER_ALG_LAKE_DEPTH_TERMINATE: float = 5.0
+var _user_alg_autostart_done: bool = false
+var _user_alg_active: bool = false
+var _user_alg_done: bool = false
+var _user_alg_origin_world: Vector3 = Vector3.ZERO
+var _user_alg_river: PackedInt32Array         # ordered river cell list
+var _user_alg_river_set: Dictionary = {}      # cell idx -> true (fast lookup)
+# Each lake: { cells: Dictionary (cell→true), heap: _MinHeap (height→cell),
+#              pushed: Dictionary (cell→true, dedup heap pushes) }
+# Merged-into-another lakes are set to null in this array (indices stay
+# stable so cell_to_lake mappings don't have to renumber).
+var _user_alg_lakes: Array = []
+var _user_alg_cell_to_lake: Dictionary = {}   # cell idx -> lake index in _user_alg_lakes
+var _user_alg_current: int = -1
+var _user_alg_mode: int = 0                   # 0 = descent, 1 = lake pour-over
+var _user_alg_active_lake_idx: int = -1
+var _user_alg_cooldown: float = 0.0
+var _user_alg_river_mi: MeshInstance3D
+var _user_alg_lake_mi: MeshInstance3D
+var _user_alg_origin_mi: MeshInstance3D
+var _user_alg_label: Label
+# Source spring-pond: a small basin carved at the trunk source so water visibly
+# flows out of something rather than materializing at a point.
+const RIVER_SOURCE_POND_RADIUS: float = 5.0
+const RIVER_SOURCE_POND_DEPTH: float = 1.2
+var _river_source_pond: Dictionary = {}    # {center: Vector2, water_y: float, radius: float}
+# Mouth lake — the largest natural depression the trunk crosses. Already deep
+# enough in the raw heightmap, just needs a water mesh. `cells` is a
+# PackedInt32Array of FULL-RES heightmap indices (z*GRID + x) inside the lake.
+var _river_mouth_lake: Dictionary = {}     # {center: Vector2, water_y: float, cells: PackedInt32Array, bounds: Rect2}
+# Lake water surface height. Any heightmap cell below this, reachable by
+# flood-fill from the lake seed, is underwater.
+const RIVER_LAKE_WATER_Y: float = -50.0
+const RIVER_LAKE_SEED_WORLD: Vector2 = Vector2(-296.0, 426.0)
+
+func _compute_river_flow() -> void:
+	var t_start: int = Time.get_ticks_msec()
+	var N: int = RIVER_GRID * RIVER_GRID
+	var half: float = SIZE * 0.5
+
+	# Step 1: sample full heightmap into low-res grid (bilinear).
+	var raw := PackedFloat32Array()
+	raw.resize(N)
+	for gz in RIVER_GRID:
+		for gx in RIVER_GRID:
+			var wx: float = float(gx) * RIVER_CELL - half
+			var wz: float = float(gz) * RIVER_CELL - half
+			raw[gz * RIVER_GRID + gx] = _sample_height(_heights, wx, wz)
+
+	_river_filled_h = raw.duplicate()
+	_river_flow_dir = PackedInt32Array()
+	_river_flow_dir.resize(N)
+	for i in N:
+		_river_flow_dir[i] = -1
+	var visited := PackedByteArray()
+	visited.resize(N)   # zero-initialized
+
+	var pop_order := PackedInt32Array()
+	pop_order.resize(N)
+	var pop_count: int = 0
+
+	var heap := _MinHeap.new()
+
+	# Seed boundary cells (where water exits the map).
+	for gx in RIVER_GRID:
+		var idx_top: int = gx
+		heap.push(idx_top, raw[idx_top])
+		visited[idx_top] = 1
+		var idx_bot: int = (RIVER_GRID - 1) * RIVER_GRID + gx
+		heap.push(idx_bot, raw[idx_bot])
+		visited[idx_bot] = 1
+	for gz in range(1, RIVER_GRID - 1):
+		var idx_l: int = gz * RIVER_GRID
+		heap.push(idx_l, raw[idx_l])
+		visited[idx_l] = 1
+		var idx_r: int = gz * RIVER_GRID + (RIVER_GRID - 1)
+		heap.push(idx_r, raw[idx_r])
+		visited[idx_r] = 1
+
+	# Step 2: priority-flood.
+	while not heap.is_empty():
+		var cell_idx: int = heap.pop()
+		pop_order[pop_count] = cell_idx
+		pop_count += 1
+		var cell_h: float = _river_filled_h[cell_idx]
+		var cgx: int = cell_idx % RIVER_GRID
+		var cgz: int = cell_idx / RIVER_GRID
+		for d in 8:
+			var off: Vector2i = _FLOW_NEIGHBORS[d]
+			var ngx: int = cgx + off.x
+			var ngz: int = cgz + off.y
+			if ngx < 0 or ngz < 0 or ngx >= RIVER_GRID or ngz >= RIVER_GRID:
+				continue
+			var n_idx: int = ngz * RIVER_GRID + ngx
+			if visited[n_idx] == 1:
+				continue
+			visited[n_idx] = 1
+			var raw_h: float = raw[n_idx]
+			var filled: float = maxf(raw_h, cell_h + RIVER_FILL_EPS)
+			_river_filled_h[n_idx] = filled
+			# Neighbor flows back toward the cell we just popped. The offset
+			# from neighbor→cell is the negation of cell→neighbor; in our
+			# _FLOW_NEIGHBORS layout this is index (7 - d).
+			_river_flow_dir[n_idx] = 7 - d
+			heap.push(n_idx, filled)
+
+	# Step 3: accumulation walk (reverse pop order = peaks first).
+	_river_accumulation = PackedFloat32Array()
+	_river_accumulation.resize(N)
+	for i in N:
+		_river_accumulation[i] = 1.0
+	for i in range(pop_count - 1, -1, -1):
+		var idx: int = pop_order[i]
+		var d: int = _river_flow_dir[idx]
+		if d < 0:
+			continue
+		var off: Vector2i = _FLOW_NEIGHBORS[d]
+		var cgx: int = idx % RIVER_GRID
+		var cgz: int = idx / RIVER_GRID
+		var ngx: int = cgx + off.x
+		var ngz: int = cgz + off.y
+		if ngx < 0 or ngz < 0 or ngx >= RIVER_GRID or ngz >= RIVER_GRID:
+			continue
+		var n_idx: int = ngz * RIVER_GRID + ngx
+		_river_accumulation[n_idx] += _river_accumulation[idx]
+
+	var max_acc: float = 0.0
+	var river_cells: int = 0
+	for i in N:
+		if _river_accumulation[i] > max_acc:
+			max_acc = _river_accumulation[i]
+		if _river_accumulation[i] >= RIVER_ACC_THRESHOLD:
+			river_cells += 1
+	var t_ms: int = Time.get_ticks_msec() - t_start
+	print("[River] flow accumulation: %d×%d grid, max acc=%d, river cells=%d, %d ms" % [
+		RIVER_GRID, RIVER_GRID, int(max_acc), river_cells, t_ms])
+
+# Extract centerline polylines from the accumulation grid.
+# A "head" is a river cell with no river cell flowing INTO it (i.e., a
+# headwater). From each head, walk downstream along flow_dir until we either
+# hit the map edge, a sink, or a cell already claimed by another polyline
+# (a tributary merge). Each polyline is a sequence of low-res cell indices.
+#
+# Each cell index is a `gz * RIVER_GRID + gx` low-res index. Convert to world
+# coords with `_river_cell_to_world(idx)`.
+func _extract_river_network() -> void:
+	var t_start: int = Time.get_ticks_msec()
+	_river_polylines.clear()
+	var N: int = RIVER_GRID * RIVER_GRID
+
+	# Mark river cells.
+	var is_river := PackedByteArray()
+	is_river.resize(N)
+	for i in N:
+		is_river[i] = 1 if _river_accumulation[i] >= RIVER_ACC_THRESHOLD else 0
+
+	# Count how many river cells flow INTO each cell.
+	var inflow := PackedInt32Array()
+	inflow.resize(N)
+	for i in N:
+		if is_river[i] == 0:
+			continue
+		var d: int = _river_flow_dir[i]
+		if d < 0:
+			continue
+		var cgx: int = i % RIVER_GRID
+		var cgz: int = i / RIVER_GRID
+		var off: Vector2i = _FLOW_NEIGHBORS[d]
+		var ngx: int = cgx + off.x
+		var ngz: int = cgz + off.y
+		if ngx < 0 or ngz < 0 or ngx >= RIVER_GRID or ngz >= RIVER_GRID:
+			continue
+		var n_idx: int = ngz * RIVER_GRID + ngx
+		if is_river[n_idx] == 1:
+			inflow[n_idx] += 1
+
+	# Walk each head downhill. `visited` marks cells already claimed by a
+	# polyline so tributaries terminate at the merge cell rather than
+	# duplicating the trunk.
+	var visited := PackedByteArray()
+	visited.resize(N)
+	var min_polyline_cells: int = 6   # ignore stubs shorter than ~24 m
+
+	for head in N:
+		if is_river[head] == 0:
+			continue
+		if inflow[head] != 0:
+			continue
+		var polyline := PackedInt32Array()
+		var cur: int = head
+		while cur >= 0 and is_river[cur] == 1:
+			polyline.append(cur)
+			if visited[cur] == 1:
+				break
+			visited[cur] = 1
+			var d: int = _river_flow_dir[cur]
+			if d < 0:
+				break
+			var cgx: int = cur % RIVER_GRID
+			var cgz: int = cur / RIVER_GRID
+			var off: Vector2i = _FLOW_NEIGHBORS[d]
+			var ngx: int = cgx + off.x
+			var ngz: int = cgz + off.y
+			if ngx < 0 or ngz < 0 or ngx >= RIVER_GRID or ngz >= RIVER_GRID:
+				break
+			cur = ngz * RIVER_GRID + ngx
+		if polyline.size() >= min_polyline_cells:
+			_river_polylines.append(polyline)
+
+	var total_v: int = 0
+	for pl in _river_polylines:
+		total_v += (pl as PackedInt32Array).size()
+	var t_ms: int = Time.get_ticks_msec() - t_start
+	print("[River] extracted %d polylines, %d total vertices, %d ms" % [
+		_river_polylines.size(), total_v, t_ms])
+
+	if RIVER_TRUNK_ONLY and not _river_polylines.is_empty():
+		# Flood-fill the user-specified lake FIRST. The chosen river is then
+		# whichever extracted polyline actually drains into that lake.
+		_flood_fill_mouth_lake()
+		_select_trunk_into_lake()
+		# Extend the trunk SOURCE upstream past the river-threshold so it
+		# starts at a true headwater (no inflow) rather than the arbitrary
+		# spot where accumulation crossed 400 cells.
+		_extend_trunk_source()
+		_truncate_trunk_at_lake_edge()
+		if not _river_polylines.is_empty():
+			var t := _river_polylines[0] as PackedInt32Array
+			var src_w := _river_cell_to_world(t[0])
+			var src_h := _river_filled_h[t[0]]
+			var mth_w := _river_cell_to_world(t[t.size() - 1])
+			var mth_h := _river_filled_h[t[t.size() - 1]]
+			print("[River] source: (%.1f, %.1f) elev %.1f → mouth: (%.1f, %.1f) elev %.1f" % [
+				src_w.x, src_w.y, src_h, mth_w.x, mth_w.y, mth_h])
+			_report_basins_on_trunk()
+
+# 4-connected flood fill from RIVER_LAKE_SEED_WORLD across the full-res
+# heightmap, collecting every cell with raw h < RIVER_LAKE_WATER_Y. Result is
+# the lake's true (irregular) footprint — stored in _river_mouth_lake.
+func _flood_fill_mouth_lake() -> void:
+	var half: float = SIZE * 0.5
+	var seed_gx: int = int((RIVER_LAKE_SEED_WORLD.x + half) / CELL)
+	var seed_gz: int = int((RIVER_LAKE_SEED_WORLD.y + half) / CELL)
+	seed_gx = clampi(seed_gx, 0, GRID - 1)
+	seed_gz = clampi(seed_gz, 0, GRID - 1)
+	var seed_idx: int = seed_gz * GRID + seed_gx
+	if _heights[seed_idx] >= RIVER_LAKE_WATER_Y:
+		print("[River] WARN: lake seed at (%.0f, %.0f) has h=%.1f (above water level %.1f)" % [
+			RIVER_LAKE_SEED_WORLD.x, RIVER_LAKE_SEED_WORLD.y, _heights[seed_idx], RIVER_LAKE_WATER_Y])
+		return
+	var lake_cells := PackedInt32Array()
+	var visited := PackedByteArray()
+	visited.resize(GRID * GRID)
+	var stack: Array = [seed_idx]
+	visited[seed_idx] = 1
+	var center_sum := Vector2.ZERO
+	var min_x: int = GRID
+	var max_x: int = -1
+	var min_z: int = GRID
+	var max_z: int = -1
+	while not stack.is_empty():
+		var idx: int = stack.pop_back()
+		lake_cells.append(idx)
+		var gx: int = idx % GRID
+		var gz: int = idx / GRID
+		center_sum += Vector2(float(gx) * CELL - half, float(gz) * CELL - half)
+		min_x = mini(min_x, gx)
+		max_x = maxi(max_x, gx)
+		min_z = mini(min_z, gz)
+		max_z = maxi(max_z, gz)
+		for off in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var ngx: int = gx + off.x
+			var ngz: int = gz + off.y
+			if ngx < 0 or ngz < 0 or ngx >= GRID or ngz >= GRID:
+				continue
+			var n_idx: int = ngz * GRID + ngx
+			if visited[n_idx] == 1:
+				continue
+			if _heights[n_idx] >= RIVER_LAKE_WATER_Y:
+				continue
+			visited[n_idx] = 1
+			stack.append(n_idx)
+	if lake_cells.is_empty():
+		return
+	var center: Vector2 = center_sum / float(lake_cells.size())
+	var bounds := Rect2(
+		Vector2(float(min_x) * CELL - half, float(min_z) * CELL - half),
+		Vector2(float(max_x - min_x + 1) * CELL, float(max_z - min_z + 1) * CELL)
+	)
+	_river_mouth_lake = {
+		"center": center,
+		"water_y": RIVER_LAKE_WATER_Y,
+		"cells": lake_cells,
+		"bounds": bounds,
+	}
+	print("[River] flood-filled mouth lake: %d cells, center (%.1f, %.1f), bounds %s, water_y %.1f" % [
+		lake_cells.size(), center.x, center.y, bounds, RIVER_LAKE_WATER_Y])
+
+# Truncate the trunk to end at the entrance of the LARGEST natural basin it
+# passes through. The basin then becomes a lake (water pools naturally because
+# its raw terrain sits below the river's filled water level). Smaller pre-
+# basin dips stay as part of the river — they're shallow and brief.
+const RIVER_BASIN_MIN_DEPTH: float = 4.0     # ignore shallow dips
+const RIVER_BASIN_MIN_LENGTH: int = 8        # ignore brief drops (cells)
+
+# Among all extracted polylines, pick the one that drains into the user-
+# specified lake. Score by the maximum accumulation along the polyline before
+# (or at) its lake-entry cell — proxies "biggest stream feeding the lake."
+func _select_trunk_into_lake() -> void:
+	if _river_polylines.is_empty() or _river_mouth_lake.is_empty():
+		return
+	var lake_cells := _river_mouth_lake.cells as PackedInt32Array
+	var lake_set := {}
+	for c in lake_cells:
+		lake_set[c] = true
+	var half: float = SIZE * 0.5
+	var best_pl: PackedInt32Array
+	var best_score: float = -1.0
+	for pl in _river_polylines:
+		var poly := pl as PackedInt32Array
+		var entry_acc: float = -1.0
+		for cell in poly:
+			var w := _river_cell_to_world(cell)
+			var fgx: int = clampi(int((w.x + half) / CELL), 0, GRID - 1)
+			var fgz: int = clampi(int((w.y + half) / CELL), 0, GRID - 1)
+			if lake_set.has(fgz * GRID + fgx):
+				entry_acc = _river_accumulation[cell]
+				break
+		if entry_acc > best_score:
+			best_score = entry_acc
+			best_pl = poly
+	if best_score < 0.0:
+		print("[River] WARN: no extracted polyline drains into the lake at seed (%.0f, %.0f)" % [
+			RIVER_LAKE_SEED_WORLD.x, RIVER_LAKE_SEED_WORLD.y])
+		# Fall back to the max-accumulation polyline (the global trunk).
+		var max_acc_idx: int = 0
+		var max_acc_val: float = -1.0
+		for i in _river_accumulation.size():
+			if _river_accumulation[i] > max_acc_val:
+				max_acc_val = _river_accumulation[i]
+				max_acc_idx = i
+		for pl in _river_polylines:
+			var poly := pl as PackedInt32Array
+			for cell in poly:
+				if cell == max_acc_idx:
+					best_pl = poly
+					break
+			if not best_pl.is_empty():
+				break
+	_river_polylines = [best_pl]
+	print("[River] selected polyline draining into lake (entry acc=%d, %d cells)" % [
+		int(best_score), best_pl.size()])
+
+# Walk the chosen trunk and cut it at the first cell whose corresponding
+# full-res heightmap cell is INSIDE the flood-filled lake footprint. Records
+# the source pond at the (possibly extended) head.
+func _truncate_trunk_at_lake_edge() -> void:
+	if _river_polylines.is_empty():
+		return
+	var trunk := _river_polylines[0] as PackedInt32Array
+	if not _river_mouth_lake.is_empty():
+		var lake_cells := _river_mouth_lake.cells as PackedInt32Array
+		var lake_set := {}
+		for c in lake_cells:
+			lake_set[c] = true
+		var half: float = SIZE * 0.5
+		var truncate_at: int = -1
+		for i in trunk.size():
+			var lo: Vector2 = _river_cell_to_world(trunk[i])
+			var fgx: int = clampi(int((lo.x + half) / CELL), 0, GRID - 1)
+			var fgz: int = clampi(int((lo.y + half) / CELL), 0, GRID - 1)
+			if lake_set.has(fgz * GRID + fgx):
+				truncate_at = i
+				break
+		if truncate_at >= 0 and truncate_at > 0:
+			var truncated := PackedInt32Array()
+			for i in truncate_at:
+				truncated.append(trunk[i])
+			_river_polylines[0] = truncated
+			var mw: Vector2 = _river_cell_to_world(truncated[truncated.size() - 1])
+			print("[River] truncated trunk at lake edge: new mouth (%.1f, %.1f), kept %d cells" % [
+				mw.x, mw.y, truncated.size()])
+	# Source pond: small basin at the very first trunk vertex.
+	var head_cell: int = (_river_polylines[0] as PackedInt32Array)[0]
+	var src_w: Vector2 = _river_cell_to_world(head_cell)
+	var src_h: float = _river_filled_h[head_cell]
+	_river_source_pond = {
+		"center": src_w,
+		"water_y": src_h,
+		"radius": RIVER_SOURCE_POND_RADIUS,
+	}
+	print("[River] source pond: center (%.1f, %.1f), radius %.1f m, water_y %.1f" % [
+		src_w.x, src_w.y, RIVER_SOURCE_POND_RADIUS, src_h])
+
+# --- User-algorithm implementation -------------------------------------------
+
+func _start_user_alg_at(world_x: float, world_z: float) -> void:
+	var half: float = SIZE * 0.5
+	var gx: int = clampi(int((world_x + half) / CELL), 0, GRID - 1)
+	var gz: int = clampi(int((world_z + half) / CELL), 0, GRID - 1)
+	var seed_idx: int = gz * GRID + gx
+	_user_alg_origin_world = Vector3(world_x, _heights[seed_idx], world_z)
+	_user_alg_river = PackedInt32Array([seed_idx])
+	_user_alg_river_set = {seed_idx: true}
+	_user_alg_lakes = []
+	_user_alg_cell_to_lake = {}
+	_user_alg_current = seed_idx
+	_user_alg_mode = 0
+	_user_alg_active_lake_idx = -1
+	_user_alg_cooldown = 0.0
+	_user_alg_active = true
+	_user_alg_done = false
+	_ensure_user_alg_label()
+	_update_user_alg_visual()
+	print("[UserAlg] start at world (%.1f, %.1f) cell (%d, %d), h=%.1f" % [
+		world_x, world_z, gx, gz, _heights[seed_idx]])
+
+func _clear_user_alg() -> void:
+	_user_alg_active = false
+	_user_alg_done = false
+	if _user_alg_river_mi:
+		_user_alg_river_mi.queue_free(); _user_alg_river_mi = null
+	if _user_alg_lake_mi:
+		_user_alg_lake_mi.queue_free(); _user_alg_lake_mi = null
+	if _user_alg_origin_mi:
+		_user_alg_origin_mi.queue_free(); _user_alg_origin_mi = null
+	if _user_alg_label:
+		_user_alg_label.text = ""
+	_user_alg_river = PackedInt32Array()
+	_user_alg_river_set = {}
+	_user_alg_lakes = []
+	_user_alg_cell_to_lake = {}
+
+func _ensure_user_alg_label() -> void:
+	if _user_alg_label != null:
+		return
+	var canvas := CanvasLayer.new()
+	add_child(canvas)
+	_user_alg_label = Label.new()
+	_user_alg_label.position = Vector2(12, 50)
+	_user_alg_label.add_theme_color_override("font_color", Color(0.4, 1.0, 1.0, 1))
+	_user_alg_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+	_user_alg_label.add_theme_constant_override("outline_size", 4)
+	canvas.add_child(_user_alg_label)
+
+func _user_alg_total_lake_cells() -> int:
+	var n: int = 0
+	for L in _user_alg_lakes:
+		if L != null:
+			n += (L.cells as Dictionary).size()
+	return n
+
+func _user_alg_step() -> bool:
+	if _user_alg_mode == 0:
+		return _user_alg_descent_one()
+	return _user_alg_lake_one()
+
+func _user_alg_descent_one() -> bool:
+	var cur: int = _user_alg_current
+	var gx: int = cur % GRID
+	var gz: int = cur / GRID
+	var cur_h: float = _heights[cur]
+	var best: int = -1
+	var best_score: float = 0.0
+	for d in 8:
+		var off: Vector2i = _FLOW_NEIGHBORS[d]
+		var ngx: int = gx + off.x
+		var ngz: int = gz + off.y
+		if ngx < 0 or ngz < 0 or ngx >= GRID or ngz >= GRID:
+			continue
+		var n_idx: int = ngz * GRID + ngx
+		var dist: float = sqrt(float(off.x * off.x + off.y * off.y)) * CELL
+		var slope: float = (cur_h - _heights[n_idx]) / dist
+		if slope > best_score:
+			best_score = slope
+			best = n_idx
+	if best < 0:
+		_user_alg_start_lake_at(cur)
+		return false
+	if _user_alg_river_set.has(best) or _user_alg_cell_to_lake.has(best):
+		_user_alg_start_lake_at(cur)
+		return false
+	_user_alg_river.append(best)
+	_user_alg_river_set[best] = true
+	_user_alg_current = best
+	return false
+
+func _user_alg_start_lake_at(seed_cell: int) -> void:
+	if _user_alg_cell_to_lake.has(seed_cell):
+		_user_alg_active_lake_idx = _user_alg_cell_to_lake[seed_cell]
+	else:
+		var lake := {
+			"cells": {}, "heap": _MinHeap.new(), "pushed": {},
+			"min_h": _heights[seed_cell], "max_h": _heights[seed_cell],
+		}
+		_user_alg_lakes.append(lake)
+		_user_alg_active_lake_idx = _user_alg_lakes.size() - 1
+		_user_alg_lake_add_cell(_user_alg_active_lake_idx, seed_cell)
+	_user_alg_mode = 1
+
+func _user_alg_lake_add_cell(lake_idx: int, cell: int) -> void:
+	var lake = _user_alg_lakes[lake_idx]
+	(lake.cells as Dictionary)[cell] = true
+	_user_alg_cell_to_lake[cell] = lake_idx
+	var h_c: float = _heights[cell]
+	if h_c < (lake.min_h as float):
+		lake.min_h = h_c
+	if h_c > (lake.max_h as float):
+		lake.max_h = h_c
+	var gx: int = cell % GRID
+	var gz: int = cell / GRID
+	for d in 8:
+		var off: Vector2i = _FLOW_NEIGHBORS[d]
+		var ngx: int = gx + off.x
+		var ngz: int = gz + off.y
+		if ngx < 0 or ngz < 0 or ngx >= GRID or ngz >= GRID:
+			continue
+		var n_idx: int = ngz * GRID + ngx
+		if (lake.cells as Dictionary).has(n_idx):
+			continue
+		if (lake.pushed as Dictionary).has(n_idx):
+			continue
+		(lake.heap as _MinHeap).push(n_idx, _heights[n_idx])
+		(lake.pushed as Dictionary)[n_idx] = true
+
+func _user_alg_lake_one() -> bool:
+	var lake = _user_alg_lakes[_user_alg_active_lake_idx]
+	var next_cell: int = -1
+	while not (lake.heap as _MinHeap).is_empty():
+		var c: int = (lake.heap as _MinHeap).pop()
+		if (lake.cells as Dictionary).has(c):
+			continue
+		next_cell = c
+		break
+	if next_cell < 0:
+		print("[UserAlg] lake landlocked at idx %d (%d cells); stopping" % [
+			_user_alg_active_lake_idx, (lake.cells as Dictionary).size()])
+		return true
+	if _user_alg_cell_to_lake.has(next_cell) and _user_alg_cell_to_lake[next_cell] != _user_alg_active_lake_idx:
+		_user_alg_merge_lakes(_user_alg_active_lake_idx, _user_alg_cell_to_lake[next_cell])
+		return false
+	_user_alg_lake_add_cell(_user_alg_active_lake_idx, next_cell)
+	var lk = _user_alg_lakes[_user_alg_active_lake_idx]
+	if (lk.max_h as float) - (lk.min_h as float) > USER_ALG_LAKE_DEPTH_TERMINATE:
+		print("[UserAlg] lake %d depth %.1fm > %.1f — done (%d cells)" % [
+			_user_alg_active_lake_idx,
+			(lk.max_h as float) - (lk.min_h as float),
+			USER_ALG_LAKE_DEPTH_TERMINATE,
+			(lk.cells as Dictionary).size()])
+		return true
+	# Check the newly added cell's steepest descent.
+	var gx: int = next_cell % GRID
+	var gz: int = next_cell / GRID
+	var cur_h: float = _heights[next_cell]
+	var best: int = -1
+	var best_score: float = 0.0
+	for d in 8:
+		var off: Vector2i = _FLOW_NEIGHBORS[d]
+		var ngx: int = gx + off.x
+		var ngz: int = gz + off.y
+		if ngx < 0 or ngz < 0 or ngx >= GRID or ngz >= GRID:
+			continue
+		var n_idx: int = ngz * GRID + ngx
+		var dist: float = sqrt(float(off.x * off.x + off.y * off.y)) * CELL
+		var slope: float = (cur_h - _heights[n_idx]) / dist
+		if slope > best_score:
+			best_score = slope
+			best = n_idx
+	if best >= 0 and not (lake.cells as Dictionary).has(best):
+		# Spillover.
+		_user_alg_river.append(best)
+		_user_alg_river_set[best] = true
+		_user_alg_current = best
+		_user_alg_mode = 0
+		_user_alg_active_lake_idx = -1
+		return false
+	return false
+
+func _user_alg_merge_lakes(into_idx: int, from_idx: int) -> void:
+	var into = _user_alg_lakes[into_idx]
+	var from = _user_alg_lakes[from_idx]
+	for c in (from.cells as Dictionary):
+		(into.cells as Dictionary)[c] = true
+		_user_alg_cell_to_lake[c] = into_idx
+	for c in (from.pushed as Dictionary):
+		if not (into.pushed as Dictionary).has(c):
+			(into.pushed as Dictionary)[c] = true
+	for entry in (from.heap as _MinHeap).data:
+		(into.heap as _MinHeap).push(entry[1], entry[0])
+	_user_alg_lakes[from_idx] = null
+	print("[UserAlg] merged lake %d into %d" % [from_idx, into_idx])
+
+# --- User-algorithm visualization --------------------------------------------
+
+func _update_user_alg_visual() -> void:
+	if _user_alg_river_mi:
+		_user_alg_river_mi.queue_free()
+	var im := ImmediateMesh.new()
+	im.surface_begin(Mesh.PRIMITIVE_LINES, _user_alg_color_material(Color(1.0, 0.85, 0.0)))
+	var half: float = SIZE * 0.5
+	for i in range(_user_alg_river.size() - 1):
+		var ci: int = _user_alg_river[i]
+		var ni: int = _user_alg_river[i + 1]
+		var a_w := Vector3(float(ci % GRID) * CELL - half, _heights[ci] + 0.4, float(ci / GRID) * CELL - half)
+		var b_w := Vector3(float(ni % GRID) * CELL - half, _heights[ni] + 0.4, float(ni / GRID) * CELL - half)
+		im.surface_add_vertex(a_w)
+		im.surface_add_vertex(b_w)
+	im.surface_end()
+	_user_alg_river_mi = MeshInstance3D.new()
+	_user_alg_river_mi.mesh = im
+	add_child(_user_alg_river_mi)
+	# Lake cells — one flat quad per cell, slight Y lift.
+	if _user_alg_lake_mi:
+		_user_alg_lake_mi.queue_free()
+	var lm := ImmediateMesh.new()
+	lm.surface_begin(Mesh.PRIMITIVE_TRIANGLES, _user_alg_color_material(Color(0.2, 0.6, 1.0)))
+	var s: float = CELL * 0.5
+	for L in _user_alg_lakes:
+		if L == null:
+			continue
+		for c in (L.cells as Dictionary):
+			var gx: int = c % GRID
+			var gz: int = c / GRID
+			var wx: float = float(gx) * CELL - half
+			var wz: float = float(gz) * CELL - half
+			var y: float = _heights[c] + 0.3
+			var v00 := Vector3(wx - s, y, wz - s)
+			var v10 := Vector3(wx + s, y, wz - s)
+			var v01 := Vector3(wx - s, y, wz + s)
+			var v11 := Vector3(wx + s, y, wz + s)
+			lm.surface_add_vertex(v00); lm.surface_add_vertex(v10); lm.surface_add_vertex(v11)
+			lm.surface_add_vertex(v00); lm.surface_add_vertex(v11); lm.surface_add_vertex(v01)
+	lm.surface_end()
+	_user_alg_lake_mi = MeshInstance3D.new()
+	_user_alg_lake_mi.mesh = lm
+	add_child(_user_alg_lake_mi)
+	# Origin marker.
+	if _user_alg_origin_mi == null:
+		_user_alg_origin_mi = MeshInstance3D.new()
+		var sm := SphereMesh.new()
+		sm.radius = 1.0
+		sm.height = 2.0
+		_user_alg_origin_mi.mesh = sm
+		_user_alg_origin_mi.material_override = _user_alg_color_material(Color(1.0, 0.0, 1.0))
+		add_child(_user_alg_origin_mi)
+	_user_alg_origin_mi.global_position = Vector3(
+		_user_alg_origin_world.x,
+		_sample_height(_heights, _user_alg_origin_world.x, _user_alg_origin_world.z) + 1.0,
+		_user_alg_origin_world.z)
+
+func _user_alg_color_material(c: Color) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.albedo_color = c
+	m.emission_enabled = true
+	m.emission = c
+	m.emission_energy_multiplier = 2.0
+	m.no_depth_test = true
+	return m
+
+
+# Walk the trunk and group consecutive vertices where filled height exceeds
+# raw terrain height by > BASIN_MIN_DEPTH into contiguous "basin segments."
+# Each segment is a natural depression the river crosses — a candidate lake.
+func _report_basins_on_trunk() -> void:
+	if _river_polylines.is_empty():
+		return
+	var trunk := _river_polylines[0] as PackedInt32Array
+	var BASIN_MIN_DEPTH: float = 1.0
+	var segments: Array = []   # array of {start_i, end_i, max_depth, center_world}
+	var cur_start: int = -1
+	var cur_max_depth: float = 0.0
+	var cur_center_sum: Vector2 = Vector2.ZERO
+	var cur_count: int = 0
+	for i in trunk.size():
+		var cell: int = trunk[i]
+		var w: Vector2 = _river_cell_to_world(cell)
+		var raw_h: float = _sample_height(_heights, w.x, w.y)
+		var depth: float = _river_filled_h[cell] - raw_h
+		var in_basin: bool = depth > BASIN_MIN_DEPTH
+		if in_basin:
+			if cur_start < 0:
+				cur_start = i
+				cur_max_depth = depth
+				cur_center_sum = w
+				cur_count = 1
+			else:
+				cur_max_depth = maxf(cur_max_depth, depth)
+				cur_center_sum += w
+				cur_count += 1
+		elif cur_start >= 0:
+			segments.append({
+				"start_i": cur_start, "end_i": i - 1,
+				"max_depth": cur_max_depth,
+				"center": cur_center_sum / float(cur_count),
+				"length": cur_count,
+			})
+			cur_start = -1
+			cur_count = 0
+	if cur_start >= 0:
+		segments.append({
+			"start_i": cur_start, "end_i": trunk.size() - 1,
+			"max_depth": cur_max_depth,
+			"center": cur_center_sum / float(cur_count),
+			"length": cur_count,
+		})
+	if segments.is_empty():
+		print("[River] no natural basins along trunk (would all need to be carved)")
+		return
+	print("[River] %d natural basin segment(s) along trunk:" % segments.size())
+	for s in segments:
+		print("   trunk[%d..%d] center=(%.0f, %.0f) max_depth=%.1f m length=%d cells" % [
+			s.start_i, s.end_i, s.center.x, s.center.y, s.max_depth, s.length])
+
+# Walk upstream from the current trunk head, following flow paths (sub-river-
+# threshold cells included), until we reach a cell with no incoming flow. That
+# point is a true headwater on a slope — a spring — rather than the arbitrary
+# spot where accumulation crossed RIVER_ACC_THRESHOLD.
+func _extend_trunk_source() -> void:
+	if _river_polylines.is_empty():
+		return
+	var trunk := _river_polylines[0] as PackedInt32Array
+	if trunk.is_empty():
+		return
+	var extension := PackedInt32Array()
+	var cur: int = trunk[0]
+	var visited_local: Dictionary = {cur: true}
+	var max_iters: int = 2000
+	while max_iters > 0:
+		max_iters -= 1
+		var cgx: int = cur % RIVER_GRID
+		var cgz: int = cur / RIVER_GRID
+		var best_in: int = -1
+		var best_in_acc: float = 0.0
+		for d in 8:
+			var off: Vector2i = _FLOW_NEIGHBORS[d]
+			var ngx: int = cgx + off.x
+			var ngz: int = cgz + off.y
+			if ngx < 0 or ngz < 0 or ngx >= RIVER_GRID or ngz >= RIVER_GRID:
+				continue
+			var n_idx: int = ngz * RIVER_GRID + ngx
+			if visited_local.has(n_idx):
+				continue
+			var n_dir: int = _river_flow_dir[n_idx]
+			if n_dir < 0:
+				continue
+			# Does this neighbor flow INTO cur?
+			var n_off: Vector2i = _FLOW_NEIGHBORS[n_dir]
+			if ngx + n_off.x != cgx or ngz + n_off.y != cgz:
+				continue
+			var n_acc: float = _river_accumulation[n_idx]
+			if n_acc > best_in_acc:
+				best_in_acc = n_acc
+				best_in = n_idx
+		if best_in < 0:
+			break  # true source — no inflow
+		extension.append(best_in)
+		visited_local[best_in] = true
+		cur = best_in
+	if extension.is_empty():
+		return
+	extension.reverse()
+	var new_trunk: PackedInt32Array = extension
+	new_trunk.append_array(trunk)
+	_river_polylines[0] = new_trunk
+	print("[River] extended source by %d cells (now %d total)" % [
+		extension.size(), new_trunk.size()])
+
+# Convert a low-res river cell index to world XZ (the cell's center).
+func _river_cell_to_world(idx: int) -> Vector2:
+	var half: float = SIZE * 0.5
+	var gx: int = idx % RIVER_GRID
+	var gz: int = idx / RIVER_GRID
+	return Vector2(float(gx) * RIVER_CELL - half, float(gz) * RIVER_CELL - half)
+
+# For every extracted polyline, build a smoothed + resampled version with
+# vertices at fixed RIVER_RESAMPLE_STEP spacing. Each vertex carries the
+# filled (monotonically non-increasing) elevation so downstream consumers
+# (carving, mesh, water-level) never have to deal with uphill segments.
+func _smooth_and_resample_polylines() -> void:
+	var t_start: int = Time.get_ticks_msec()
+	_river_polylines_smoothed.clear()
+	for raw_pl in _river_polylines:
+		var raw := raw_pl as PackedInt32Array
+		if raw.size() < 2:
+			continue
+		# Step 1: build a Vector3-ish list (XZ, filled-h, accumulation).
+		var pts: Array = []
+		for i in raw.size():
+			var w: Vector2 = _river_cell_to_world(raw[i])
+			pts.append({
+				"wpos": w,
+				"h": _river_filled_h[raw[i]],
+				"acc": _river_accumulation[raw[i]],
+			})
+		# Step 2: box-blur smoothing on XZ only. Heights stay monotonic from
+		# priority-flood, so we leave them alone.
+		for _pass in RIVER_SMOOTH_PASSES:
+			var copy: Array = []
+			copy.resize(pts.size())
+			copy[0] = pts[0]
+			copy[pts.size() - 1] = pts[pts.size() - 1]
+			for i in range(1, pts.size() - 1):
+				var avg: Vector2 = (pts[i - 1].wpos as Vector2) * 0.25 + (pts[i].wpos as Vector2) * 0.5 + (pts[i + 1].wpos as Vector2) * 0.25
+				copy[i] = {"wpos": avg, "h": pts[i].h, "acc": pts[i].acc}
+			pts = copy
+		# Step 3: resample at fixed step. Walks the polyline accumulating
+		# distance, emits a vertex every RIVER_RESAMPLE_STEP meters.
+		var out: Array = [pts[0]]
+		var carry: float = 0.0
+		for i in range(1, pts.size()):
+			var prev = out[out.size() - 1]
+			var cur = pts[i]
+			var seg_d: float = (prev.wpos as Vector2).distance_to(cur.wpos)
+			while carry + seg_d >= RIVER_RESAMPLE_STEP:
+				var t: float = (RIVER_RESAMPLE_STEP - carry) / seg_d
+				var new_w: Vector2 = (prev.wpos as Vector2).lerp(cur.wpos, t)
+				var new_h: float = lerpf(prev.h, cur.h, t)
+				var new_a: float = lerpf(prev.acc, cur.acc, t)
+				out.append({"wpos": new_w, "h": new_h, "acc": new_a})
+				carry = 0.0
+				prev = out[out.size() - 1]
+				seg_d = (prev.wpos as Vector2).distance_to(cur.wpos)
+			carry += seg_d
+		# Always include the mouth so meshes can terminate cleanly.
+		if (out[out.size() - 1].wpos as Vector2).distance_to(pts[pts.size() - 1].wpos) > 0.01:
+			out.append(pts[pts.size() - 1])
+		_river_polylines_smoothed.append(out)
+	var total_v: int = 0
+	for pl in _river_polylines_smoothed:
+		total_v += (pl as Array).size()
+	var t_ms: int = Time.get_ticks_msec() - t_start
+	print("[River] smoothed/resampled to %d polylines, %d vertices @ %.1f m, %d ms" % [
+		_river_polylines_smoothed.size(), total_v, RIVER_RESAMPLE_STEP, t_ms])
+
+# DEBUG: draw every smoothed polyline as a magenta line. Lifted 0.5 m above
+# filled terrain so it's visible without poking through hills (filled heights
+# never dip into depressions, so the visible line is always above ground).
+func _draw_river_debug() -> void:
+	var im := ImmediateMesh.new()
+	im.surface_begin(Mesh.PRIMITIVE_LINES)
+	# Trunk centerline.
+	for pl in _river_polylines_smoothed:
+		var poly := pl as Array
+		for i in range(poly.size() - 1):
+			var a = poly[i]
+			var b = poly[i + 1]
+			im.surface_add_vertex(Vector3(a.wpos.x, a.h + 0.5, a.wpos.y))
+			im.surface_add_vertex(Vector3(b.wpos.x, b.h + 0.5, b.wpos.y))
+	# Source pond ring.
+	if not _river_source_pond.is_empty():
+		_add_debug_ring(im, _river_source_pond.center, _river_source_pond.water_y + 0.5,
+			_river_source_pond.radius, 24)
+	# Mouth lake boundary — draw the actual flood-fill outline by adding a
+	# line segment for every lake cell that has a non-lake neighbor.
+	if not _river_mouth_lake.is_empty():
+		_add_lake_outline(im, _river_mouth_lake.cells as PackedInt32Array, _river_mouth_lake.water_y + 0.5)
+	im.surface_end()
+	var mi := MeshInstance3D.new()
+	mi.mesh = im
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color(1, 0, 1)
+	mat.emission_enabled = true
+	mat.emission = Color(1, 0, 1)
+	mat.emission_energy_multiplier = 4.0
+	mat.no_depth_test = true   # debug — always visible
+	mi.material_override = mat
+	add_child(mi)
+
+# Walk all lake cells; for each, emit short line segments on the edges that
+# border a non-lake cell. The aggregate outlines the actual irregular shape.
+func _add_lake_outline(im: ImmediateMesh, cells: PackedInt32Array, y: float) -> void:
+	var lake_set := {}
+	for c in cells:
+		lake_set[c] = true
+	var half: float = SIZE * 0.5
+	for c in cells:
+		var gx: int = c % GRID
+		var gz: int = c / GRID
+		var wx: float = float(gx) * CELL - half
+		var wz: float = float(gz) * CELL - half
+		# +x edge
+		if gx + 1 >= GRID or not lake_set.has(gz * GRID + (gx + 1)):
+			im.surface_add_vertex(Vector3(wx + CELL, y, wz))
+			im.surface_add_vertex(Vector3(wx + CELL, y, wz + CELL))
+		# -x edge
+		if gx - 1 < 0 or not lake_set.has(gz * GRID + (gx - 1)):
+			im.surface_add_vertex(Vector3(wx, y, wz))
+			im.surface_add_vertex(Vector3(wx, y, wz + CELL))
+		# +z edge
+		if gz + 1 >= GRID or not lake_set.has((gz + 1) * GRID + gx):
+			im.surface_add_vertex(Vector3(wx, y, wz + CELL))
+			im.surface_add_vertex(Vector3(wx + CELL, y, wz + CELL))
+		# -z edge
+		if gz - 1 < 0 or not lake_set.has((gz - 1) * GRID + gx):
+			im.surface_add_vertex(Vector3(wx, y, wz))
+			im.surface_add_vertex(Vector3(wx + CELL, y, wz))
+
+func _add_debug_ring(im: ImmediateMesh, center: Vector2, y: float, radius: float, segs: int) -> void:
+	for i in segs:
+		var a0: float = float(i) / float(segs) * TAU
+		var a1: float = float(i + 1) / float(segs) * TAU
+		var p0 := Vector3(center.x + cos(a0) * radius, y, center.y + sin(a0) * radius)
+		var p1 := Vector3(center.x + cos(a1) * radius, y, center.y + sin(a1) * radius)
+		im.surface_add_vertex(p0)
+		im.surface_add_vertex(p1)
+
 # --- Sampling helpers ---------------------------------------------------------
 
 # Bilinear height sample from the global heightmap at arbitrary world XZ.
@@ -3124,7 +4240,7 @@ func _init_occluder_mask() -> void:
 	_occ_mask_img.fill(Color(0, 0, 0))
 	_occ_mask_tex = ImageTexture.create_from_image(_occ_mask_img)
 	# Wire into every patch-grass material so the vertex shader can sample it.
-	for mat in [_grass_material_patch_short, _grass_material_patch_tall, _grass_material_patch_core]:
+	for mat in [_grass_material_patch_short, _grass_material_patch_tall, _grass_material_patch_core, _grass_material_patch_super_core]:
 		if mat != null:
 			mat.set_shader_parameter("occluder_mask", _occ_mask_tex)
 			mat.set_shader_parameter("occluder_extent", OCC_MASK_EXTENT)

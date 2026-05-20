@@ -50,6 +50,15 @@ var dash_dir: Vector3 = Vector3.ZERO
 # the base dash speed without permanently mutating dash_speed.
 var _current_dash_speed: float = 0.0
 const BOOST_DASH_MULTIPLIER: float = 10.0
+# Fraction of dash_duration used when Shift is held. With post-dash skid
+# now clamped at DASH_EXIT_SKID_MAX m/s, a full-duration boost (1.0 frac)
+# travels ~79 m and the player still stops cleanly afterward — true 10× burst.
+const BOOST_DASH_DURATION_FRAC: float = 1.0
+# Maximum residual horizontal velocity left over after a dash ends. The base
+# 44 m/s × 0.5 = 22 m/s skid feels right for a normal dash; that's also the
+# ceiling we apply to a boost dash so the post-dash slowdown isn't a multi-
+# second slide.
+const DASH_EXIT_SKID_MAX: float = 22.0
 var lift_time_left: float = 0.0
 var lift_velocity_y: float = 0.0
 var camera_pitch: float = 0.0
@@ -60,6 +69,8 @@ const CAM_POS_3P := Vector3(0.5, 0.4, 4.5)
 const CAM_POS_1P := Vector3(0.0, 0.0, 0.0)
 
 @onready var body_mesh: MeshInstance3D = $Body
+var _body_base_scale: Vector3 = Vector3.ONE
+var _dash_anim_tween: Tween
 @onready var weapon_pivot: Node3D = $WeaponPivot
 @onready var pitch_pivot: Node3D = $CameraPitchPivot
 @onready var camera: Camera3D = $CameraPitchPivot/Camera3D
@@ -146,6 +157,10 @@ func _update_wood_pickup_prompt() -> void:
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	add_to_group("player")
+	# Snapshot the body's resting scale so dash squash/stretch always tweens
+	# back to it. Reading body_mesh.scale mid-dash would capture a stretched
+	# value and the character would drift larger with every rapid dash.
+	_body_base_scale = body_mesh.scale
 	# Build mode controller is a script-only Node child. We construct it here
 	# (rather than putting it in the scene) so build-related state stays out of
 	# the .tscn and travels with the player wherever they're placed.
@@ -329,8 +344,14 @@ func _physics_process(delta: float) -> void:
 			velocity.z = dash_dir.z * _current_dash_speed
 			# Sync controlled velocity so accel-based control resumes from the
 			# dash's exit speed rather than snapping back to the pre-dash value.
-			# Scaled to half so the post-dash skid is shorter.
-			_controlled_velocity = Vector3(velocity.x * 0.5, 0.0, velocity.z * 0.5)
+			# Scaled to half AND capped at DASH_EXIT_SKID_MAX so a boost dash
+			# doesn't leave us with 220 m/s of "controlled" velocity that takes
+			# seconds for GROUND_DECEL to bleed off (the original cause of the
+			# friction-feels-off post-dash skid across the map).
+			var skid := Vector3(velocity.x * 0.5, 0.0, velocity.z * 0.5)
+			if skid.length() > DASH_EXIT_SKID_MAX:
+				skid = skid.normalized() * DASH_EXIT_SKID_MAX
+			_controlled_velocity = skid
 	else:
 		# Modern-action movement: build a target velocity from input and lerp
 		# the player-controlled velocity toward it with separate ground/air
@@ -430,26 +451,31 @@ func _start_dash() -> void:
 		dir.y = 0.0
 	dash_dir = dir.normalized()
 
-	# Boost dash: holding Shift at dash start scales travel distance by 10×
-	# (speed only — duration is unchanged, so the dash is sharper/faster, not
-	# longer). _current_dash_speed is used everywhere during the active dash.
+	# Boost dash: holding Shift at dash start gives a SHORTER, SHARPER burst —
+	# speed × BOOST_DASH_MULTIPLIER, duration cut to BOOST_DASH_DURATION_FRAC of
+	# normal. Net travel is still longer than a base dash but bounded so the
+	# player doesn't rocket across the map.
 	var boost: bool = Input.is_key_pressed(KEY_SHIFT)
 	_current_dash_speed = dash_speed * (BOOST_DASH_MULTIPLIER if boost else 1.0)
+	var base_duration: float = dash_duration * (BOOST_DASH_DURATION_FRAC if boost else 1.0)
 
-	# Default to the full dash duration, then shorten it if an enemy obstructs
-	# the dash path so the player halts half a sword-slice in front of them.
-	var duration := dash_duration
-	var max_dist := _current_dash_speed * dash_duration
+	# Default to the full (possibly boost-reduced) dash duration, then shorten
+	# it if an enemy obstructs the dash path so the player halts half a sword-
+	# slice in front of them.
+	var duration := base_duration
+	var max_dist := _current_dash_speed * base_duration
 	var hit_dist := _dash_target_distance(max_dist + SWORD_SLICE_DISTANCE)
 	if hit_dist >= 0.0:
 		var stop_dist := maxf(hit_dist - SWORD_SLICE_DISTANCE * 0.95, 0.0)
-		duration = clampf(stop_dist / _current_dash_speed, 0.0, dash_duration)
+		duration = clampf(stop_dist / _current_dash_speed, 0.0, base_duration)
 
 	dash_time_left = duration
 	var cd_mult: float = 1.0
 	if current_weapon_node and current_weapon_node.has_method("dash_cooldown_mult"):
 		cd_mult = current_weapon_node.dash_cooldown_mult()
-	dash_cd_left = dash_cooldown * cd_mult
+	# Shift-boosted dash has zero cooldown — held-shift becomes a sprint-burst
+	# you can spam. Normal dashes still cool down as usual.
+	dash_cd_left = 0.0 if boost else dash_cooldown * cd_mult
 
 	_play_dash_animation(duration)
 
@@ -475,12 +501,16 @@ func _dash_target_distance(max_dist: float) -> float:
 	return unsafe_fraction * max_dist
 
 func _play_dash_animation(duration: float) -> void:
-	# Squash & stretch the body along the dash direction.
-	var base_scale := body_mesh.scale
-	var stretch := Vector3(base_scale.x * 0.7, base_scale.y * 0.85, base_scale.z * 1.45)
-	var t := create_tween().set_parallel(false)
-	t.tween_property(body_mesh, "scale", stretch, 0.05)
-	t.tween_property(body_mesh, "scale", base_scale, maxf(duration, 0.12) + 0.12).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	# Squash & stretch the body along the dash direction. Always tween from
+	# wherever the body currently is (handles interrupted prior tweens) back
+	# to the captured _body_base_scale, not whatever scale happens to be
+	# active when this dash starts.
+	if _dash_anim_tween and _dash_anim_tween.is_valid():
+		_dash_anim_tween.kill()
+	var stretch := Vector3(_body_base_scale.x * 0.7, _body_base_scale.y * 0.85, _body_base_scale.z * 1.45)
+	_dash_anim_tween = create_tween().set_parallel(false)
+	_dash_anim_tween.tween_property(body_mesh, "scale", stretch, 0.05)
+	_dash_anim_tween.tween_property(body_mesh, "scale", _body_base_scale, maxf(duration, 0.12) + 0.12).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 	# FOV punch for speed feel.
 	punch_fov(12.0, 0.05, 0.22)
