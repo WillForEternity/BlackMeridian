@@ -41,6 +41,7 @@ var _combo_window_left: float = 0.0
 var _super_active: bool = false
 
 var _trail_active: bool = false
+var _trail_sampling: bool = false
 var _trail_points: Array[Vector3] = []
 var _trail_t_left: float = 0.0
 var _trail_decay_accum: float = 0.0
@@ -146,6 +147,7 @@ func unequip() -> void:
 	_active_swing_tween = null
 	_kill_sheathe_tween()
 	hit_area.monitoring = false
+	_trail_sampling = false
 	rig_tpv.visible = false
 	rig_fpv.visible = false
 
@@ -378,6 +380,7 @@ func _do_super() -> void:
 	# target can be struck once per rotation.
 	hit_area.monitoring = true
 	# Super counts as a crit (is_crit() returns true while _super_active).
+	_trail_sampling = true
 	_begin_trail(CRIT_TINT)
 	_set_blade_length_scale(1.5)
 	_active_swing_tween = create_tween()
@@ -389,6 +392,7 @@ func _do_super() -> void:
 	_active_swing_tween.tween_callback(func():
 		_spawn_crit_slash(1.0)
 		hit_area.monitoring = false
+		_trail_sampling = false
 		_trail_t_left = 0.18
 		_super_active = false
 		_set_blade_length_scale(1.0)
@@ -414,18 +418,18 @@ func tick(delta: float) -> void:
 	if not _trail_active:
 		return
 	var marker: Marker3D = tip_fpv if is_fpv() else tip_tpv
-	if hit_area.monitoring:
+	if _trail_sampling:
 		_sample_trail(marker)
 		_trail_t_left = 0.18
 		_trail_decay_accum = 0.0
 		# Upgrade trail/latch to crit if a dash kicks in mid-swing.
-		if not _swing_was_crit and is_crit():
+		if hit_area.monitoring and not _swing_was_crit and is_crit():
 			_swing_was_crit = true
 			if _trail_mat:
 				_trail_mat.emission = CRIT_TINT
 			_trail_tint = CRIT_TINT
 	_trail_t_left = maxf(_trail_t_left - delta, 0.0)
-	if not hit_area.monitoring and _trail_points.size() >= 4:
+	if not _trail_sampling and _trail_points.size() >= 4:
 		# Frame-rate independent: drop one pair every TRAIL_DECAY_INTERVAL sec.
 		_trail_decay_accum += delta
 		while _trail_decay_accum >= TRAIL_DECAY_INTERVAL and _trail_points.size() >= 4:
@@ -433,7 +437,7 @@ func tick(delta: float) -> void:
 			_trail_points.remove_at(0)
 			_trail_points.remove_at(0)
 	_rebuild_trail()
-	if _trail_t_left <= 0.0 and not hit_area.monitoring:
+	if _trail_t_left <= 0.0 and not _trail_sampling:
 		_trail_active = false
 		_trail_points.clear()
 		if _trail_im:
@@ -470,6 +474,12 @@ func _swing() -> void:
 	var base_tint: Color = data.tint
 	var strike_start: float = data.strike_start
 	var strike_end: float = data.strike_end
+	# Trail sampling spans a wider window than the hit-window: it starts at
+	# chamber-end (when the blade visibly begins arcing forward) and ends at
+	# follow-through-end. Falls back to the strike window if a combo doesn't
+	# specify them.
+	var trail_start: float = data.get("trail_start", strike_start)
+	var trail_end: float = data.get("trail_end", strike_end)
 
 	# Reset the sticky crit latch; tick() will set it true if a crit is
 	# observed at any point during the strike window, and we also seed it from
@@ -478,17 +488,27 @@ func _swing() -> void:
 	if _active_swing_tween and _active_swing_tween.is_valid():
 		_active_swing_tween.kill()
 	_active_swing_tween = create_tween()
-	_active_swing_tween.tween_interval(strike_start)
+	_active_swing_tween.tween_interval(trail_start)
+	_active_swing_tween.tween_callback(func():
+		_trail_sampling = true
+		_begin_trail(base_tint)
+	)
+	_active_swing_tween.tween_interval(maxf(strike_start - trail_start, 0.0))
 	_active_swing_tween.tween_callback(func():
 		hit_area.monitoring = true
 		if is_crit():
 			_swing_was_crit = true
-		var tint: Color = CRIT_TINT if _swing_was_crit else base_tint
-		_begin_trail(tint)
+			if _trail_mat:
+				_trail_mat.emission = CRIT_TINT
+			_trail_tint = CRIT_TINT
 	)
 	_active_swing_tween.tween_interval(strike_end - strike_start)
 	_active_swing_tween.tween_callback(func():
 		hit_area.monitoring = false
+	)
+	_active_swing_tween.tween_interval(maxf(trail_end - strike_end, 0.0))
+	_active_swing_tween.tween_callback(func():
+		_trail_sampling = false
 		_trail_t_left = 0.18
 		if _swing_was_crit:
 			_spawn_crit_slash(0.5)
@@ -512,6 +532,8 @@ func _combo_data(idx: int) -> Dictionary:
 				"tint": Color(0.55, 0.95, 1.0, 1.0),
 				"strike_start": 0.20,
 				"strike_end": 0.34,
+				"trail_start": 0.16,
+				"trail_end": 0.37,
 				"keyframes": [
 					# Chamber low-left: blade pitched down, tip yawed right, cocked across the body.
 					{"rot": Vector3(deg_to_rad(-75.0), deg_to_rad(95.0), deg_to_rad(15.0)), "pos": Vector3(-0.65, -0.35, -0.20), "dur": 0.16, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
@@ -530,6 +552,8 @@ func _combo_data(idx: int) -> Dictionary:
 				"tint": Color(0.75, 0.85, 1.0, 1.0),
 				"strike_start": 0.16,
 				"strike_end": 0.30,
+				"trail_start": 0.16,
+				"trail_end": 0.37,
 				"keyframes": [
 					{"rot": Vector3(deg_to_rad(-75.0), deg_to_rad(-95.0), deg_to_rad(-15.0)), "pos": Vector3(0.65, -0.35, -0.20), "dur": 0.16, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
 					{"rot": Vector3(deg_to_rad(-85.0), deg_to_rad(-105.0), deg_to_rad(-20.0)), "pos": Vector3(0.70, -0.40, -0.22), "dur": 0.05, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
@@ -546,6 +570,8 @@ func _combo_data(idx: int) -> Dictionary:
 				"tint": Color(1.0, 0.55, 0.75, 1.0),
 				"strike_start": 0.26,
 				"strike_end": 0.38,
+				"trail_start": 0.24,
+				"trail_end": 0.52,
 				"keyframes": [
 					{"rot": Vector3(deg_to_rad(-45.0), deg_to_rad(95.0), deg_to_rad(15.0)), "pos": Vector3(-0.70, 0.35, -0.30), "dur": 0.24, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
 					{"rot": Vector3(deg_to_rad(-45.0), deg_to_rad(105.0), deg_to_rad(20.0)), "pos": Vector3(-0.75, 0.37, -0.32), "dur": 0.06, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
