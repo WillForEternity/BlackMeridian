@@ -46,6 +46,10 @@ var view_mode: ViewMode = ViewMode.THIRD_PERSON
 var dash_time_left: float = 0.0
 var dash_cd_left: float = 0.0
 var dash_dir: Vector3 = Vector3.ZERO
+# Active dash speed — set in _start_dash so a boost-dash (Shift) can multiply
+# the base dash speed without permanently mutating dash_speed.
+var _current_dash_speed: float = 0.0
+const BOOST_DASH_MULTIPLIER: float = 10.0
 var lift_time_left: float = 0.0
 var lift_velocity_y: float = 0.0
 var camera_pitch: float = 0.0
@@ -87,8 +91,92 @@ var _controlled_velocity: Vector3 = Vector3.ZERO
 # UP) and use it for both on-platform carry and jump-takeoff momentum.
 var _floor_platform_velocity: Vector3 = Vector3.ZERO
 
+# Wood inventory + build mode wiring.
+var wood: int = 30
+var _build_mode: Node                # entities/player/build_mode.gd
+var _wood_label: Label
+# Interaction prompt: shown while the player stands near a fallen-log pickup.
+# The pickup itself is keyed on `interact` (P) and resolved every frame in
+# _process via the "wood_pickup" group.
+var _prompt_label: Label
+var _nearest_pickup: Node
+
+func get_wood() -> int:
+	return wood
+
+func add_wood(amount: int) -> void:
+	wood += amount
+	_refresh_wood_label()
+
+func spend_wood(amount: int) -> void:
+	wood = maxi(wood - amount, 0)
+	_refresh_wood_label()
+
+func _refresh_wood_label() -> void:
+	if _wood_label != null:
+		_wood_label.text = "Wood: %d" % wood
+
+func on_build_mode_exited() -> void:
+	pass
+
+# Scan the "wood_pickup" group every frame, find the closest collectible log
+# within the log pickup radius (see tree.gd PICKUP_RADIUS), and show/hide the
+# "[P] Pick up wood" prompt accordingly. A single prompt + single nearest
+# target keeps the UI tidy when multiple logs are around.
+func _update_wood_pickup_prompt() -> void:
+	if _prompt_label == null:
+		return
+	# Matches PICKUP_RADIUS in tree.gd — duplicated to avoid coupling
+	# player.gd's parse to the tree script's class_name registration order.
+	var pickup_radius: float = 4.0
+	var best_d2: float = pickup_radius * pickup_radius
+	var best: Node = null
+	var pp: Vector3 = global_position
+	for n in get_tree().get_nodes_in_group("wood_pickup"):
+		if not is_instance_valid(n) or not n.call("is_collectible"):
+			continue
+		var near: Vector3 = n.call("nearest_point", pp)
+		var d2: float = near.distance_squared_to(pp)
+		if d2 < best_d2:
+			best_d2 = d2
+			best = n
+	_nearest_pickup = best
+	_prompt_label.visible = best != null
+
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	add_to_group("player")
+	# Build mode controller is a script-only Node child. We construct it here
+	# (rather than putting it in the scene) so build-related state stays out of
+	# the .tscn and travels with the player wherever they're placed.
+	_build_mode = preload("res://entities/player/build_mode.gd").new()
+	_build_mode.name = "BuildMode"
+	_build_mode.player = self
+	add_child(_build_mode)
+	# Wood counter HUD: parent under the existing UI CanvasLayer so it draws
+	# above the world. Top-left, simple text.
+	var ui: CanvasLayer = get_tree().current_scene.get_node_or_null("UI") as CanvasLayer
+	if ui != null:
+		_wood_label = Label.new()
+		_wood_label.name = "WoodCounter"
+		_wood_label.position = Vector2(24, 24)
+		ui.add_child(_wood_label)
+		_refresh_wood_label()
+		# Interact prompt: centered above the hotbar, hidden until needed.
+		_prompt_label = Label.new()
+		_prompt_label.name = "InteractPrompt"
+		_prompt_label.text = "[P] Pick up wood"
+		_prompt_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_prompt_label.anchor_left = 0.5
+		_prompt_label.anchor_right = 0.5
+		_prompt_label.anchor_top = 1.0
+		_prompt_label.anchor_bottom = 1.0
+		_prompt_label.offset_left = -120
+		_prompt_label.offset_right = 120
+		_prompt_label.offset_top = -120
+		_prompt_label.offset_bottom = -90
+		_prompt_label.visible = false
+		ui.add_child(_prompt_label)
 	# Generous so the player can walk up rocky ridge slopes. The cylinder
 	# side-drag bug that previously needed a 30° cap is now handled by the
 	# manual platform-velocity system below (which only fires on true floor
@@ -114,6 +202,21 @@ func _on_weapon_charge_changed(v: float) -> void:
 	charge_changed.emit(v)
 
 func _unhandled_input(event: InputEvent) -> void:
+	# B toggles build mode. While active, BuildMode owns left/right click and
+	# 1/2 for log/plank — see entities/player/build_mode.gd.
+	if event is InputEventKey and event.pressed and not event.echo:
+		var ek := event as InputEventKey
+		if ek.keycode == KEY_B:
+			if _build_mode != null:
+				_build_mode.call("set_active", not (_build_mode.get("active") as bool))
+			return
+		if ek.keycode == KEY_P:
+			if _nearest_pickup != null and is_instance_valid(_nearest_pickup):
+				_nearest_pickup.call("pick_up_by", self)
+				_nearest_pickup = null
+				if _prompt_label != null:
+					_prompt_label.visible = false
+			return
 	if event.is_action_pressed("ui_cancel"):
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		return
@@ -129,23 +232,32 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _process(delta: float) -> void:
 	dash_cd_left = maxf(dash_cd_left - delta, 0.0)
+	_update_wood_pickup_prompt()
 
-	if Input.is_action_just_pressed("equip_sword"):
-		_equip(WeaponSlot.SWORD)
-	if Input.is_action_just_pressed("equip_gun"):
-		_equip(WeaponSlot.GUN)
-	if Input.is_action_just_pressed("equip_sniper"):
-		_equip(WeaponSlot.SNIPER)
-	if Input.is_action_just_pressed("equip_portal_light"):
-		_equip(WeaponSlot.PORTAL_LIGHT)
-	if Input.is_action_just_pressed("equip_portal_dark"):
-		_equip(WeaponSlot.PORTAL_DARK)
+	# Build mode reuses 1/2 for log/plank selection, so we suppress the weapon-
+	# slot hotkeys (which share those bindings) while building.
+	var build_active: bool = _build_mode != null and (_build_mode.get("active") as bool)
+	if not build_active:
+		if Input.is_action_just_pressed("equip_sword"):
+			_equip(WeaponSlot.SWORD)
+		if Input.is_action_just_pressed("equip_gun"):
+			_equip(WeaponSlot.GUN)
+		if Input.is_action_just_pressed("equip_sniper"):
+			_equip(WeaponSlot.SNIPER)
+		if Input.is_action_just_pressed("equip_portal_light"):
+			_equip(WeaponSlot.PORTAL_LIGHT)
+		if Input.is_action_just_pressed("equip_portal_dark"):
+			_equip(WeaponSlot.PORTAL_DARK)
 	if Input.is_action_just_pressed("toggle_view"):
 		_toggle_view()
 	if Input.is_action_just_pressed("weapon_guide"):
 		EventBus.weapon_guide_toggled.emit(current_weapon_node.guide_text() if current_weapon_node else "")
 
 	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+		return
+	# Build mode owns click input — don't fire weapons or skills while placing.
+	var building: bool = _build_mode != null and (_build_mode.get("active") as bool)
+	if building:
 		return
 	if Input.is_action_just_pressed("attack"):
 		if _consume_next_click:
@@ -203,8 +315,8 @@ func _physics_process(delta: float) -> void:
 	if dash_time_left > 0.0:
 		# Cancel the dash if we're about to plow into an enemy: keep at least
 		# half a sword-slice of space between the player capsule and the target.
-		var min_gap := SWORD_SLICE_DISTANCE * 0.5
-		var lookahead := dash_speed * delta + min_gap
+		var min_gap := SWORD_SLICE_DISTANCE * 0.95
+		var lookahead := _current_dash_speed * delta + min_gap
 		var d := _dash_target_distance(lookahead)
 		if d >= 0.0 and d <= min_gap:
 			dash_time_left = 0.0
@@ -213,8 +325,8 @@ func _physics_process(delta: float) -> void:
 			_controlled_velocity = Vector3.ZERO
 		else:
 			dash_time_left -= delta
-			velocity.x = dash_dir.x * dash_speed
-			velocity.z = dash_dir.z * dash_speed
+			velocity.x = dash_dir.x * _current_dash_speed
+			velocity.z = dash_dir.z * _current_dash_speed
 			# Sync controlled velocity so accel-based control resumes from the
 			# dash's exit speed rather than snapping back to the pre-dash value.
 			# Scaled to half so the post-dash skid is shorter.
@@ -318,14 +430,20 @@ func _start_dash() -> void:
 		dir.y = 0.0
 	dash_dir = dir.normalized()
 
+	# Boost dash: holding Shift at dash start scales travel distance by 10×
+	# (speed only — duration is unchanged, so the dash is sharper/faster, not
+	# longer). _current_dash_speed is used everywhere during the active dash.
+	var boost: bool = Input.is_key_pressed(KEY_SHIFT)
+	_current_dash_speed = dash_speed * (BOOST_DASH_MULTIPLIER if boost else 1.0)
+
 	# Default to the full dash duration, then shorten it if an enemy obstructs
 	# the dash path so the player halts half a sword-slice in front of them.
 	var duration := dash_duration
-	var max_dist := dash_speed * dash_duration
+	var max_dist := _current_dash_speed * dash_duration
 	var hit_dist := _dash_target_distance(max_dist + SWORD_SLICE_DISTANCE)
 	if hit_dist >= 0.0:
-		var stop_dist := maxf(hit_dist - SWORD_SLICE_DISTANCE * 0.5, 0.0)
-		duration = clampf(stop_dist / dash_speed, 0.0, dash_duration)
+		var stop_dist := maxf(hit_dist - SWORD_SLICE_DISTANCE * 0.95, 0.0)
+		duration = clampf(stop_dist / _current_dash_speed, 0.0, dash_duration)
 
 	dash_time_left = duration
 	var cd_mult: float = 1.0
