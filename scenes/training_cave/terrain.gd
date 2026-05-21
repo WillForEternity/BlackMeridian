@@ -69,7 +69,7 @@ const WARP_AMP: float = 50.0
 const GRASS_TILE_SIZE: float = 40.0
 const GRASS_STREAM_RADIUS: float = 520.0   # patch covers ~106m; tiles must reach well past that
 const GRASS_REBUILD_THRESHOLD: float = 8.0
-const GRASS_TILE_SPAWN_BUDGET: int = 6     # tiles built per frame, max
+const GRASS_TILE_SPAWN_BUDGET: int = 2     # tiles built per frame, max (was 6 — spiked frame time during movement)
 const GRASS_SPACING: float = 0.55          # tile scatter spacing (tight = full field)
 const GRASS_TALL_CHANCE: float = 0.28      # probability of an extra tall blade
 const GRASS_TALL_HEIGHT_SCALE: float = 2.1
@@ -104,7 +104,7 @@ const PATCH_CORE_FADE_OUTER: float = 40.0
 # carpet (CORE's ~105 blades/m² shows gaps when looking straight down). Static
 # mesh, no wind shader; fades within its own patch boundary.
 const PATCH_SUPER_CORE_SIZE: float = 14.0
-const PATCH_SUPER_CORE_GRID: int = 200       # 200²/14² ≈ 204 blades/m² (was 625 — far over real-world density)
+const PATCH_SUPER_CORE_GRID: int = 275       # 275²/14² ≈ 386 blades/m² — dense but not saturated
 const PATCH_SUPER_CORE_FADE_INNER: float = 5.0
 const PATCH_SUPER_CORE_FADE_OUTER: float = 7.0
 const PATCH_SNAP: float = 1.0              # snap follow to whole meters (no shimmer)
