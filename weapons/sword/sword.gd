@@ -715,13 +715,32 @@ func _rebuild_trail() -> void:
 # HitArea and TipMarker (Marker3D) are left in place so combat reach is unchanged.
 const AMARYLLIS_MODEL_PATH := "res://assets/models/weapons/amaryllis.glb"
 
+# ── Manual amaryllis positioning ────────────────────────────────────────────
+# TPV and FPV rigs live under completely different parent transforms (TPV under
+# WeaponPivot at (0.35,-0.1,-0.25) on the 2x-scaled player; FPV under FPVPivot
+# at (0.3,-0.22,-0.4) with a 0.65x scale, and the FPV SwordRig itself carries
+# a 1.538x scale). The same offset/rotation values produce very different
+# world-space results in each view, so each rig gets its own tunables.
+#
+# All values are in the holder's local space (i.e. inside the SwordRig).
+# Tweak these freely until the sword sits where you want it.
+const SWORD_TARGET_LEN_TPV: float = 4.1
+const SWORD_TARGET_LEN_FPV: float = 3.9
+const SWORD_HOLDER_POS_TPV := Vector3(0.0, 0.4, -0.2)   # (x, y, z) — +x = right, -z = forward, +y = up
+const SWORD_HOLDER_POS_FPV := Vector3(0.4, 0.0, -3.9 * 0.334)
+const SWORD_HOLDER_ROT_TPV := Vector3(0.0, 0.0, 0.0)            # extra euler (rad) on top of auto axis-align
+const SWORD_HOLDER_ROT_FPV := Vector3(0.0, 0.0, 0.0)
+
 func _install_katana_visuals(rig: Node3D, fpv: bool) -> void:
+	# Runtime visual build disabled — sword model is instanced directly in the
+	# scene (.tscn) under each SwordRig and positioned manually in the editor.
 	if rig == null:
 		return
 	for n in ["Blade", "Core", "Guard", "Pommel", "Tip"]:
 		var c := rig.get_node_or_null(n)
 		if c is MeshInstance3D:
 			(c as MeshInstance3D).visible = false
+	return
 	var packed: PackedScene = load(AMARYLLIS_MODEL_PATH) as PackedScene
 	var model: Node3D = (packed.instantiate() as Node3D) if packed != null else null
 	if model == null:
@@ -735,7 +754,7 @@ func _install_katana_visuals(rig: Node3D, fpv: bool) -> void:
 	# katana combat constants (~1.6m tip reach) still apply visually.
 	var raw: AABB = _world_aabb_sword(model)
 	var longest: float = maxf(raw.size.x, maxf(raw.size.y, raw.size.z))
-	var target_len: float = (3.9 if fpv else 4.1)
+	var target_len: float = SWORD_TARGET_LEN_FPV if fpv else SWORD_TARGET_LEN_TPV
 	var fit_scale: float = (target_len / longest) if longest > 0.0001 else 1.0
 	model.scale = Vector3(fit_scale, fit_scale, fit_scale)
 	var center: Vector3 = (raw.position + raw.size * 0.5) * fit_scale
@@ -746,16 +765,17 @@ func _install_katana_visuals(rig: Node3D, fpv: bool) -> void:
 		axis_idx = 1
 	elif raw.size.z >= raw.size.x and raw.size.z >= raw.size.y:
 		axis_idx = 2
+	var auto_rot := Vector3.ZERO
 	match axis_idx:
 		0:
-			holder.rotation = Vector3(0, deg_to_rad(90.0), 0)
+			auto_rot = Vector3(0, deg_to_rad(90.0), 0)
 		1:
-			holder.rotation = Vector3(deg_to_rad(90.0), 0, 0)
+			auto_rot = Vector3(deg_to_rad(90.0), 0, 0)
 		2:
-			holder.rotation = Vector3(0, deg_to_rad(180.0), 0)
-	# Match the previous katana's grip point: handle back at +0.166·L behind
-	# the rig origin, tip at -0.834·L in front, so midpoint sits at -0.334·L.
-	holder.position = Vector3(0.4, 0, -target_len * 0.334)
+			auto_rot = Vector3(0, deg_to_rad(180.0), 0)
+	var manual_rot: Vector3 = SWORD_HOLDER_ROT_FPV if fpv else SWORD_HOLDER_ROT_TPV
+	holder.rotation = auto_rot + manual_rot
+	holder.position = SWORD_HOLDER_POS_FPV if fpv else SWORD_HOLDER_POS_TPV
 	if fpv:
 		for n in _gather_geom_sword(holder):
 			if n is GeometryInstance3D:

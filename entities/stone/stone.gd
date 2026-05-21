@@ -30,15 +30,23 @@ func setup(parts: Array, scale_xyz: Vector3, union_aabb: AABB) -> void:
 		mi.transform = part.xform
 		visual.add_child(mi)
 
-	# Single box collider sized to the scaled AABB. Good enough for the round
-	# Kenney cobbles — overestimates slightly at the corners, but the alternative
-	# (ConvexPolygonShape3D per mesh) is far more expensive at this density.
-	var col := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	box.size = union_aabb.size * scale_xyz
-	col.shape = box
-	col.position = (union_aabb.position + union_aabb.size * 0.5) * scale_xyz
-	add_child(col)
+	# One simplified convex hull per mesh part — wraps the rock tightly enough
+	# that the player doesn't hover above or clip in, but stays cheap (typically
+	# <40 verts per hull after simplify). This is the standard treatment for
+	# static rock props in shipping engines.
+	for part in parts:
+		var m: Mesh = part.mesh
+		if m == null:
+			continue
+		var hull: ConvexPolygonShape3D = m.create_convex_shape(true, true)
+		if hull == null:
+			continue
+		var col := CollisionShape3D.new()
+		col.shape = hull
+		# Bake the part's local transform plus the per-instance scale into the
+		# shape's transform so the hull aligns with the visual mesh.
+		col.transform = Transform3D(Basis().scaled(scale_xyz), Vector3.ZERO) * part.xform
+		add_child(col)
 
 func take_damage(amount: int, _dir: Vector3) -> void:
 	if health <= 0:

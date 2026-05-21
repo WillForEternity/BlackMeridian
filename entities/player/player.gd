@@ -1,6 +1,6 @@
 extends CharacterBody3D
 
-enum WeaponSlot { SWORD, GUN, SNIPER, PORTAL_LIGHT, PORTAL_DARK }
+enum WeaponSlot { SWORD, GUN, SNIPER, PORTAL_LIGHT, PORTAL_DARK, SPEAR }
 enum ViewMode { THIRD_PERSON, FIRST_PERSON }
 
 signal weapon_changed(weapon: int)
@@ -38,6 +38,7 @@ const CAM_COLLISION_MARGIN: float = 0.25
 @export var sniper_path: NodePath
 @export var portal_light_path: NodePath
 @export var portal_dark_path: NodePath
+@export var spear_path: NodePath
 
 var gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity")
 var current_slot: WeaponSlot = WeaponSlot.SWORD
@@ -88,7 +89,8 @@ var _dash_anim_tween: Tween
 @onready var _sniper: Node = get_node(sniper_path)
 @onready var _portal_light: Node = get_node(portal_light_path)
 @onready var _portal_dark: Node = get_node(portal_dark_path)
-@onready var _weapons: Array[Node] = [_sword, _gun, _sniper, _portal_light, _portal_dark]
+@onready var _spear: Node = get_node(spear_path)
+@onready var _weapons: Array[Node] = [_sword, _gun, _sniper, _portal_light, _portal_dark, _spear]
 
 # Tracks extra mid-air jumps consumed since last ground contact. Weapons can
 # report a higher allowance via `extra_air_jumps()`.
@@ -270,6 +272,8 @@ func _process(delta: float) -> void:
 			_equip(WeaponSlot.PORTAL_LIGHT)
 		if Input.is_action_just_pressed("equip_portal_dark"):
 			_equip(WeaponSlot.PORTAL_DARK)
+		if Input.is_action_just_pressed("equip_spear"):
+			_equip(WeaponSlot.SPEAR)
 	if Input.is_action_just_pressed("toggle_view"):
 		_toggle_view()
 	if Input.is_action_just_pressed("weapon_guide"):
@@ -280,6 +284,8 @@ func _process(delta: float) -> void:
 	# Build mode owns click input — don't fire weapons or skills while placing.
 	var building: bool = _build_mode != null and (_build_mode.get("active") as bool)
 	if building:
+		return
+	if current_weapon_node == null:
 		return
 	if Input.is_action_just_pressed("attack"):
 		if _consume_next_click:
@@ -600,9 +606,14 @@ func _apply_view_mode() -> void:
 func _equip(s: WeaponSlot) -> void:
 	if s == current_slot:
 		return
-	current_weapon_node.unequip()
+	var next: Node = _weapons[int(s)]
+	if next == null:
+		push_warning("Weapon slot %d has no node; ignoring equip" % int(s))
+		return
+	if current_weapon_node != null:
+		current_weapon_node.unequip()
 	current_slot = s
-	current_weapon_node = _weapons[int(s)]
+	current_weapon_node = next
 	current_weapon_node.equip()
 	_apply_weapon_visibility()
 	weapon_changed.emit(int(s))

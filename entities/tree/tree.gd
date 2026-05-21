@@ -44,10 +44,16 @@ func setup(parts: Array, scale_xyz: Vector3, union_aabb: AABB) -> void:
 
 	_height = union_aabb.size.y * scale_xyz.y
 
+	# Capsule at the trunk — standard for foliage. Polyhaven AABBs include the
+	# canopy, so we use a fraction of the smaller horizontal dimension as a
+	# trunk-radius estimate, then clamp to a sensible floor so saplings don't
+	# get a giant invisible trunk and full-grown trees don't have a pencil-thin
+	# one that the player can clip through.
 	var col := CollisionShape3D.new()
 	var cap := CapsuleShape3D.new()
-	var trunk_radius: float = minf(union_aabb.size.x, union_aabb.size.z) * scale_xyz.x * 0.16
-	cap.radius = maxf(trunk_radius, 0.28)
+	var horiz_scale: float = maxf(scale_xyz.x, scale_xyz.z)
+	var trunk_radius: float = minf(union_aabb.size.x, union_aabb.size.z) * horiz_scale * 0.12
+	cap.radius = clampf(trunk_radius, 0.18, 0.55)
 	cap.height = maxf(_height * 0.8, 1.0)
 	col.shape = cap
 	col.position = Vector3(0, cap.height * 0.5 + cap.radius, 0)

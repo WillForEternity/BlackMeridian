@@ -10,6 +10,7 @@
 [ext_resource type="Script" path="res://weapons/sniper/sniper.gd" id="9_sniper"]
 [ext_resource type="Script" path="res://weapons/portal/portal_light.gd" id="10_pl"]
 [ext_resource type="Script" path="res://weapons/portal/portal_dark.gd" id="11_pd"]
+[ext_resource type="Script" path="res://weapons/spear/spear.gd" id="12_spear"]
 
 [sub_resource type="CylinderMesh" id="Mesh_StickThigh"]
 top_radius = 0.04
@@ -301,6 +302,7 @@ gun_path = NodePath("Weapons/Gun")
 sniper_path = NodePath("Weapons/Sniper")
 portal_light_path = NodePath("Weapons/PortalLight")
 portal_dark_path = NodePath("Weapons/PortalDark")
+spear_path = NodePath("Weapons/Spear")
 
 [node name="Body" type="MeshInstance3D" parent="Player"]
 mesh = SubResource("CapsuleMesh_Player")
@@ -668,6 +670,9 @@ script = ExtResource("10_pl")
 
 [node name="PortalDark" type="Node" parent="Player/Weapons"]
 script = ExtResource("11_pd")
+
+[node name="Spear" type="Node" parent="Player/Weapons"]
+script = ExtResource("12_spear")
 
 [node name="Targets" type="Node3D" parent="."]
 

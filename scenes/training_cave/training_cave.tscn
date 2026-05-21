@@ -1,257 +1,23 @@
-[gd_scene load_steps=65 format=3 uid="uid://b1xg7s3kxk001"]
+[gd_scene format=3 uid="uid://b1xg7s3kxk001"]
 
-[ext_resource type="Script" path="res://entities/player/player.gd" id="1_player"]
-[ext_resource type="Script" path="res://entities/player/camera_follow.gd" id="2_camfollow"]
-[ext_resource type="Script" path="res://entities/player/hotbar.gd" id="4_hotbar"]
-[ext_resource type="Script" path="res://scenes/training_cave/training_cave.gd" id="5_cave"]
-[ext_resource type="Script" path="res://scenes/training_cave/terrain.gd" id="13_terrain"]
-[ext_resource type="PackedScene" path="res://entities/target/target.tscn" id="6_target_scn"]
-[ext_resource type="Script" path="res://weapons/sword/sword.gd" id="7_sword"]
-[ext_resource type="Script" path="res://weapons/gun/gun.gd" id="8_gun"]
-[ext_resource type="Script" path="res://weapons/sniper/sniper.gd" id="9_sniper"]
-[ext_resource type="Script" path="res://weapons/portal/portal_light.gd" id="10_pl"]
-[ext_resource type="Script" path="res://weapons/portal/portal_dark.gd" id="11_pd"]
-[ext_resource type="Script" path="res://weapons/spear/spear.gd" id="12_spear"]
-[ext_resource type="Texture2D" path="res://assets/hdri/alien_planet.exr" id="12_sky"]
-[ext_resource type="PackedScene" path="res://assets/models/lowe.glb" id="14_lowe"]
-[ext_resource type="PackedScene" path="res://assets/models/stone_lion.glb" id="15_stone_lion"]
-[ext_resource type="Script" path="res://entities/util/auto_trimesh_collider.gd" id="16_autocol"]
-[ext_resource type="PackedScene" path="res://assets/models/weapons/sci-fi_gun.glb" id="17_scifigun"]
-
-[sub_resource type="CylinderMesh" id="Mesh_StickThigh"]
-top_radius = 0.04
-bottom_radius = 0.04
-height = 0.4
-radial_segments = 10
-rings = 1
-
-[sub_resource type="CylinderMesh" id="Mesh_StickShin"]
-top_radius = 0.035
-bottom_radius = 0.035
-height = 0.4
-radial_segments = 10
-rings = 1
-
-[sub_resource type="CylinderMesh" id="Mesh_StickSpine"]
-top_radius = 0.05
-bottom_radius = 0.05
-height = 0.3
-radial_segments = 10
-rings = 1
-
-[sub_resource type="CylinderMesh" id="Mesh_StickUpperArm"]
-top_radius = 0.035
-bottom_radius = 0.035
-height = 0.25
-radial_segments = 10
-rings = 1
-
-[sub_resource type="CylinderMesh" id="Mesh_StickForearm"]
-top_radius = 0.03
-bottom_radius = 0.03
-height = 0.22
-radial_segments = 10
-rings = 1
-
-[sub_resource type="SphereMesh" id="Mesh_StickHead"]
-radius = 0.12
-height = 0.24
-radial_segments = 18
-rings = 9
-
-[sub_resource type="SphereMesh" id="Mesh_StickJoint"]
-radius = 0.055
-height = 0.11
-radial_segments = 12
-rings = 6
-
-[sub_resource type="SphereMesh" id="Mesh_StickHand"]
-radius = 0.05
-height = 0.1
-radial_segments = 12
-rings = 6
-
-[sub_resource type="BoxMesh" id="Mesh_StickFoot"]
-size = Vector3(0.1, 0.04, 0.18)
-
-[sub_resource type="StandardMaterial3D" id="Mat_Stick"]
-albedo_color = Color(0.08, 0.09, 0.12, 1)
-metallic = 0.0
-roughness = 0.7
-emission_enabled = true
-emission = Color(0.5, 0.6, 0.95, 1)
-emission_energy_multiplier = 0.35
-
-[sub_resource type="PlaneMesh" id="PlaneMesh_Ground"]
-size = Vector2(160, 160)
-
-[sub_resource type="BoxShape3D" id="BoxShape_Ground"]
-size = Vector3(160, 0.2, 160)
-
-[sub_resource type="CapsuleMesh" id="CapsuleMesh_Player"]
-radius = 0.2
-height = 1.0667
-
-[sub_resource type="CapsuleShape3D" id="CapsuleShape_Player"]
-radius = 0.2
-height = 1.0667
-
-[sub_resource type="BoxMesh" id="Mesh_SwordBlade"]
-size = Vector3(0.1, 0.025, 1.0)
-
-[sub_resource type="BoxMesh" id="Mesh_SwordCore"]
-size = Vector3(0.022, 0.04, 0.92)
-
-[sub_resource type="BoxMesh" id="Mesh_SwordGuard"]
-size = Vector3(0.22, 0.04, 0.06)
-
-[sub_resource type="SphereMesh" id="Mesh_SwordPommel"]
-radius = 0.04
-height = 0.09
-radial_segments = 12
-rings = 6
-
-[sub_resource type="BoxShape3D" id="BoxShape_SwordHit"]
-size = Vector3(1.2, 0.7, 1.5)
-
-[sub_resource type="BoxMesh" id="Mesh_GunBody"]
-size = Vector3(0.24, 0.24, 0.46)
-
-[sub_resource type="BoxMesh" id="Mesh_GunRail"]
-size = Vector3(0.2, 0.05, 0.34)
-
-[sub_resource type="BoxMesh" id="Mesh_GunCore"]
-size = Vector3(0.04, 0.13, 0.24)
-
-[sub_resource type="BoxMesh" id="Mesh_GunBarrel"]
-size = Vector3(0.1, 0.1, 0.22)
-
-[sub_resource type="BoxMesh" id="Mesh_GunGrip"]
-size = Vector3(0.1, 0.32, 0.16)
-
-[sub_resource type="BoxMesh" id="Mesh_SniperBody"]
-size = Vector3(0.18, 0.22, 0.7)
-
-[sub_resource type="BoxMesh" id="Mesh_SniperBarrel"]
-size = Vector3(0.08, 0.08, 0.85)
-
-[sub_resource type="BoxMesh" id="Mesh_SniperScope"]
-size = Vector3(0.14, 0.14, 0.3)
-
-[sub_resource type="BoxMesh" id="Mesh_SniperScopeLens"]
-size = Vector3(0.11, 0.11, 0.025)
-
-[sub_resource type="BoxMesh" id="Mesh_SniperCore"]
-size = Vector3(0.04, 0.11, 0.42)
-
-[sub_resource type="BoxMesh" id="Mesh_SniperProng"]
-size = Vector3(0.025, 0.025, 0.22)
-
-[sub_resource type="BoxMesh" id="Mesh_SniperStock"]
-size = Vector3(0.16, 0.2, 0.3)
-
-[sub_resource type="BoxMesh" id="Mesh_SniperGrip"]
-size = Vector3(0.1, 0.32, 0.16)
-
-[sub_resource type="BoxMesh" id="Mesh_SniperVentFin"]
-size = Vector3(0.16, 0.01, 0.05)
-
-[sub_resource type="BoxMesh" id="Mesh_SniperRail"]
-size = Vector3(0.04, 0.02, 0.5)
-
-[sub_resource type="TorusMesh" id="Mesh_SniperRing"]
-inner_radius = 0.07
-outer_radius = 0.085
-ring_segments = 24
-rings = 6
-
-[sub_resource type="BoxMesh" id="Mesh_SniperBoltHandle"]
-size = Vector3(0.04, 0.04, 0.18)
-
-[sub_resource type="SphereMesh" id="Mesh_SniperBoltKnob"]
-radius = 0.035
-height = 0.07
-radial_segments = 12
-rings = 6
-
-[sub_resource type="BoxMesh" id="Mesh_SniperCell"]
-size = Vector3(0.14, 0.08, 0.18)
-
-[sub_resource type="PrismMesh" id="Mesh_SwordTip"]
-left_to_right = 0.5
-size = Vector3(0.1, 0.18, 0.025)
-
-[sub_resource type="StandardMaterial3D" id="Mat_Ground"]
-albedo_color = Color(0.12, 0.14, 0.2, 1)
-roughness = 0.85
-metallic = 0.15
-
-[sub_resource type="StandardMaterial3D" id="Mat_Player"]
-albedo_color = Color(0.85, 0.35, 0.25, 1)
-roughness = 0.55
-
-[sub_resource type="StandardMaterial3D" id="Mat_SwordBlade"]
-albedo_color = Color(0.85, 0.95, 1.0, 1)
-metallic = 0.9
-roughness = 0.05
-emission_enabled = true
-emission = Color(0.35, 0.85, 1.0, 1)
-emission_energy_multiplier = 1.8
-
-[sub_resource type="StandardMaterial3D" id="Mat_SwordCore"]
-albedo_color = Color(1, 1, 1, 1)
-emission_enabled = true
-emission = Color(0.7, 1.0, 1.0, 1)
-emission_energy_multiplier = 6.0
-
-[sub_resource type="StandardMaterial3D" id="Mat_SwordHilt"]
-albedo_color = Color(0.1, 0.1, 0.13, 1)
-metallic = 0.85
-roughness = 0.25
-
-[sub_resource type="StandardMaterial3D" id="Mat_GunBody"]
-albedo_color = Color(0.12, 0.12, 0.16, 1)
-metallic = 0.75
-roughness = 0.22
-
-[sub_resource type="StandardMaterial3D" id="Mat_GunRail"]
-albedo_color = Color(0.2, 0.2, 0.24, 1)
-metallic = 0.85
-roughness = 0.18
-
-[sub_resource type="StandardMaterial3D" id="Mat_GunCore"]
-albedo_color = Color(1, 0.3, 0.9, 1)
-emission_enabled = true
-emission = Color(1, 0.25, 0.85, 1)
-emission_energy_multiplier = 4.0
-
-[sub_resource type="StandardMaterial3D" id="Mat_SniperBody"]
-albedo_color = Color(0.09, 0.11, 0.15, 1)
-metallic = 0.9
-roughness = 0.18
-
-[sub_resource type="StandardMaterial3D" id="Mat_SniperAccent"]
-albedo_color = Color(0.22, 0.25, 0.32, 1)
-metallic = 0.9
-roughness = 0.15
-
-[sub_resource type="StandardMaterial3D" id="Mat_SniperLens"]
-albedo_color = Color(1, 0.18, 0.18, 1)
-emission_enabled = true
-emission = Color(1, 0.12, 0.12, 1)
-emission_energy_multiplier = 4.5
-
-[sub_resource type="StandardMaterial3D" id="Mat_SniperCore"]
-albedo_color = Color(0.2, 0.95, 1.0, 1)
-emission_enabled = true
-emission = Color(0.2, 0.95, 1.0, 1)
-emission_energy_multiplier = 1.4
-
-[sub_resource type="StandardMaterial3D" id="Mat_SniperProng"]
-albedo_color = Color(0.35, 0.95, 1.0, 1)
-emission_enabled = true
-emission = Color(0.35, 0.95, 1.0, 1)
-emission_energy_multiplier = 2.0
+[ext_resource type="Script" uid="uid://bvwg8vt73rvlt" path="res://entities/player/player.gd" id="1_player"]
+[ext_resource type="Script" uid="uid://cgyfadcqpmfdt" path="res://entities/player/camera_follow.gd" id="2_camfollow"]
+[ext_resource type="Script" uid="uid://dqmfkqwsgdxx7" path="res://entities/player/hotbar.gd" id="4_hotbar"]
+[ext_resource type="Script" uid="uid://hjw1m2lle2ah" path="res://scenes/training_cave/training_cave.gd" id="5_cave"]
+[ext_resource type="PackedScene" uid="uid://gqgvyklu4xmb" path="res://assets/models/weapons/amaryllis.glb" id="5_lcwwa"]
+[ext_resource type="PackedScene" uid="uid://btarget0xq001" path="res://entities/target/target.tscn" id="6_target_scn"]
+[ext_resource type="Script" uid="uid://cvpwrkfke5x3s" path="res://weapons/sword/sword.gd" id="7_sword"]
+[ext_resource type="Script" uid="uid://bdydsywy2u5pg" path="res://weapons/gun/gun.gd" id="8_gun"]
+[ext_resource type="Script" uid="uid://cidehnbucwtuy" path="res://weapons/sniper/sniper.gd" id="9_sniper"]
+[ext_resource type="Script" uid="uid://cir5ousvvtb5g" path="res://weapons/portal/portal_light.gd" id="10_pl"]
+[ext_resource type="Script" uid="uid://bvgwtt5doacvn" path="res://weapons/portal/portal_dark.gd" id="11_pd"]
+[ext_resource type="Texture2D" uid="uid://gxxmryjki5xn" path="res://assets/hdri/alien_planet.exr" id="12_sky"]
+[ext_resource type="Script" uid="uid://c8ptvqt2fskgv" path="res://weapons/spear/spear.gd" id="12_spear"]
+[ext_resource type="Script" uid="uid://nldtwf5w57oq" path="res://scenes/training_cave/terrain.gd" id="13_terrain"]
+[ext_resource type="PackedScene" uid="uid://dh5t1bnl38wb" path="res://assets/models/lowe.glb" id="14_lowe"]
+[ext_resource type="PackedScene" uid="uid://c07s53wlxwa5m" path="res://assets/models/stone_lion.glb" id="15_stone_lion"]
+[ext_resource type="Script" uid="uid://mo0e0jvj4oam" path="res://entities/util/auto_trimesh_collider.gd" id="16_autocol"]
+[ext_resource type="PackedScene" uid="uid://dqc58n2up4tje" path="res://assets/models/weapons/sci-fi_gun.glb" id="17_scifigun"]
 
 [sub_resource type="PanoramaSkyMaterial" id="Sky_Mat"]
 panorama = ExtResource("12_sky")
@@ -267,43 +33,168 @@ ambient_light_color = Color(0.55, 0.6, 0.85, 1)
 ambient_light_sky_contribution = 0.6
 tonemap_mode = 2
 tonemap_exposure = 1.05
-fog_enabled = true
-fog_mode = 1
-fog_light_energy = 1.0
-fog_sun_scatter = 0.05
-fog_density = 1.0
-fog_sky_affect = 0.0
-fog_aerial_perspective = 1.0
-fog_depth_begin = 90.0
-fog_depth_end = 215.0
-fog_depth_curve = 1.0
 glow_enabled = true
 glow_intensity = 1.1
-glow_bloom = 0.35
 glow_strength = 1.2
+glow_bloom = 0.35
 glow_hdr_threshold = 0.9
+fog_enabled = true
+fog_mode = 1
+fog_sun_scatter = 0.05
+fog_density = 1.0
+fog_aerial_perspective = 1.0
+fog_sky_affect = 0.0
+fog_depth_begin = 90.0
+fog_depth_end = 215.0
 adjustment_enabled = true
-adjustment_saturation = 1.15
 adjustment_contrast = 1.05
+adjustment_saturation = 1.15
 
-[node name="TrainingCave" type="Node3D"]
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_Player"]
+radius = 0.2
+height = 1.0667
+
+[sub_resource type="StandardMaterial3D" id="Mat_Player"]
+albedo_color = Color(0.85, 0.35, 0.25, 1)
+roughness = 0.55
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape_Player"]
+radius = 0.2
+height = 1.0667
+
+[sub_resource type="BoxMesh" id="Mesh_SwordBlade"]
+size = Vector3(0.1, 0.025, 1)
+
+[sub_resource type="StandardMaterial3D" id="Mat_SwordBlade"]
+albedo_color = Color(0.85, 0.95, 1, 1)
+metallic = 0.9
+roughness = 0.05
+emission_enabled = true
+emission = Color(0.35, 0.85, 1, 1)
+emission_energy_multiplier = 1.8
+
+[sub_resource type="BoxMesh" id="Mesh_SwordCore"]
+size = Vector3(0.022, 0.04, 0.92)
+
+[sub_resource type="StandardMaterial3D" id="Mat_SwordCore"]
+emission_enabled = true
+emission = Color(0.7, 1, 1, 1)
+emission_energy_multiplier = 6.0
+
+[sub_resource type="BoxMesh" id="Mesh_SwordGuard"]
+size = Vector3(0.22, 0.04, 0.06)
+
+[sub_resource type="StandardMaterial3D" id="Mat_SwordHilt"]
+albedo_color = Color(0.1, 0.1, 0.13, 1)
+metallic = 0.85
+roughness = 0.25
+
+[sub_resource type="SphereMesh" id="Mesh_SwordPommel"]
+radius = 0.04
+height = 0.09
+radial_segments = 12
+rings = 6
+
+[sub_resource type="PrismMesh" id="Mesh_SwordTip"]
+size = Vector3(0.1, 0.18, 0.025)
+
+[sub_resource type="BoxShape3D" id="BoxShape_SwordHit"]
+size = Vector3(1.2, 0.7, 1.5)
+
+[sub_resource type="BoxMesh" id="Mesh_SniperBody"]
+size = Vector3(0.18, 0.22, 0.7)
+
+[sub_resource type="StandardMaterial3D" id="Mat_SniperBody"]
+albedo_color = Color(0.09, 0.11, 0.15, 1)
+metallic = 0.9
+roughness = 0.18
+
+[sub_resource type="BoxMesh" id="Mesh_SniperStock"]
+size = Vector3(0.16, 0.2, 0.3)
+
+[sub_resource type="BoxMesh" id="Mesh_SniperScope"]
+size = Vector3(0.14, 0.14, 0.3)
+
+[sub_resource type="StandardMaterial3D" id="Mat_SniperAccent"]
+albedo_color = Color(0.22, 0.25, 0.32, 1)
+metallic = 0.9
+roughness = 0.15
+
+[sub_resource type="BoxMesh" id="Mesh_SniperScopeLens"]
+size = Vector3(0.11, 0.11, 0.025)
+
+[sub_resource type="StandardMaterial3D" id="Mat_SniperLens"]
+albedo_color = Color(1, 0.18, 0.18, 1)
+emission_enabled = true
+emission = Color(1, 0.12, 0.12, 1)
+emission_energy_multiplier = 4.5
+
+[sub_resource type="BoxMesh" id="Mesh_SniperCore"]
+size = Vector3(0.04, 0.11, 0.42)
+
+[sub_resource type="StandardMaterial3D" id="Mat_SniperCore"]
+albedo_color = Color(0.2, 0.95, 1, 1)
+emission_enabled = true
+emission = Color(0.2, 0.95, 1, 1)
+emission_energy_multiplier = 1.4
+
+[sub_resource type="BoxMesh" id="Mesh_SniperBarrel"]
+size = Vector3(0.08, 0.08, 0.85)
+
+[sub_resource type="BoxMesh" id="Mesh_SniperProng"]
+size = Vector3(0.025, 0.025, 0.22)
+
+[sub_resource type="StandardMaterial3D" id="Mat_SniperProng"]
+albedo_color = Color(0.35, 0.95, 1, 1)
+emission_enabled = true
+emission = Color(0.35, 0.95, 1, 1)
+emission_energy_multiplier = 2.0
+
+[sub_resource type="BoxMesh" id="Mesh_SniperGrip"]
+size = Vector3(0.1, 0.32, 0.16)
+
+[sub_resource type="BoxMesh" id="Mesh_SniperVentFin"]
+size = Vector3(0.16, 0.01, 0.05)
+
+[sub_resource type="BoxMesh" id="Mesh_SniperRail"]
+size = Vector3(0.04, 0.02, 0.5)
+
+[sub_resource type="TorusMesh" id="Mesh_SniperRing"]
+inner_radius = 0.07
+outer_radius = 0.085
+rings = 6
+ring_segments = 24
+
+[sub_resource type="BoxMesh" id="Mesh_SniperBoltHandle"]
+size = Vector3(0.04, 0.04, 0.18)
+
+[sub_resource type="SphereMesh" id="Mesh_SniperBoltKnob"]
+radius = 0.035
+height = 0.07
+radial_segments = 12
+rings = 6
+
+[sub_resource type="BoxMesh" id="Mesh_SniperCell"]
+size = Vector3(0.14, 0.08, 0.18)
+
+[node name="TrainingCave" type="Node3D" unique_id=628804994]
 script = ExtResource("5_cave")
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=139433775]
 environment = SubResource("Env_1")
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
-transform = Transform3D(-0.534, -0.389, 0.751, 0, 0.888, 0.460, -0.846, 0.246, -0.474, 0, 8, 0)
-light_color = Color(1.0, 0.86, 0.88, 1)
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=285238385]
+transform = Transform3D(-0.534, -0.389, 0.751, 0, 0.888, 0.46, -0.846, 0.246, -0.474, 0, 8, 0)
+light_color = Color(1, 0.86, 0.88, 1)
 light_energy = 0.85
 shadow_enabled = true
 directional_shadow_mode = 1
 directional_shadow_max_distance = 230.0
 
-[node name="Terrain" type="Node3D" parent="."]
+[node name="Terrain" type="Node3D" parent="." unique_id=398306661]
 script = ExtResource("13_terrain")
 
-[node name="Player" type="CharacterBody3D" parent="."]
+[node name="Player" type="CharacterBody3D" parent="." unique_id=129388562]
 transform = Transform3D(2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 2, 0)
 script = ExtResource("1_player")
 sword_path = NodePath("Weapons/Sword")
@@ -313,299 +204,302 @@ portal_light_path = NodePath("Weapons/PortalLight")
 portal_dark_path = NodePath("Weapons/PortalDark")
 spear_path = NodePath("Weapons/Spear")
 
-[node name="Body" type="MeshInstance3D" parent="Player"]
+[node name="Body" type="MeshInstance3D" parent="Player" unique_id=331930478]
 mesh = SubResource("CapsuleMesh_Player")
 surface_material_override/0 = SubResource("Mat_Player")
 
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Player"]
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Player" unique_id=2053668011]
 shape = SubResource("CapsuleShape_Player")
 
-[node name="WeaponPivot" type="Node3D" parent="Player"]
+[node name="WeaponPivot" type="Node3D" parent="Player" unique_id=669936376]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.35, -0.1, -0.25)
 
-[node name="SwordRig" type="Node3D" parent="Player/WeaponPivot"]
+[node name="SwordRig" type="Node3D" parent="Player/WeaponPivot" unique_id=1796862559]
 
-[node name="Blade" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig"]
+[node name="Blade" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig" unique_id=697766635]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.6)
 mesh = SubResource("Mesh_SwordBlade")
 surface_material_override/0 = SubResource("Mat_SwordBlade")
 
-[node name="Core" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig"]
+[node name="Core" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig" unique_id=1694687887]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.6)
 mesh = SubResource("Mesh_SwordCore")
 surface_material_override/0 = SubResource("Mat_SwordCore")
 
-[node name="Guard" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig"]
+[node name="Guard" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig" unique_id=1481538349]
 mesh = SubResource("Mesh_SwordGuard")
 surface_material_override/0 = SubResource("Mat_SwordHilt")
 
-[node name="Pommel" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig"]
+[node name="Pommel" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig" unique_id=2077933733]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.08)
 mesh = SubResource("Mesh_SwordPommel")
 surface_material_override/0 = SubResource("Mat_SwordCore")
 
-[node name="Tip" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig"]
+[node name="Tip" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig" unique_id=1396460083]
 transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, -1.19)
 mesh = SubResource("Mesh_SwordTip")
 surface_material_override/0 = SubResource("Mat_SwordBlade")
 
-[node name="TipMarker" type="Marker3D" parent="Player/WeaponPivot/SwordRig"]
+[node name="TipMarker" type="Marker3D" parent="Player/WeaponPivot/SwordRig" unique_id=2071503311]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1.28)
 
-[node name="HitArea" type="Area3D" parent="Player/WeaponPivot/SwordRig"]
+[node name="HitArea" type="Area3D" parent="Player/WeaponPivot/SwordRig" unique_id=607941491]
 collision_layer = 0
 collision_mask = 4
 monitoring = false
 
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Player/WeaponPivot/SwordRig/HitArea"]
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Player/WeaponPivot/SwordRig/HitArea" unique_id=43252409]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.7)
 shape = SubResource("BoxShape_SwordHit")
 
-[node name="GunRig" type="Node3D" parent="Player/WeaponPivot"]
+[node name="Sketchfab_Scene" parent="Player/WeaponPivot/SwordRig" unique_id=1648588310 instance=ExtResource("5_lcwwa")]
+transform = Transform3D(0.017644627, -0.031277545, -0.06584362, 0.055493247, -0.038164116, 0.03299997, -0.047266968, -0.05648199, 0.014164016, -0.065015465, 0.06922126, 0.1685785)
+
+[node name="GunRig" type="Node3D" parent="Player/WeaponPivot" unique_id=518384670]
 visible = false
 
-[node name="Model" parent="Player/WeaponPivot/GunRig" instance=ExtResource("17_scifigun")]
+[node name="Model" parent="Player/WeaponPivot/GunRig" unique_id=1094555723 instance=ExtResource("17_scifigun")]
 transform = Transform3D(0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 0, 0, -0.25)
 
-[node name="Muzzle" type="Marker3D" parent="Player/WeaponPivot/GunRig"]
+[node name="Muzzle" type="Marker3D" parent="Player/WeaponPivot/GunRig" unique_id=227484970]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.72)
 
-[node name="SniperRig" type="Node3D" parent="Player/WeaponPivot"]
+[node name="SniperRig" type="Node3D" parent="Player/WeaponPivot" unique_id=1154903497]
 visible = false
 
-[node name="Body" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="Body" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=1680010925]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.2)
 mesh = SubResource("Mesh_SniperBody")
 surface_material_override/0 = SubResource("Mat_SniperBody")
 
-[node name="Stock" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="Stock" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=121999144]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.01, 0.18)
 mesh = SubResource("Mesh_SniperStock")
 surface_material_override/0 = SubResource("Mat_SniperBody")
 
-[node name="Scope" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="Scope" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=1305122374]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.16, -0.18)
 mesh = SubResource("Mesh_SniperScope")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="ScopeLens" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="ScopeLens" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=2129360662]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.16, -0.34)
 mesh = SubResource("Mesh_SniperScopeLens")
 surface_material_override/0 = SubResource("Mat_SniperLens")
 
-[node name="Core" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="Core" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=1507596289]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.1, 0, -0.2)
 mesh = SubResource("Mesh_SniperCore")
 surface_material_override/0 = SubResource("Mat_SniperCore")
 
-[node name="Barrel" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="Barrel" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=2044520287]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.02, -0.65)
 mesh = SubResource("Mesh_SniperBarrel")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="ProngL" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="ProngL" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=1359049981]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.07, -0.02, -1.05)
 mesh = SubResource("Mesh_SniperProng")
 surface_material_override/0 = SubResource("Mat_SniperProng")
 
-[node name="ProngR" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="ProngR" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=1020453998]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.07, -0.02, -1.05)
 mesh = SubResource("Mesh_SniperProng")
 surface_material_override/0 = SubResource("Mat_SniperProng")
 
-[node name="Grip" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="Grip" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=271611675]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.21, -0.05)
 mesh = SubResource("Mesh_SniperGrip")
 surface_material_override/0 = SubResource("Mat_SniperBody")
 
-[node name="VentFin1" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="VentFin1" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=1207625243]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.115, -0.42)
 mesh = SubResource("Mesh_SniperVentFin")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="VentFin2" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="VentFin2" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=1982587141]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.115, -0.52)
 mesh = SubResource("Mesh_SniperVentFin")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="VentFin3" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="VentFin3" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=1205165228]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.115, -0.62)
 mesh = SubResource("Mesh_SniperVentFin")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="TopRail" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="TopRail" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=1611177324]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.04, -0.25)
 mesh = SubResource("Mesh_SniperRail")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="MuzzleRing" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
-transform = Transform3D(1, 0, 0, 0, 0, -1, 0, 1, 0, 0, -0.02, -1.0)
+[node name="MuzzleRing" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=448474206]
+transform = Transform3D(1, 0, 0, 0, 0, -1, 0, 1, 0, 0, -0.02, -1)
 mesh = SubResource("Mesh_SniperRing")
 surface_material_override/0 = SubResource("Mat_SniperProng")
 
-[node name="BoltHandle" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="BoltHandle" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=555671633]
 transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 0.13, 0.04, -0.05)
 mesh = SubResource("Mesh_SniperBoltHandle")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="BoltKnob" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="BoltKnob" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=1832844608]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.215, 0.04, -0.05)
 mesh = SubResource("Mesh_SniperBoltKnob")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="Cell" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="Cell" type="MeshInstance3D" parent="Player/WeaponPivot/SniperRig" unique_id=1651031628]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.13, 0.18)
 mesh = SubResource("Mesh_SniperCell")
 surface_material_override/0 = SubResource("Mat_SniperCore")
 
-[node name="Muzzle" type="Marker3D" parent="Player/WeaponPivot/SniperRig"]
+[node name="Muzzle" type="Marker3D" parent="Player/WeaponPivot/SniperRig" unique_id=222647643]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.02, -1.18)
 
-[node name="CameraPitchPivot" type="Node3D" parent="Player"]
+[node name="CameraPitchPivot" type="Node3D" parent="Player" unique_id=105658010]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.7, 0)
 
-[node name="Camera3D" type="Camera3D" parent="Player/CameraPitchPivot"]
+[node name="Camera3D" type="Camera3D" parent="Player/CameraPitchPivot" unique_id=1368463222]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5, 0.4, 4.5)
 far = 220.0
 script = ExtResource("2_camfollow")
 
-[node name="FPVPivot" type="Node3D" parent="Player/CameraPitchPivot/Camera3D"]
+[node name="FPVPivot" type="Node3D" parent="Player/CameraPitchPivot/Camera3D" unique_id=544431149]
 transform = Transform3D(0.65, 0, 0, 0, 0.65, 0, 0, 0, 0.65, 0.3, -0.22, -0.4)
 visible = false
 
-[node name="SwordRig" type="Node3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot"]
+[node name="SwordRig" type="Node3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot" unique_id=1150193774]
 transform = Transform3D(1.538, 0, 0, 0, 1.538, 0, 0, 0, 1.538, 0, 0, 0)
 
-[node name="Blade" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig"]
+[node name="Blade" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig" unique_id=1831223697]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.6)
 mesh = SubResource("Mesh_SwordBlade")
 surface_material_override/0 = SubResource("Mat_SwordBlade")
 
-[node name="Core" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig"]
+[node name="Core" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig" unique_id=1932198008]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.6)
 mesh = SubResource("Mesh_SwordCore")
 surface_material_override/0 = SubResource("Mat_SwordCore")
 
-[node name="Guard" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig"]
+[node name="Guard" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig" unique_id=1285737959]
 mesh = SubResource("Mesh_SwordGuard")
 surface_material_override/0 = SubResource("Mat_SwordHilt")
 
-[node name="Pommel" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig"]
+[node name="Pommel" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig" unique_id=883114193]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.08)
 mesh = SubResource("Mesh_SwordPommel")
 surface_material_override/0 = SubResource("Mat_SwordCore")
 
-[node name="Tip" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig"]
+[node name="Tip" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig" unique_id=396712931]
 transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, -1.19)
 mesh = SubResource("Mesh_SwordTip")
 surface_material_override/0 = SubResource("Mat_SwordBlade")
 
-[node name="TipMarker" type="Marker3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig"]
+[node name="TipMarker" type="Marker3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig" unique_id=2084708023]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1.28)
 
-[node name="GunRig" type="Node3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot"]
+[node name="GunRig" type="Node3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot" unique_id=1454983611]
 visible = false
 
-[node name="Model" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/GunRig" instance=ExtResource("17_scifigun")]
+[node name="Model" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/GunRig" unique_id=526327638 instance=ExtResource("17_scifigun")]
 transform = Transform3D(0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 0, 0, -0.25)
 
-[node name="Muzzle" type="Marker3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/GunRig"]
+[node name="Muzzle" type="Marker3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/GunRig" unique_id=1338222832]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.72)
 
-[node name="SniperRig" type="Node3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot"]
+[node name="SniperRig" type="Node3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot" unique_id=1083592181]
 visible = false
 
-[node name="Body" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="Body" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=2066547753]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.2)
 mesh = SubResource("Mesh_SniperBody")
 surface_material_override/0 = SubResource("Mat_SniperBody")
 
-[node name="Stock" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="Stock" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=1977801204]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.01, 0.18)
 mesh = SubResource("Mesh_SniperStock")
 surface_material_override/0 = SubResource("Mat_SniperBody")
 
-[node name="Scope" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="Scope" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=1187012650]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.16, -0.18)
 mesh = SubResource("Mesh_SniperScope")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="ScopeLens" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="ScopeLens" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=1609138820]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.16, -0.34)
 mesh = SubResource("Mesh_SniperScopeLens")
 surface_material_override/0 = SubResource("Mat_SniperLens")
 
-[node name="Core" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="Core" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=410679347]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.1, 0, -0.2)
 mesh = SubResource("Mesh_SniperCore")
 surface_material_override/0 = SubResource("Mat_SniperCore")
 
-[node name="Barrel" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="Barrel" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=776664393]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.02, -0.65)
 mesh = SubResource("Mesh_SniperBarrel")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="ProngL" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="ProngL" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=117641370]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.07, -0.02, -1.05)
 mesh = SubResource("Mesh_SniperProng")
 surface_material_override/0 = SubResource("Mat_SniperProng")
 
-[node name="ProngR" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="ProngR" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=1246072926]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.07, -0.02, -1.05)
 mesh = SubResource("Mesh_SniperProng")
 surface_material_override/0 = SubResource("Mat_SniperProng")
 
-[node name="Grip" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="Grip" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=1516230775]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.21, -0.05)
 mesh = SubResource("Mesh_SniperGrip")
 surface_material_override/0 = SubResource("Mat_SniperBody")
 
-[node name="VentFin1" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="VentFin1" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=1150527055]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.115, -0.42)
 mesh = SubResource("Mesh_SniperVentFin")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="VentFin2" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="VentFin2" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=605330926]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.115, -0.52)
 mesh = SubResource("Mesh_SniperVentFin")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="VentFin3" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="VentFin3" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=3181019]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.115, -0.62)
 mesh = SubResource("Mesh_SniperVentFin")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="TopRail" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="TopRail" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=1382853268]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.04, -0.25)
 mesh = SubResource("Mesh_SniperRail")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="MuzzleRing" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
-transform = Transform3D(1, 0, 0, 0, 0, -1, 0, 1, 0, 0, -0.02, -1.0)
+[node name="MuzzleRing" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=793715357]
+transform = Transform3D(1, 0, 0, 0, 0, -1, 0, 1, 0, 0, -0.02, -1)
 mesh = SubResource("Mesh_SniperRing")
 surface_material_override/0 = SubResource("Mat_SniperProng")
 
-[node name="BoltHandle" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="BoltHandle" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=1831374917]
 transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 0.13, 0.04, -0.05)
 mesh = SubResource("Mesh_SniperBoltHandle")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="BoltKnob" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="BoltKnob" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=699844018]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.215, 0.04, -0.05)
 mesh = SubResource("Mesh_SniperBoltKnob")
 surface_material_override/0 = SubResource("Mat_SniperAccent")
 
-[node name="Cell" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="Cell" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=801735114]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.13, 0.18)
 mesh = SubResource("Mesh_SniperCell")
 surface_material_override/0 = SubResource("Mat_SniperCore")
 
-[node name="Muzzle" type="Marker3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig"]
+[node name="Muzzle" type="Marker3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SniperRig" unique_id=852085149]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.02, -1.18)
 
-[node name="Weapons" type="Node" parent="Player"]
+[node name="Weapons" type="Node" parent="Player" unique_id=774654591]
 
-[node name="Sword" type="Node" parent="Player/Weapons"]
+[node name="Sword" type="Node" parent="Player/Weapons" unique_id=1479827364]
 script = ExtResource("7_sword")
 rig_tpv_path = NodePath("../../WeaponPivot/SwordRig")
 rig_fpv_path = NodePath("../../CameraPitchPivot/Camera3D/FPVPivot/SwordRig")
@@ -613,14 +507,14 @@ hit_area_path = NodePath("../../WeaponPivot/SwordRig/HitArea")
 tip_marker_tpv_path = NodePath("../../WeaponPivot/SwordRig/TipMarker")
 tip_marker_fpv_path = NodePath("../../CameraPitchPivot/Camera3D/FPVPivot/SwordRig/TipMarker")
 
-[node name="Gun" type="Node" parent="Player/Weapons"]
+[node name="Gun" type="Node" parent="Player/Weapons" unique_id=938117061]
 script = ExtResource("8_gun")
 rig_tpv_path = NodePath("../../WeaponPivot/GunRig")
 rig_fpv_path = NodePath("../../CameraPitchPivot/Camera3D/FPVPivot/GunRig")
 muzzle_tpv_path = NodePath("../../WeaponPivot/GunRig/Muzzle")
 muzzle_fpv_path = NodePath("../../CameraPitchPivot/Camera3D/FPVPivot/GunRig/Muzzle")
 
-[node name="Sniper" type="Node" parent="Player/Weapons"]
+[node name="Sniper" type="Node" parent="Player/Weapons" unique_id=1401405815]
 script = ExtResource("9_sniper")
 rig_tpv_path = NodePath("../../WeaponPivot/SniperRig")
 rig_fpv_path = NodePath("../../CameraPitchPivot/Camera3D/FPVPivot/SniperRig")
@@ -632,67 +526,68 @@ prong_r_tpv_path = NodePath("../../WeaponPivot/SniperRig/ProngR")
 prong_l_fpv_path = NodePath("../../CameraPitchPivot/Camera3D/FPVPivot/SniperRig/ProngL")
 prong_r_fpv_path = NodePath("../../CameraPitchPivot/Camera3D/FPVPivot/SniperRig/ProngR")
 
-[node name="PortalLight" type="Node" parent="Player/Weapons"]
+[node name="PortalLight" type="Node" parent="Player/Weapons" unique_id=1863921398]
 script = ExtResource("10_pl")
 
-[node name="PortalDark" type="Node" parent="Player/Weapons"]
+[node name="PortalDark" type="Node" parent="Player/Weapons" unique_id=659597129]
 script = ExtResource("11_pd")
 
-[node name="Spear" type="Node" parent="Player/Weapons"]
+[node name="Spear" type="Node" parent="Player/Weapons" unique_id=2066928071]
 script = ExtResource("12_spear")
 
 [node name="RemotePlayers" type="Node3D" parent="."]
 
-[node name="Targets" type="Node3D" parent="."]
+[node name="Targets" type="Node3D" parent="." unique_id=1383728252]
 
-[node name="Target1" parent="Targets" instance=ExtResource("6_target_scn")]
+[node name="Target1" parent="Targets" unique_id=10165731 instance=ExtResource("6_target_scn")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6, 0.8, -3)
 
-[node name="Target2" parent="Targets" instance=ExtResource("6_target_scn")]
+[node name="Target2" parent="Targets" unique_id=1533253281 instance=ExtResource("6_target_scn")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -5, 0.8, -6)
 move_radius = 4.5
 move_speed = 0.35
-move_axis = Vector3(1, 0, 0)
 
-[node name="Target3" parent="Targets" instance=ExtResource("6_target_scn")]
+[node name="Target3" parent="Targets" unique_id=1396258667 instance=ExtResource("6_target_scn")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 0.8, 4)
 
-[node name="Target4" parent="Targets" instance=ExtResource("6_target_scn")]
+[node name="Target4" parent="Targets" unique_id=1451151951 instance=ExtResource("6_target_scn")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7, 0.8, 3)
 move_radius = 3.0
 move_speed = 0.55
 move_axis = Vector3(0, 0, 1)
 
-[node name="Target5" parent="Targets" instance=ExtResource("6_target_scn")]
+[node name="Target5" parent="Targets" unique_id=1202713718 instance=ExtResource("6_target_scn")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, -9)
 move_radius = 6.0
 move_speed = 0.25
 move_axis = Vector3(1, 0, 0.4)
 
-[node name="Target6" parent="Targets" instance=ExtResource("6_target_scn")]
+[node name="Target6" parent="Targets" unique_id=1518724340 instance=ExtResource("6_target_scn")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 0.8, 8)
 
-[node name="Target7" parent="Targets" instance=ExtResource("6_target_scn")]
+[node name="Target7" parent="Targets" unique_id=1043028267 instance=ExtResource("6_target_scn")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 22, 0.8, -14)
 move_radius = 8.0
 move_speed = 0.18
 move_axis = Vector3(1, 0, -0.5)
 
-[node name="Target8" parent="Targets" instance=ExtResource("6_target_scn")]
+[node name="Target8" parent="Targets" unique_id=511654518 instance=ExtResource("6_target_scn")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -18, 0.8, 16)
 move_radius = 7.0
 move_speed = 0.22
 move_axis = Vector3(0.6, 0, 1)
 
-[node name="Target9" parent="Targets" instance=ExtResource("6_target_scn")]
+[node name="Target9" parent="Targets" unique_id=1413437273 instance=ExtResource("6_target_scn")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 30, 0.8, 18)
 
-[node name="Target10" parent="Targets" instance=ExtResource("6_target_scn")]
+[node name="Target10" parent="Targets" unique_id=417636266 instance=ExtResource("6_target_scn")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -28, 0.8, -22)
 
-[node name="UI" type="CanvasLayer" parent="."]
+[node name="UI" type="CanvasLayer" parent="." unique_id=1911760874]
 
-[node name="HotbarRoot" type="Control" parent="UI"]
+[node name="HotbarRoot" type="Control" parent="UI" unique_id=1390267357]
+layout_mode = 3
+anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 mouse_filter = 2
@@ -708,10 +603,11 @@ charge_overlay_path = NodePath("ChargeOverlay")
 guide_panel_path = NodePath("GuidePanel")
 guide_label_path = NodePath("GuidePanel/GuideLabel")
 
-[node name="HBoxContainer" type="HBoxContainer" parent="UI/HotbarRoot"]
+[node name="HBoxContainer" type="HBoxContainer" parent="UI/HotbarRoot" unique_id=1870437168]
+layout_mode = 0
 anchor_left = 0.5
-anchor_right = 0.5
 anchor_top = 1.0
+anchor_right = 0.5
 anchor_bottom = 1.0
 offset_left = -304.0
 offset_top = -90.0
@@ -719,57 +615,64 @@ offset_right = 304.0
 offset_bottom = -20.0
 theme_override_constants/separation = 16
 
-[node name="SwordSlot" type="PanelContainer" parent="UI/HotbarRoot/HBoxContainer"]
+[node name="SwordSlot" type="PanelContainer" parent="UI/HotbarRoot/HBoxContainer" unique_id=1230106681]
 custom_minimum_size = Vector2(140, 60)
+layout_mode = 2
 
-[node name="Label" type="Label" parent="UI/HotbarRoot/HBoxContainer/SwordSlot"]
+[node name="Label" type="Label" parent="UI/HotbarRoot/HBoxContainer/SwordSlot" unique_id=1487902387]
+layout_mode = 2
 text = "  [1] Katana  "
 horizontal_alignment = 1
 vertical_alignment = 1
 
-[node name="GunSlot" type="PanelContainer" parent="UI/HotbarRoot/HBoxContainer"]
+[node name="GunSlot" type="PanelContainer" parent="UI/HotbarRoot/HBoxContainer" unique_id=2081701911]
 custom_minimum_size = Vector2(140, 60)
+layout_mode = 2
 
-[node name="Label" type="Label" parent="UI/HotbarRoot/HBoxContainer/GunSlot"]
+[node name="Label" type="Label" parent="UI/HotbarRoot/HBoxContainer/GunSlot" unique_id=1117102687]
+layout_mode = 2
 text = "  [2] Plasma  "
 horizontal_alignment = 1
 vertical_alignment = 1
 
-[node name="SniperSlot" type="PanelContainer" parent="UI/HotbarRoot/HBoxContainer"]
+[node name="SniperSlot" type="PanelContainer" parent="UI/HotbarRoot/HBoxContainer" unique_id=1350716121]
 custom_minimum_size = Vector2(140, 60)
+layout_mode = 2
 
-[node name="Label" type="Label" parent="UI/HotbarRoot/HBoxContainer/SniperSlot"]
+[node name="Label" type="Label" parent="UI/HotbarRoot/HBoxContainer/SniperSlot" unique_id=219284794]
+layout_mode = 2
 text = "  [3] Railgun  "
 horizontal_alignment = 1
 vertical_alignment = 1
 
-[node name="PortalLightSlot" type="PanelContainer" parent="UI/HotbarRoot/HBoxContainer"]
+[node name="PortalLightSlot" type="PanelContainer" parent="UI/HotbarRoot/HBoxContainer" unique_id=483879589]
 custom_minimum_size = Vector2(140, 60)
+layout_mode = 2
 
-[node name="Label" type="Label" parent="UI/HotbarRoot/HBoxContainer/PortalLightSlot"]
+[node name="Label" type="Label" parent="UI/HotbarRoot/HBoxContainer/PortalLightSlot" unique_id=674643953]
+layout_mode = 2
 text = "  [4] Light Portal  "
 horizontal_alignment = 1
 vertical_alignment = 1
 
-[node name="Crosshair" type="Label" parent="UI/HotbarRoot"]
+[node name="Crosshair" type="Label" parent="UI/HotbarRoot" unique_id=1730081366]
+modulate = Color(1, 1, 1, 0.85)
+layout_mode = 0
 anchor_left = 0.5
-anchor_right = 0.5
 anchor_top = 0.5
+anchor_right = 0.5
 anchor_bottom = 0.5
 offset_left = -10.0
 offset_top = -16.0
 offset_right = 10.0
 offset_bottom = 12.0
-mouse_filter = 2
 theme_override_font_sizes/font_size = 28
 text = "+"
 horizontal_alignment = 1
 vertical_alignment = 1
-modulate = Color(1, 1, 1, 0.85)
 
-[node name="HintLabel" type="Label" parent="UI/HotbarRoot"]
-anchor_left = 0.0
-anchor_top = 0.0
+[node name="HintLabel" type="Label" parent="UI/HotbarRoot" unique_id=44541744]
+layout_mode = 0
 offset_left = 16.0
 offset_top = 12.0
 offset_right = 460.0
@@ -782,20 +685,22 @@ Space - jump   |   C - dash
 V - toggle 1st / 3rd person
 G - weapon guide   |   ESC - free mouse"
 
-[node name="GuidePanel" type="ColorRect" parent="UI/HotbarRoot"]
+[node name="GuidePanel" type="ColorRect" parent="UI/HotbarRoot" unique_id=904631599]
+visible = false
+layout_mode = 0
 anchor_left = 0.5
-anchor_right = 0.5
 anchor_top = 0.5
+anchor_right = 0.5
 anchor_bottom = 0.5
 offset_left = -320.0
 offset_top = -240.0
 offset_right = 320.0
 offset_bottom = 240.0
-color = Color(0, 0, 0, 0.78)
 mouse_filter = 2
-visible = false
+color = Color(0, 0, 0, 0.78)
 
-[node name="GuideLabel" type="Label" parent="UI/HotbarRoot/GuidePanel"]
+[node name="GuideLabel" type="Label" parent="UI/HotbarRoot/GuidePanel" unique_id=1980989822]
+layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
 offset_left = 24.0
@@ -803,58 +708,58 @@ offset_top = 20.0
 offset_right = -24.0
 offset_bottom = -20.0
 theme_override_font_sizes/font_size = 16
-text = ""
-horizontal_alignment = 0
-vertical_alignment = 0
 autowrap_mode = 2
 
-[node name="ChargeBarBG" type="ColorRect" parent="UI/HotbarRoot"]
+[node name="ChargeBarBG" type="ColorRect" parent="UI/HotbarRoot" unique_id=1129091115]
+visible = false
+layout_mode = 0
 anchor_left = 0.5
-anchor_right = 0.5
 anchor_top = 0.5
+anchor_right = 0.5
 anchor_bottom = 0.5
 offset_left = -120.0
 offset_top = 36.0
 offset_right = 120.0
 offset_bottom = 46.0
-color = Color(0, 0, 0, 0.55)
 mouse_filter = 2
-visible = false
+color = Color(0, 0, 0, 0.55)
 
-[node name="ChargeBarFill" type="ColorRect" parent="UI/HotbarRoot/ChargeBarBG"]
-anchor_right = 0.0
+[node name="ChargeBarFill" type="ColorRect" parent="UI/HotbarRoot/ChargeBarBG" unique_id=1060655673]
+layout_mode = 0
 anchor_bottom = 1.0
 offset_left = 2.0
 offset_top = 2.0
 offset_right = 2.0
 offset_bottom = -2.0
-color = Color(0.3, 0.95, 1, 1)
 mouse_filter = 2
+color = Color(0.3, 0.95, 1, 1)
 
-[node name="ChargeOverlay" type="ColorRect" parent="UI/HotbarRoot"]
+[node name="ChargeOverlay" type="ColorRect" parent="UI/HotbarRoot" unique_id=1540027820]
+layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
-color = Color(0.15, 0.6, 0.9, 0)
 mouse_filter = 2
+color = Color(0.15, 0.6, 0.9, 0)
 
-[node name="ResetButton" type="Button" parent="UI/HotbarRoot"]
+[node name="ResetButton" type="Button" parent="UI/HotbarRoot" unique_id=430718004]
+layout_mode = 0
 anchor_left = 1.0
 anchor_right = 1.0
 offset_left = -132.0
 offset_top = 12.0
 offset_right = -16.0
 offset_bottom = 48.0
-text = "Reset (R)"
 focus_mode = 0
+text = "Reset (R)"
 
-[node name="Lowe" parent="." instance=ExtResource("14_lowe")]
+[node name="Lowe" parent="." unique_id=1265163729 instance=ExtResource("14_lowe")]
 transform = Transform3D(6, 0, 0, 0, 6, 0, 0, 0, 6, -3, 0, -8)
 
-[node name="AutoCollider" type="Node" parent="Lowe"]
+[node name="AutoCollider" type="Node" parent="Lowe" unique_id=416465995]
 script = ExtResource("16_autocol")
 
-[node name="StoneLion" parent="." instance=ExtResource("15_stone_lion")]
+[node name="StoneLion" parent="." unique_id=1182355593 instance=ExtResource("15_stone_lion")]
 transform = Transform3D(0.1, 0, 0, 0, 0.1, 0, 0, 0, 0.1, 3, 0, -8)
 
-[node name="AutoCollider" type="Node" parent="StoneLion"]
+[node name="AutoCollider" type="Node" parent="StoneLion" unique_id=1064375182]
 script = ExtResource("16_autocol")
