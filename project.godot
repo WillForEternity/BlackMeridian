@@ -12,7 +12,7 @@ config_version=5
 
 config/name="GameTest"
 run/main_scene="res://scenes/training_cave/training_cave.tscn"
-config/features=PackedStringArray("4.6", "Forward Plus")
+config/features=PackedStringArray("4.6", "Mobile")
 
 [autoload]
 
@@ -114,3 +114,8 @@ weapon_guide={
 3d_physics/layer_3="enemies"
 3d_physics/layer_4="projectiles"
 3d_physics/layer_5="destructible_projectiles"
+
+[rendering]
+
+renderer/rendering_method="mobile"
+renderer/rendering_method.mobile="mobile"

@@ -84,9 +84,15 @@ const GRASS_ELEV_FADE: float = 14.0
 # Camera-locked patch: dense carpet at the player's feet.
 # Two layers: SHORT is thick and static (no wind shader); TALL is sparse and
 # animated. Together they read as "a lot of grass with occasional sway."
+# Debug: skip ALL grass building/streaming. Useful to baseline non-grass cost.
+const GRASS_DISABLED: bool = false
 const PATCH_SIZE: float = 220.0            # full side length in meters
 const PATCH_SHORT_GRID: int = 833          # ~15/m² (2/3 of prior density)
-const PATCH_TALL_GRID: int = 277          # +1/3 density vs prior
+# TALL fades to zero by 106 m, so allocating blades past ~110 m radius is
+# wasted vertex work. Use a smaller patch size + matching grid to drop ~15k
+# unnecessary instances while keeping the same per-m² density.
+const PATCH_TALL_SIZE: float = 212.0
+const PATCH_TALL_GRID: int = 267           # 267²/212² ≈ 1.59 blades/m² (same as before)
 # Inner "core" — a small ultra-dense patch right at the player's feet. Always
 # inside FADE_INNER, so the shader's taper never culls it.
 const PATCH_CORE_SIZE: float = 80.0
@@ -98,7 +104,7 @@ const PATCH_CORE_FADE_OUTER: float = 40.0
 # carpet (CORE's ~105 blades/m² shows gaps when looking straight down). Static
 # mesh, no wind shader; fades within its own patch boundary.
 const PATCH_SUPER_CORE_SIZE: float = 14.0
-const PATCH_SUPER_CORE_GRID: int = 350       # 350² blades / 14² m² ≈ 625 blades/m²
+const PATCH_SUPER_CORE_GRID: int = 200       # 200²/14² ≈ 204 blades/m² (was 625 — far over real-world density)
 const PATCH_SUPER_CORE_FADE_INNER: float = 5.0
 const PATCH_SUPER_CORE_FADE_OUTER: float = 7.0
 const PATCH_SNAP: float = 1.0              # snap follow to whole meters (no shimmer)
@@ -428,7 +434,8 @@ func _ready() -> void:
 	_attach_collision(_heights)
 	_build_height_texture()
 	_init_foliage_resources()
-	_build_grass_patch()
+	if not GRASS_DISABLED:
+		_build_grass_patch()
 	_init_tree_placement_noise()
 	_init_stone_resources()
 	_init_flower_resources()
@@ -774,15 +781,21 @@ func _process(_dt: float) -> void:
 		_grass_material_short.set_shader_parameter("tile_cull_center", center)
 		_grass_material_tall.set_shader_parameter("tile_cull_center", center)
 		# AABB tracks the player so Godot's frustum culling stays accurate even
-		# though the MMI itself stays at world origin.
+		# though the MMI itself stays at world origin. Each MMI is now ONE
+		# quadrant of a layer; its AABB covers only its quarter so Godot can
+		# frustum-cull back-facing quadrants when the camera turns.
 		for mmi in _grass_patch_mmis:
 			var m := mmi as MultiMeshInstance3D
 			var psize: float = float(m.get_meta("patch_size"))
 			var phalf: float = psize * 0.5
+			var qidx: int = int(m.get_meta("patch_quadrant"))
+			# Quadrant offsets from player center (in world XZ).
+			var dx_min: float = 0.0 if (qidx & 1) == 0 else -phalf
+			var dz_min: float = 0.0 if (qidx & 2) == 0 else -phalf
 			m.global_position = Vector3.ZERO
 			m.custom_aabb = AABB(
-				Vector3(pos.x - phalf, -200.0, pos.z - phalf),
-				Vector3(psize, 400.0, psize)
+				Vector3(pos.x + dx_min, -200.0, pos.z + dz_min),
+				Vector3(phalf, 400.0, phalf)
 			)
 		_update_occluder_mask(center)
 	# Tile streaming: only re-survey when the camera has moved enough, and
@@ -792,7 +805,8 @@ func _process(_dt: float) -> void:
 		_stream_chunks(pos)
 	if _last_stream_pos.x == INF or pos.distance_to(_last_stream_pos) >= GRASS_REBUILD_THRESHOLD:
 		_last_stream_pos = pos
-		_stream_grass(pos)
+		if not GRASS_DISABLED:
+			_stream_grass(pos)
 	if _last_tree_stream_pos.x == INF or pos.distance_to(_last_tree_stream_pos) >= TREE_REBUILD_THRESHOLD:
 		_last_tree_stream_pos = pos
 		_stream_trees(pos)
@@ -1180,76 +1194,79 @@ func _build_height_texture() -> void:
 	_centerline_z_tex = ImageTexture.create_from_image(cz_img)
 
 func _build_grass_patch() -> void:
-	# Two stacked grids in LOCAL space. The patch node follows the camera; the
-	# vertex shader lifts each blade onto the terrain via _height_tex and
-	# collapses blades to zero height past the patch fade radius. Short layer
-	# is thick and static; tall layer is sparse and animated.
-	_grass_patch_mmis.append(
-		_make_patch_layer(PATCH_SIZE, PATCH_SHORT_GRID, _grass_mesh, _grass_material_patch_short, 0)
-	)
-	_grass_patch_mmis.append(
-		_make_patch_layer(PATCH_SIZE, PATCH_TALL_GRID, _grass_mesh_tall, _grass_material_patch_tall, 1)
-	)
-	# Core: small + extremely dense. Sits fully inside FADE_INNER so the
-	# shader's radial taper never culls any of these blades.
-	_grass_patch_mmis.append(
-		_make_patch_layer(PATCH_CORE_SIZE, PATCH_CORE_GRID, _grass_mesh, _grass_material_patch_core, 2)
-	)
-	# Super-core: tiny 14m patch (~625 blades/m²) layered on top of CORE so
-	# top-down views show a solid carpet instead of CORE's visible gaps.
-	_grass_patch_mmis.append(
-		_make_patch_layer(PATCH_SUPER_CORE_SIZE, PATCH_SUPER_CORE_GRID, _grass_mesh, _grass_material_patch_super_core, 3)
-	)
-	for mmi in _grass_patch_mmis:
-		add_child(mmi)
+	# Each layer is now split into 4 quadrant MMIs (see _make_patch_layer
+	# comments). Each layer's call returns up to 4 MMIs; we flatten them
+	# into _grass_patch_mmis and add each as a child.
+	var layers: Array = [
+		_make_patch_layer(PATCH_SIZE, PATCH_SHORT_GRID, _grass_mesh, _grass_material_patch_short, 0),
+		_make_patch_layer(PATCH_TALL_SIZE, PATCH_TALL_GRID, _grass_mesh_tall, _grass_material_patch_tall, 1),
+		# CORE: dense close-up patch, fades 22→40 m.
+		_make_patch_layer(PATCH_CORE_SIZE, PATCH_CORE_GRID, _grass_mesh, _grass_material_patch_core, 2),
+		# SUPER_CORE: tiny 14 m patch on top of CORE so top-down looks solid.
+		_make_patch_layer(PATCH_SUPER_CORE_SIZE, PATCH_SUPER_CORE_GRID, _grass_mesh, _grass_material_patch_super_core, 3),
+	]
+	for layer in layers:
+		for mmi in (layer as Array):
+			_grass_patch_mmis.append(mmi)
+			add_child(mmi)
 
 func _make_patch_layer(
 	patch_size: float, grid: int, mesh: ArrayMesh, mat: ShaderMaterial, _salt: int
-) -> MultiMeshInstance3D:
-	# World-anchored grass. Bake identity-only instances on a regular grid; the
-	# vertex shader snaps each blade's root to the nearest world-space cell and
-	# derives jitter/yaw/scale/lean/dryness/hue from a hash of that cell. The
-	# result: when the patch slides with the camera, instance N migrates to a
-	# different world cell — but because the cell's content is deterministic,
-	# the *visual* is rock-solid. No shimmer, no crawl.
+) -> Array:
+	# World-anchored grass split into 4 QUADRANT MultiMeshInstance3Ds. Each
+	# quadrant has its own AABB covering only its quarter of the patch, so
+	# Godot's frustum culler can drop the back-facing quadrant when the
+	# camera looks one way (~25% vertex-shader savings).
+	#
+	# Each instance still bakes its local cell index into the transform
+	# translation (same scheme as before); the shader doesn't need to know
+	# the patch was split — it sees the union of all quadrant instances.
 	var step: float = patch_size / float(grid)
 	var half: float = patch_size * 0.5
 	var radius_sq: float = half * half
-	var transforms: Array[Transform3D] = []
+	var q_transforms: Array = [[], [], [], []]   # [NE +x+z, NW -x+z, SE +x-z, SW -x-z]
 	for iz in grid:
 		for ix in grid:
 			var lx: float = -half + (float(ix) + 0.5) * step
 			var lz: float = -half + (float(iz) + 0.5) * step
 			if lx * lx + lz * lz > radius_sq:
 				continue
-			# Bake the INTEGER local cell index directly into the transform
-			# translation so wo.xz reads as the cell index with NO rounding
-			# anywhere (CPU or GPU). Avoids the half-integer round() ambiguity
-			# that the multimesh storage was hitting at certain cell positions.
 			var local_cell_x: int = ix - grid / 2
 			var local_cell_z: int = iz - grid / 2
-			transforms.append(Transform3D(Basis.IDENTITY, Vector3(float(local_cell_x), 0.0, float(local_cell_z))))
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.mesh = mesh
-	mm.instance_count = transforms.size()
-	for i in transforms.size():
-		mm.set_instance_transform(i, transforms[i])
-	var mmi := MultiMeshInstance3D.new()
-	mmi.multimesh = mm
-	mmi.material_override = mat
-	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mmi.custom_aabb = AABB(
-		Vector3(-half, -200.0, -half),
-		Vector3(patch_size, 400.0, patch_size)
-	)
-	mmi.set_meta("cell_step", step)
-	mmi.set_meta("patch_size", patch_size)
+			var qidx: int = 0
+			if local_cell_x < 0:
+				qidx |= 1
+			if local_cell_z < 0:
+				qidx |= 2
+			(q_transforms[qidx] as Array).append(
+				Transform3D(Basis.IDENTITY, Vector3(float(local_cell_x), 0.0, float(local_cell_z))))
+	# Shared shader uniforms set once on the material (all 4 MMIs use it).
 	mat.set_shader_parameter("cell_step", step)
 	mat.set_shader_parameter("patch_size_i", int(round(patch_size)))
 	mat.set_shader_parameter("grid_i", grid)
 	mat.set_shader_parameter("patch_cell_offset", Vector2.ZERO)
-	return mmi
+	var out: Array = []
+	for qidx in 4:
+		var transforms: Array = q_transforms[qidx]
+		if transforms.is_empty():
+			continue
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = mesh
+		mm.instance_count = transforms.size()
+		for i in transforms.size():
+			mm.set_instance_transform(i, transforms[i])
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		mmi.material_override = mat
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mmi.set_meta("cell_step", step)
+		mmi.set_meta("patch_size", patch_size)
+		mmi.set_meta("patch_quadrant", qidx)
+		# AABB placeholder — repositioned per frame in the patch-follow loop.
+		mmi.custom_aabb = AABB(Vector3(-half, -200.0, -half), Vector3(half, 400.0, half))
+		out.append(mmi)
+	return out
 
 func _init_tree_placement_noise() -> void:
 	_tree_placement_noise = FastNoiseLite.new()
@@ -2907,20 +2924,31 @@ varying float v_slope_y; // smoothed terrain normal Y at the blade — feeds dry
 varying float v_taper;   // 0 inside fade_inner (close), 1 past fade_outer (no-grass land)
 
 void vertex() {
-	// World-anchored blade. Each instance owns a fixed LOCAL cell index
-	// (baked CPU-side via INSTANCE_CUSTOM.xy). The world cell is just
-	// local_cell + patch_cell_offset — pure integer-on-float addition with
-	// no float-precision floor(). When the patch slides, every instance's
-	// world cell shifts by the same exact offset; no collisions, no gaps.
 	vec3 wo = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-	// Cell index baked directly as integer into the transform translation.
-	// cell-to-world conversion done as integer mul + single float div:
-	// cell_origin = cell * patch_size_i / grid_i.
 	ivec2 cell_i = ivec2(int(wo.x), int(wo.z)) + ivec2(patch_cell_offset);
 	vec2 cell = vec2(cell_i);
 	vec2 cell_origin = vec2(cell_i * patch_size_i) / float(grid_i);
 	vec2 jitter = (h22(cell + 13.7) - 0.5) * cell_step * 0.85;
 	vec2 anchored = cell_origin + jitter;
+
+	// CHEAP density check FIRST. Survival hash + radial fade are all that's
+	// needed to decide if this blade is doomed; clump modulation can only
+	// DECREASE density, never raise it. (Godot doesn't allow `return` from
+	// vertex(), so we use an if-block to wrap the expensive path.)
+	float surv = h12(cell + 17.0);
+	float r = length(anchored - patch_center);
+	float fade_in_q = smoothstep(fade_in_inner, fade_in_outer, r);
+	float density_no_clump = fade_in_q * (1.0 - smoothstep(fade_inner, fade_outer, r));
+	if (density_no_clump < surv) {
+		// Doomed. Collapse below terrain and skip all texture/fBm/wind work.
+		VERTEX = vec3(anchored.x, -1000.0, anchored.y);
+		v_blade_x_world = vec3(1.0, 0.0, 0.0);
+		v_blade_n_world = vec3(0.0, 0.0, 1.0);
+		v_clump = 0.0;
+		v_slope_y = 1.0;
+		v_taper = 0.0;
+		COLOR = vec4(0.0);
+	} else {
 
 	float yaw    = h12(cell + 1.3) * 6.2831853;
 	float sw     = 0.85 + h12(cell + 7.9) * 0.30;
@@ -2928,10 +2956,7 @@ void vertex() {
 	float dry    = h12(cell + 5.5);
 	float hue    = h12(cell + 9.2);
 	vec2  lean_c = (h22(cell + 11.0) * 2.0 - 1.0) * 0.7;
-	float surv   = h12(cell + 17.0);
 
-	// World-space basis for the blade ribbon. Mesh-local +X = across the blade,
-	// +Z = blade normal (out of the ribbon plane). After yaw rotation around Y:
 	float cy = cos(yaw);
 	float sy_yaw = sin(yaw);
 	v_blade_x_world = vec3(cy, 0.0, sy_yaw);
@@ -2947,22 +2972,11 @@ void vertex() {
 	float dz = (h_u - h_d) / (2.0 * terrain_cell);
 	float ny = 1.0 / sqrt(dx*dx + dz*dz + 1.0);
 	v_slope_y = ny;
-	// Large-scale fBm sampled at the blade's WORLD position. ~30m feature size
-	// so the meadow reads as patches of lush/dry rather than a uniform tint.
 	v_clump = fbm2(anchored * 0.033);
 
-	float r = length(anchored - patch_center);
-	// Color region blend — independent of density taper. CORE sets the zone
-	// to ~∞ so v_taper stays 0 (region 1). SHORT/TALL uses 22→30 so the
-	// color transitions across the CORE-fading ring.
 	v_taper = smoothstep(color_zone_inner, color_zone_outer, r);
-	// Density: fade-in × fade-out. SHORT/TALL fades in over the same range
-	// CORE fades out so total density (CORE + SHORT/TALL) stays nearly flat.
-	float fade_in = smoothstep(fade_in_inner, fade_in_outer, r);
-	float density = fade_in * (1.0 - smoothstep(fade_inner, fade_outer, r));
-	// Clump density: at clump_strength=0 (CORE) no modulation; at 1.0 the
-	// dry patches drop to ~0.3 density, lush patches stay 1.0. Driven by the
-	// same fBm that tints color so dry areas read sparser AND yellower.
+	float fade_in = fade_in_q;
+	float density = density_no_clump;
 	float clump_dense = mix(1.0, mix(0.3, 1.0, smoothstep(0.35, 0.65, v_clump)), clump_strength);
 	density *= clump_dense;
 	float keep = step(surv, density);
@@ -3005,6 +3019,7 @@ void vertex() {
 	COLOR.r = bend;
 	COLOR.g = dry;
 	COLOR.b = hue;
+	}  // end of else branch (density_no_clump >= surv)
 }
 
 void fragment() {
