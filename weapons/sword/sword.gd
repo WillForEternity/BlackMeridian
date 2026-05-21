@@ -126,6 +126,8 @@ func _damage() -> int:
 func equip() -> void:
 	_idle_t = 0.0
 	_kill_sheathe_tween()
+	if _scabbard != null:
+		_scabbard.visible = true
 	# Preserve the sheathed/drawn state across weapon swaps. On initial spawn
 	# `_sheathed` defaults to true so the player sees just the saya on the hip.
 	if _sheathed:
@@ -150,6 +152,8 @@ func unequip() -> void:
 	_trail_sampling = false
 	rig_tpv.visible = false
 	rig_fpv.visible = false
+	if _scabbard != null:
+		_scabbard.visible = false
 
 func on_attack_pressed() -> void:
 	if attack_cd > 0.0 or _super_active:
@@ -707,9 +711,10 @@ func _rebuild_trail() -> void:
 
 # ── Katana visuals & scabbard ────────────────────────────────────────────────
 
-# Replace the scene's stubby box-sword children with a katana silhouette:
-# longer slim blade, gold tsuba, wrapped tsuka, kashira. HitArea and TipMarker
-# are left in place so combat reach is unchanged.
+# Replace the scene's stubby box-sword children with the amaryllis GLB.
+# HitArea and TipMarker (Marker3D) are left in place so combat reach is unchanged.
+const AMARYLLIS_MODEL_PATH := "res://assets/models/weapons/amaryllis.glb"
+
 func _install_katana_visuals(rig: Node3D, fpv: bool) -> void:
 	if rig == null:
 		return
@@ -717,27 +722,65 @@ func _install_katana_visuals(rig: Node3D, fpv: bool) -> void:
 		var c := rig.get_node_or_null(n)
 		if c is MeshInstance3D:
 			(c as MeshInstance3D).visible = false
-	var sf: float = 0.95 if fpv else 1.0
-	# Blade (main slim spine).
-	_add_box(rig, Vector3(0.045 * sf, 0.022 * sf, 1.55 * sf), Vector3(0, 0, -0.78 * sf), Vector3.ZERO, _katana_blade_mat())
-	# Glowing edge highlight along one side of the blade.
-	_add_box(rig, Vector3(0.012 * sf, 0.024 * sf, 1.50 * sf), Vector3(-0.020 * sf, 0.0, -0.78 * sf), Vector3.ZERO, _katana_edge_mat())
-	# Tip taper — a narrower, shorter box at the very point so the blade
-	# reads as pointed rather than a chopped bar.
-	_add_box(rig, Vector3(0.026 * sf, 0.014 * sf, 0.16 * sf), Vector3(0, 0, -(1.55 + 0.08) * sf), Vector3.ZERO, _katana_blade_mat())
-	# Tsuba (round gold guard) — cylinder oriented with its axis along Z.
-	_add_cyl(rig, 0.085 * sf, 0.024 * sf, Vector3(0, 0, 0.005), Vector3(deg_to_rad(90.0), 0.0, 0.0), _katana_gold_mat())
-	# Tsuka (handle core) — slim dark cylinder behind the tsuba.
-	_add_cyl(rig, 0.032 * sf, 0.28 * sf, Vector3(0, 0, 0.16 * sf), Vector3(deg_to_rad(90.0), 0.0, 0.0), _katana_hilt_mat())
-	# Tsuka-ito wrap — six diamond-oriented boxes ringing the handle to
-	# suggest the crisscross cord wrap of a katana handle.
-	for i in 6:
-		var z := 0.04 + float(i) * 0.045 * sf
-		_add_box(rig, Vector3(0.072 * sf, 0.072 * sf, 0.022 * sf), Vector3(0, 0, z), Vector3(0, 0, deg_to_rad(45.0)), _katana_wrap_mat())
-	# Kashira (pommel cap).
-	_add_box(rig, Vector3(0.060 * sf, 0.060 * sf, 0.042 * sf), Vector3(0, 0, 0.32 * sf), Vector3.ZERO, _katana_gold_mat())
-	# Mekugi pin (small accent on the wrap).
-	_add_box(rig, Vector3(0.078 * sf, 0.018 * sf, 0.018 * sf), Vector3(0, 0, 0.14 * sf), Vector3.ZERO, _katana_gold_mat())
+	var packed: PackedScene = load(AMARYLLIS_MODEL_PATH) as PackedScene
+	var model: Node3D = (packed.instantiate() as Node3D) if packed != null else null
+	if model == null:
+		push_warning("[Sword] amaryllis model failed to load at %s" % AMARYLLIS_MODEL_PATH)
+		return
+	var holder := Node3D.new()
+	holder.name = "ModelHolder"
+	holder.add_child(model)
+	rig.add_child(holder)
+	# Measure the raw model, then scale-to-fit a canonical blade length so the
+	# katana combat constants (~1.6m tip reach) still apply visually.
+	var raw: AABB = _world_aabb_sword(model)
+	var longest: float = maxf(raw.size.x, maxf(raw.size.y, raw.size.z))
+	var target_len: float = (3.9 if fpv else 4.1)
+	var fit_scale: float = (target_len / longest) if longest > 0.0001 else 1.0
+	model.scale = Vector3(fit_scale, fit_scale, fit_scale)
+	var center: Vector3 = (raw.position + raw.size * 0.5) * fit_scale
+	model.position = -center
+	# Orient longest axis along -Z (forward).
+	var axis_idx := 0
+	if raw.size.y >= raw.size.x and raw.size.y >= raw.size.z:
+		axis_idx = 1
+	elif raw.size.z >= raw.size.x and raw.size.z >= raw.size.y:
+		axis_idx = 2
+	match axis_idx:
+		0:
+			holder.rotation = Vector3(0, deg_to_rad(90.0), 0)
+		1:
+			holder.rotation = Vector3(deg_to_rad(90.0), 0, 0)
+		2:
+			holder.rotation = Vector3(0, deg_to_rad(180.0), 0)
+	# Match the previous katana's grip point: handle back at +0.166·L behind
+	# the rig origin, tip at -0.834·L in front, so midpoint sits at -0.334·L.
+	holder.position = Vector3(0.4, 0, -target_len * 0.334)
+	if fpv:
+		for n in _gather_geom_sword(holder):
+			if n is GeometryInstance3D:
+				(n as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+func _world_aabb_sword(n: Node) -> AABB:
+	var box := AABB()
+	var any := false
+	for c in _gather_geom_sword(n):
+		var local: AABB = c.get_aabb()
+		var world: AABB = c.global_transform * local
+		if not any:
+			box = world
+			any = true
+		else:
+			box = box.merge(world)
+	return box
+
+func _gather_geom_sword(n: Node) -> Array:
+	var out: Array = []
+	if n is VisualInstance3D:
+		out.append(n)
+	for c in n.get_children():
+		out.append_array(_gather_geom_sword(c))
+	return out
 
 func _add_box(parent: Node3D, size: Vector3, pos: Vector3, rot: Vector3, mat: StandardMaterial3D) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()

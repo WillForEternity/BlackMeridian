@@ -115,7 +115,11 @@ const PATCH_FADE_OUTER: float = 106.0
 # Match the rock onset in the ground shader so patch grass discards on stone.
 const PATCH_MIN_NORMAL_Y: float = 0.78
 
-const TREE_DIR: String = "res://assets/quaternius/trees/"
+## Polyhaven photoreal scans, recursively scanned (one subfolder per asset).
+## The big "real" Polyhaven trees ship as raw scan geometry (pine_tree_01 is
+## a 948 MB .bin because every needle is individual polygons) so we only use
+## their saplings / smaller trees / shrubs — still scanned PBR, but loadable.
+const TREE_DIR: String = "res://assets/polyhaven/trees/"
 const TREE_FALLBACK_PATHS := [
 	"res://assets/kenney/nature-kit/Models/GLB format/tree_oak.glb",
 	"res://assets/kenney/nature-kit/Models/GLB format/tree_tall.glb",
@@ -128,8 +132,8 @@ const TREE_MIN_ELEV: float = -1.0
 const TREE_MAX_ELEV: float = 48.0
 const TREE_PLACEMENT_FREQ: float = 0.0055
 const TREE_PLACEMENT_THRESHOLD: float = 0.56
-const TREE_SCALE_BASE: float = 1.6        # Quaternius/Kenney are ~3m tall stock; bump for "mature oak"
-const TREE_SCALE_JITTER: float = 0.6
+const TREE_SCALE_BASE: float = 2.5        # Polyhaven ships at real meter scale; saplings ~1-2m natural → scale up for canopy presence
+const TREE_SCALE_JITTER: float = 1.2
 # Trees stream identically to grass tiles: deterministic per-(tx,tz) seed so
 # the world looks the same every visit; only nearby tiles are instantiated.
 const TREE_TILE_SIZE: float = 50.0
@@ -207,7 +211,8 @@ const WATER_TILE_SIZE: float = 60.0
 const WATER_STREAM_RADIUS: float = 220.0
 const WATER_REBUILD_THRESHOLD: float = 15.0
 const WATER_TILE_SPAWN_BUDGET: int = 1
-const WATER_SEG_PER_METER: float = 0.5    # segments along x per meter (2m apart)
+const WATER_SEG_PER_METER: float = 2.0    # segments along x per meter (0.5m apart) — needed for visible vertex waves
+const WATER_CROSS_SEGS: int = 4            # subdivisions across the ribbon width (5 verts per row)
 
 # --- Stones ---
 # Two systems, both deterministic per-tile and streamed around the camera
@@ -220,28 +225,24 @@ const WATER_SEG_PER_METER: float = 0.5    # segments along x per meter (2m apart
 ## Land stones are kept to a small fixed roster so each tile only emits a few
 ## MultiMeshInstance3Ds. More variants = more draw calls + AABB cull tests per
 ## frame, with no visual win at this density.
+## Polyhaven photoreal rocks (PBR scanned). Real-world meter scale, so scale
+## constants below are ~1× instead of 5×.
 const STONE_LARGE_PATHS := [
-	"res://assets/kenney/nature-kit/Models/GLB format/stone_largeA.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/stone_largeD.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/stone_largeE.glb",
+	"res://assets/polyhaven/rocks/boulder_01/boulder_01_2k.gltf",
+	"res://assets/polyhaven/rocks/namaqualand_boulder_02/namaqualand_boulder_02_2k.gltf",
+	"res://assets/polyhaven/rocks/namaqualand_boulder_03/namaqualand_boulder_03_2k.gltf",
 ]
 const STONE_MEDIUM_PATHS := [
-	"res://assets/kenney/nature-kit/Models/GLB format/stone_tallA.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/stone_tallD.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/stone_tallI.glb",
+	"res://assets/polyhaven/rocks/rock_07/rock_07_2k.gltf",
+	"res://assets/polyhaven/rocks/rock_09/rock_09_2k.gltf",
 ]
-## Brook stones use ONLY Kenney's `stone_small*` family — smooth, rounded gray
-## river-stones, all in the same low-poly toon style as the trees/terrain. We
-## intentionally exclude `rock_*` (jagged/earthy) and `*Flat*` / `*Top*` (path
-## slabs / caps) so the bank reads as a single coherent family of cobbles.
+## Brook stones — small mossy river rocks, scanned PBR.
 const BROOK_MEDIUM_PATHS := [
-	"res://assets/kenney/nature-kit/Models/GLB format/stone_smallA.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/stone_smallC.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/stone_smallE.glb",
+	"res://assets/polyhaven/rocks/rock_07/rock_07_2k.gltf",
+	"res://assets/polyhaven/rocks/rock_09/rock_09_2k.gltf",
 ]
 const BROOK_SMALL_PATHS := [
-	"res://assets/kenney/nature-kit/Models/GLB format/stone_smallG.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/stone_smallI.glb",
+	"res://assets/polyhaven/rocks/rock_moss_set_01/rock_moss_set_01_2k.gltf",
 ]
 
 ## Larger tiles → fewer MMIs total across the streaming disk (~4× fewer tiles
@@ -261,10 +262,10 @@ const STONE_MIN_NORMAL_Y: float = 0.55
 const STONE_MIN_ELEV: float = -2.0
 const STONE_MAX_ELEV: float = 130.0
 const STONE_BANK_EXCLUSION: float = 12.0
-const STONE_LARGE_SCALE_BASE: float = 5.5
-const STONE_LARGE_SCALE_JITTER: float = 3.0
-const STONE_MEDIUM_SCALE_BASE: float = 3.2
-const STONE_MEDIUM_SCALE_JITTER: float = 1.6
+const STONE_LARGE_SCALE_BASE: float = 1.2     # Polyhaven boulders are ~1-3 m natural — light upscale for "feature boulder"
+const STONE_LARGE_SCALE_JITTER: float = 0.7
+const STONE_MEDIUM_SCALE_BASE: float = 0.7
+const STONE_MEDIUM_SCALE_JITTER: float = 0.4
 const STONE_SINK: float = 0.45
 
 # Brook stones march along the centerline, anchored to the sandy edge so they
@@ -281,8 +282,8 @@ const BROOK_BANK_OFFSET: float = 3.0        # center of the bank band (water edg
 const BROOK_LATERAL_JITTER: float = 1.4
 const BROOK_SKIP_CHANCE: float = 0.10
 const BROOK_STACK_CHANCE: float = 0.25      # stacks are real bodies too, kept rare
-const BROOK_MED_SCALE: float = 2.4
-const BROOK_SMALL_SCALE: float = 1.6
+const BROOK_MED_SCALE: float = 0.5
+const BROOK_SMALL_SCALE: float = 0.35
 const BROOK_MED_CHANCE: float = 0.7
 const BROOK_SINK: float = 0.20
 
@@ -291,17 +292,14 @@ const BROOK_SINK: float = 0.20
 # "patch mode" (mono species / mono color family / mixed) so the map reads as a
 # mosaic of wildflower carpets, not one uniform sprinkle.
 const FLOWER_PATHS := [
-	"res://assets/kenney/nature-kit/Models/GLB format/flower_redA.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/flower_redB.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/flower_redC.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/flower_yellowA.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/flower_yellowB.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/flower_yellowC.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/flower_purpleA.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/flower_purpleB.glb",
-	"res://assets/kenney/nature-kit/Models/GLB format/flower_purpleC.glb",
+	"res://assets/polyhaven/flowers/dandelion_01/dandelion_01_2k.gltf",
+	"res://assets/polyhaven/flowers/flower_empodium/flower_empodium_2k.gltf",
+	"res://assets/polyhaven/flowers/flower_gazania/flower_gazania_2k.gltf",
+	"res://assets/polyhaven/flowers/flower_heliophila/flower_heliophila_2k.gltf",
+	"res://assets/polyhaven/flowers/flower_ursinia/flower_ursinia_2k.gltf",
+	"res://assets/polyhaven/flowers/flower_stinkkruid/flower_stinkkruid_2k.gltf",
 ]
-const FLOWER_FAMILY_SIZE: int = 3            # A/B/C per color
+const FLOWER_FAMILY_SIZE: int = 2            # Polyhaven flowers: 6 species grouped into 3 pairs for "mono-family" patch mode
 const FLOWER_TILE_SIZE: float = 40.0
 const FLOWER_STREAM_RADIUS: float = 220.0
 const FLOWER_REBUILD_THRESHOLD: float = 12.0
@@ -315,8 +313,8 @@ const FLOWER_BANK_EXCLUSION: float = 8.5
 const FLOWER_MIN_NORMAL_Y: float = 0.85
 const FLOWER_MIN_ELEV: float = -1.0
 const FLOWER_MAX_ELEV: float = 50.0
-const FLOWER_SCALE_BASE: float = 1.55
-const FLOWER_SCALE_JITTER: float = 0.8
+const FLOWER_SCALE_BASE: float = 1.0     # Polyhaven flowers are real-size (~15-30 cm) — natural scale reads well in-game
+const FLOWER_SCALE_JITTER: float = 0.4
 const FLOWER_SINK: float = 0.05
 # Per-tile density variation: each tile rolls a density multiplier in this range,
 # applied as an offset to FLOWER_PATCH_THRESHOLD. Negative = denser carpet,
@@ -334,6 +332,12 @@ var _grass_material_patch_short: ShaderMaterial
 var _grass_material_patch_tall: ShaderMaterial
 var _grass_material_patch_core: ShaderMaterial
 var _grass_material_patch_super_core: ShaderMaterial
+var _last_sun_dir_world: Vector3 = Vector3.INF
+var _last_patch_center: Vector2 = Vector2(INF, INF)
+var _last_offset_short: Vector2 = Vector2(INF, INF)
+var _last_offset_tall: Vector2 = Vector2(INF, INF)
+var _last_offset_core: Vector2 = Vector2(INF, INF)
+var _last_offset_super: Vector2 = Vector2(INF, INF)
 var _sun_light: DirectionalLight3D
 var _height_tex: ImageTexture
 var _centerline_z_tex: ImageTexture
@@ -727,18 +731,20 @@ func _process(_dt: float) -> void:
 			_coord_label.text = "x %.1f  y %.1f  z %.1f  (r %.1f from origin)" % [p.x, p.y, p.z, Vector2(p.x, p.z).length()]
 	if _sun_light:
 		var sun_dir: Vector3 = _sun_light.global_basis.z.normalized()
-		if _grass_material_short:
-			_grass_material_short.set_shader_parameter("sun_dir_world", sun_dir)
-		if _grass_material_tall:
-			_grass_material_tall.set_shader_parameter("sun_dir_world", sun_dir)
-		if _grass_material_patch_short:
-			_grass_material_patch_short.set_shader_parameter("sun_dir_world", sun_dir)
-		if _grass_material_patch_tall:
-			_grass_material_patch_tall.set_shader_parameter("sun_dir_world", sun_dir)
-		if _grass_material_patch_core:
-			_grass_material_patch_core.set_shader_parameter("sun_dir_world", sun_dir)
-		if _grass_material_patch_super_core:
-			_grass_material_patch_super_core.set_shader_parameter("sun_dir_world", sun_dir)
+		if _last_sun_dir_world == Vector3.INF or _last_sun_dir_world.distance_squared_to(sun_dir) > 0.000025:
+			_last_sun_dir_world = sun_dir
+			if _grass_material_short:
+				_grass_material_short.set_shader_parameter("sun_dir_world", sun_dir)
+			if _grass_material_tall:
+				_grass_material_tall.set_shader_parameter("sun_dir_world", sun_dir)
+			if _grass_material_patch_short:
+				_grass_material_patch_short.set_shader_parameter("sun_dir_world", sun_dir)
+			if _grass_material_patch_tall:
+				_grass_material_patch_tall.set_shader_parameter("sun_dir_world", sun_dir)
+			if _grass_material_patch_core:
+				_grass_material_patch_core.set_shader_parameter("sun_dir_world", sun_dir)
+			if _grass_material_patch_super_core:
+				_grass_material_patch_super_core.set_shader_parameter("sun_dir_world", sun_dir)
 	var cam: Camera3D = get_viewport().get_camera_3d()
 	if cam == null:
 		return
@@ -761,25 +767,30 @@ func _process(_dt: float) -> void:
 		var step_tall: float = PATCH_SIZE / float(PATCH_TALL_GRID)
 		var step_core: float = PATCH_CORE_SIZE / float(PATCH_CORE_GRID)
 		var step_super: float = PATCH_SUPER_CORE_SIZE / float(PATCH_SUPER_CORE_GRID)
-		_grass_material_patch_short.set_shader_parameter("patch_center", center)
-		_grass_material_patch_tall.set_shader_parameter("patch_center", center)
-		_grass_material_patch_core.set_shader_parameter("patch_center", center)
-		_grass_material_patch_super_core.set_shader_parameter("patch_center", center)
-		_grass_material_patch_short.set_shader_parameter(
-			"patch_cell_offset", Vector2(round(pos.x / step_short), round(pos.z / step_short))
-		)
-		_grass_material_patch_tall.set_shader_parameter(
-			"patch_cell_offset", Vector2(round(pos.x / step_tall), round(pos.z / step_tall))
-		)
-		_grass_material_patch_core.set_shader_parameter(
-			"patch_cell_offset", Vector2(round(pos.x / step_core), round(pos.z / step_core))
-		)
-		_grass_material_patch_super_core.set_shader_parameter(
-			"patch_cell_offset", Vector2(round(pos.x / step_super), round(pos.z / step_super))
-		)
-		# Tile shaders cull blades inside the close-patch radius around the player.
-		_grass_material_short.set_shader_parameter("tile_cull_center", center)
-		_grass_material_tall.set_shader_parameter("tile_cull_center", center)
+		if _last_patch_center.distance_squared_to(center) > 0.0001:
+			_last_patch_center = center
+			_grass_material_patch_short.set_shader_parameter("patch_center", center)
+			_grass_material_patch_tall.set_shader_parameter("patch_center", center)
+			_grass_material_patch_core.set_shader_parameter("patch_center", center)
+			_grass_material_patch_super_core.set_shader_parameter("patch_center", center)
+			_grass_material_short.set_shader_parameter("tile_cull_center", center)
+			_grass_material_tall.set_shader_parameter("tile_cull_center", center)
+		var off_short := Vector2(round(pos.x / step_short), round(pos.z / step_short))
+		var off_tall := Vector2(round(pos.x / step_tall), round(pos.z / step_tall))
+		var off_core := Vector2(round(pos.x / step_core), round(pos.z / step_core))
+		var off_super := Vector2(round(pos.x / step_super), round(pos.z / step_super))
+		if off_short != _last_offset_short:
+			_last_offset_short = off_short
+			_grass_material_patch_short.set_shader_parameter("patch_cell_offset", off_short)
+		if off_tall != _last_offset_tall:
+			_last_offset_tall = off_tall
+			_grass_material_patch_tall.set_shader_parameter("patch_cell_offset", off_tall)
+		if off_core != _last_offset_core:
+			_last_offset_core = off_core
+			_grass_material_patch_core.set_shader_parameter("patch_cell_offset", off_core)
+		if off_super != _last_offset_super:
+			_last_offset_super = off_super
+			_grass_material_patch_super_core.set_shader_parameter("patch_cell_offset", off_super)
 		# AABB tracks the player so Godot's frustum culling stays accurate even
 		# though the MMI itself stays at world origin. Each MMI is now ONE
 		# quadrant of a layer; its AABB covers only its quarter so Godot can
@@ -1468,11 +1479,11 @@ func _trace_stream_path(heights: PackedFloat32Array) -> void:
 			var h_r: float = _centerline_heights[gx + 1]
 			prev_h = h_c
 			_centerline_heights[gx] = 0.25 * h_l + 0.5 * h_c + 0.25 * h_r
-	# Gentle monotonic bias: each column can't rise more than 0.02m above the
-	# previous one. Lets the profile mostly follow terrain while preventing
-	# upstream-to-downstream "uphill" segments.
+	# Strict monotonic decrease: water surface can never rise from one column
+	# to the next. Anything else lets visible "uphill" segments slip in even
+	# though each step is small.
 	for gx in range(_stream_gx_start + 1, _stream_gx_end + 1):
-		_centerline_heights[gx] = minf(_centerline_heights[gx], _centerline_heights[gx - 1] + 0.02)
+		_centerline_heights[gx] = minf(_centerline_heights[gx], _centerline_heights[gx - 1])
 
 	# z bounds for the tile-streamer's strip reject.
 	_stream_z_min = INF
@@ -1485,14 +1496,37 @@ func _trace_stream_path(heights: PackedFloat32Array) -> void:
 	_stream_x_end = float(_stream_gx_end) * CELL - half
 
 	# Per-column along-path slope (drives the running-water shader's flow factor).
+	# Use a wide window (not central diff) so slope varies gradually along the
+	# river. Central diff produces high-frequency noise that the shader maps to
+	# scroll speed AND foam density, which is visible as sharp bands across the
+	# water surface where one row gets a much higher flow than its neighbour.
+	const SLOPE_WINDOW_CELLS: int = 12
+	var raw_slope := PackedFloat32Array()
+	raw_slope.resize(GRID)
 	for gx in range(_stream_gx_start, _stream_gx_end + 1):
-		var gx_prev: int = maxi(gx - 1, _stream_gx_start)
-		var gx_next: int = mini(gx + 1, _stream_gx_end)
+		var gx_prev: int = maxi(gx - SLOPE_WINDOW_CELLS, _stream_gx_start)
+		var gx_next: int = mini(gx + SLOPE_WINDOW_CELLS, _stream_gx_end)
 		var dh: float = _centerline_heights[gx_prev] - _centerline_heights[gx_next]
 		var dx_v: float = float(gx_next - gx_prev) * CELL
 		var dz_v: float = _centerline_z_samples[gx_next] - _centerline_z_samples[gx_prev]
 		var ds: float = maxf(0.001, sqrt(dx_v * dx_v + dz_v * dz_v))
-		_centerline_slope[gx] = maxf(0.0, dh / ds)
+		raw_slope[gx] = maxf(0.0, dh / ds)
+	# Two passes of a 5-tap box filter — flatten any remaining bumps so adjacent
+	# vertex rows can't differ by more than a hair in flow magnitude.
+	for _pass in 2:
+		var tmp := PackedFloat32Array()
+		tmp.resize(GRID)
+		for gx in range(_stream_gx_start, _stream_gx_end + 1):
+			var g0: int = maxi(gx - 2, _stream_gx_start)
+			var g1: int = maxi(gx - 1, _stream_gx_start)
+			var g2: int = gx
+			var g3: int = mini(gx + 1, _stream_gx_end)
+			var g4: int = mini(gx + 2, _stream_gx_end)
+			tmp[gx] = (raw_slope[g0] + raw_slope[g1] + raw_slope[g2] + raw_slope[g3] + raw_slope[g4]) * 0.2
+		for gx in range(_stream_gx_start, _stream_gx_end + 1):
+			raw_slope[gx] = tmp[gx]
+	for gx in range(_stream_gx_start, _stream_gx_end + 1):
+		_centerline_slope[gx] = raw_slope[gx]
 
 	# Endpoint lake: priority-flood from the cell directly under the path's
 	# downstream end. Whatever depression the terrain has there becomes the
@@ -1779,8 +1813,12 @@ func _build_water_tile(tx: int, tz: int) -> MeshInstance3D:
 
 	var verts := PackedVector3Array()
 	var norms := PackedVector3Array()
+	# UV is the river-local frame in meters: UV.x = signed perpendicular distance
+	# from the centerline, UV.y = world wx (along-river). Both are continuous
+	# scalars (no per-vertex direction), so the shader can scroll along V and
+	# the pattern follows the river through every meander with zero seams.
 	var uvs := PackedVector2Array()
-	var colors := PackedColorArray()
+	var colors := PackedColorArray()           # COLOR.r = flow magnitude only
 	var indices := PackedInt32Array()
 	# Sand ribbon (two strips, one per bank) — built alongside water using the
 	# same centerline frame so it lines up perfectly with the water edge.
@@ -1788,6 +1826,7 @@ func _build_water_tile(tx: int, tz: int) -> MeshInstance3D:
 	var sand_norms := PackedVector3Array()
 	var sand_uvs := PackedVector2Array()
 	var sand_indices := PackedInt32Array()
+	var cross_n: int = WATER_CROSS_SEGS + 1
 	for i in seg_count + 1:
 		var t: float = float(i) / float(seg_count)
 		var wx: float = lerpf(x0, x1, t)
@@ -1799,31 +1838,27 @@ func _build_water_tile(tx: int, tz: int) -> MeshInstance3D:
 		var tang: Vector2 = Vector2(2.0 * eps, dcz).normalized()
 		var perp := Vector2(-tang.y, tang.x)
 		var pos := Vector2(wx, cz)
-		var left := pos + perp * STREAM_HALF_WIDTH
-		var right := pos - perp * STREAM_HALF_WIDTH
 		var water_y: float = _centerline_water_y(wx)
-		verts.append(Vector3(left.x, water_y, left.y))
-		verts.append(Vector3(right.x, water_y, right.y))
-		norms.append(Vector3.UP)
-		norms.append(Vector3.UP)
-		# UV.V uses world wx so neighboring tiles' wave scroll lines up at seams.
-		var v: float = wx * 0.5
-		uvs.append(Vector2(0.0, v))
-		uvs.append(Vector2(1.0, v))
-		# Bake per-vertex flow speed from the local downhill slope. The water
-		# shader reads COLOR.r and uses it to scale wave scroll + turbulence,
-		# so steep stretches read as rapids and flat reaches as glassy.
+		# Flow magnitude only — no CPU lower clamp; the shader's flow_factor_bias
+		# is the single place that decides baseline motion (lake sets it low).
 		var slope: float = _centerline_slope_at(wx)
-		var flow: float = clampf(slope / STREAM_SLOPE_REF, 0.85, 2.4)
-		# Bake the local downstream tangent (XZ unit vector) into COLOR.gb so
-		# the shader can scroll waves/foam along the meandering centerline
-		# instead of a fixed world axis. Encode from [-1,1] → [0,1].
-		var c := Color(flow, tang.x * 0.5 + 0.5, tang.y * 0.5 + 0.5, 1.0)
-		colors.append(c)
-		colors.append(c)
+		var flow: float = clampf(slope / STREAM_SLOPE_REF, 0.0, 2.4)
+		var c := Color(flow, 0.0, 0.0, 1.0)
+		# Emit cross_n verts across the width so vertex waves have somewhere to
+		# live (a 2-vert strip can't displace independently across the channel).
+		for k in cross_n:
+			var u: float = float(k) / float(WATER_CROSS_SEGS)       # 0..1 across
+			var off: float = lerpf(STREAM_HALF_WIDTH, -STREAM_HALF_WIDTH, u)
+			var p := pos + perp * off
+			verts.append(Vector3(p.x, water_y, p.y))
+			norms.append(Vector3.UP)
+			uvs.append(Vector2(off, wx))                             # river-local (across_m, along_m)
+			colors.append(c)
 
 		# Sand strip vertices: outer_left, inner_left, inner_right, outer_right.
 		# Y follows actual terrain so the bank hugs the ground.
+		var left := pos + perp * STREAM_HALF_WIDTH
+		var right := pos - perp * STREAM_HALF_WIDTH
 		var outer_left := pos + perp * SAND_HALF_WIDTH
 		var outer_right := pos - perp * SAND_HALF_WIDTH
 		var inner_left_y: float = _sample_height(_heights, left.x, left.y) + SAND_Y_OFFSET
@@ -1842,11 +1877,14 @@ func _build_water_tile(tx: int, tz: int) -> MeshInstance3D:
 		sand_uvs.append(Vector2(1.0, sv))
 		sand_uvs.append(Vector2(0.0, sv))
 	for i in seg_count:
-		var bl: int = i * 2
-		var br: int = bl + 1
-		var tl: int = bl + 2
-		var tr: int = bl + 3
-		indices.append_array([bl, tl, br, br, tl, tr])
+		var row0: int = i * cross_n
+		var row1: int = row0 + cross_n
+		for k in WATER_CROSS_SEGS:
+			var bl: int = row0 + k
+			var br: int = bl + 1
+			var tl: int = row1 + k
+			var tr: int = tl + 1
+			indices.append_array([bl, tl, br, br, tl, tr])
 		# Left bank strip: outer_left(0), inner_left(1) → next row outer_left(4), inner_left(5)
 		var s0: int = i * 4
 		sand_indices.append_array([
@@ -1866,6 +1904,10 @@ func _build_water_tile(tx: int, tz: int) -> MeshInstance3D:
 	mi.mesh = am
 	mi.material_override = _water_material
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# Vertex shader displaces verts by ~wave_amplitude*2 in Y; AABB is computed
+	# from undisplaced positions, so add margin to avoid culling close-up tiles
+	# whose displaced surface still intrudes on the frustum.
+	mi.extra_cull_margin = 1.0
 
 	var sand_arr := []
 	sand_arr.resize(Mesh.ARRAY_MAX)
@@ -1932,13 +1974,18 @@ func _build_water_material() -> ShaderMaterial:
 	var sh := Shader.new()
 	sh.code = """
 shader_type spatial;
-render_mode blend_mix, depth_draw_opaque, specular_schlick_ggx, cull_disabled;
+// Transparent surface: no depth write (default for blend_mix without an
+// explicit depth_draw_* token) — keeps shore foam from punching a hole in
+// what's behind. cull_disabled is necessary because the camera can dip near
+// water level and small vertex waves cause adjacent triangles to flip
+// backfacing; without it the surface breaks into patches that vanish as you
+// approach. The fragment-cost penalty is acceptable for the river.
+render_mode blend_mix, specular_schlick_ggx, cull_disabled;
 
 uniform vec3  absorption_color : source_color = vec3(0.55, 0.18, 0.04);
 uniform vec3  shallow_tint     : source_color = vec3(0.50, 0.78, 0.78);
 uniform vec3  fresnel_color    : source_color = vec3(0.55, 0.80, 0.85);
 uniform vec3  foam_color       : source_color = vec3(0.97, 0.99, 1.0);
-uniform float beers_law        = 3.2;
 uniform float depth_distance   = 3.2;       // meters of water for full absorption
 uniform float fresnel_power    = 4.0;
 uniform float refraction       = 0.035;
@@ -1951,9 +1998,13 @@ uniform float edge_foam_depth  = 0.80;      // foam where water column < this (m
 uniform float foam_intensity   = 1.35;
 uniform vec2  foam_scale       = vec2(0.55);
 uniform float foam_scroll      = 0.85;
-// Lake-vs-stream knobs.
+// Single flow-gate (CPU writes 0..2.4 to COLOR.r; lake uses bias to add baseline).
 uniform float flow_factor_scale = 1.0;
 uniform float flow_factor_bias  = 0.45;
+// Vertex waves.
+uniform float wave_amplitude    = 0.07;
+uniform float wave_freq         = 0.55;
+uniform float wave_speed        = 0.9;
 
 uniform sampler2D normal_map : hint_normal, filter_linear_mipmap, repeat_enable;
 uniform sampler2D foam_tex   : filter_linear_mipmap, repeat_enable;
@@ -1961,14 +2012,39 @@ uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
 uniform sampler2D depth_tex  : hint_depth_texture, filter_linear;
 
 varying float v_flow;
-varying vec2  v_dir;
+varying vec2  v_uv;           // river-local frame in meters: (across, along)
 varying vec3  v_world;
 
 void vertex() {
 	v_flow = COLOR.r;
-	// Decode downstream tangent baked per-vertex (gb in [0,1] → xz in [-1,1]).
-	v_dir = COLOR.gb * 2.0 - 1.0;
-	v_world = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	v_uv = UV;
+	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+
+	// Three summed sin-waves with prime-ish frequencies — gives a non-tiling
+	// surface that actually deforms the silhouette. Scaled by flow so flat
+	// reaches stay glassy and rapids visibly chop. Analytic gradient → normal.
+	float flow_w = clamp(0.4 + 0.8 * v_flow, 0.35, 1.6);
+	float ta = TIME * wave_speed;
+	vec2 d1 = vec2( 0.95,  0.31);   // already roughly unit
+	vec2 d2 = vec2(-0.37,  0.93);
+	vec2 d3 = vec2( 0.55, -0.83);
+	float p1 = dot(d1, wp.xz) * wave_freq        + ta * 1.00;
+	float p2 = dot(d2, wp.xz) * wave_freq * 1.43 + ta * 1.27;
+	float p3 = dot(d3, wp.xz) * wave_freq * 0.78 + ta * 0.71;
+	float a1 = wave_amplitude;
+	float a2 = wave_amplitude * 0.55;
+	float a3 = wave_amplitude * 0.35;
+	float h = (a1 * sin(p1) + a2 * sin(p2) + a3 * sin(p3)) * flow_w;
+	vec2 grad = ( a1 * wave_freq        * cos(p1) ) * d1
+	          + ( a2 * wave_freq * 1.43 * cos(p2) ) * d2
+	          + ( a3 * wave_freq * 0.78 * cos(p3) ) * d3;
+	grad *= flow_w;
+	// Water tiles are parented to the terrain root with identity transform, so
+	// model space == world space — skip the inverse(MODEL_MATRIX) round-trip.
+	VERTEX.y += h;
+	wp.y += h;
+	NORMAL = normalize(vec3(-grad.x, 1.0, -grad.y));
+	v_world = wp;
 }
 
 void fragment() {
@@ -2005,8 +2081,7 @@ void fragment() {
 	float chop = clamp(flow, 0.0, 1.0);
 	NORMAL_MAP_DEPTH = normal_strength * mix(0.45, 1.6, chop);
 
-	// Water column = bed view-Z minus surface view-Z. Drives both refraction
-	// strength and edge-foam masking.
+	// Water column = bed view-Z minus surface view-Z.
 	float bed_d = texture(depth_tex, SCREEN_UV).r;
 	vec4 bed_view = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, bed_d, 1.0);
 	bed_view.xyz /= bed_view.w;
@@ -2018,12 +2093,12 @@ void fragment() {
 	vec2 ref_uv = SCREEN_UV + nrm_decoded.xy * refraction * clamp(water_col * 0.8 + 0.2, 0.2, 1.6);
 	vec3 bed_col = texture(screen_tex, ref_uv).rgb;
 
-	// Beer-Lambert: water removes wavelengths over depth. What survives at
-	// full depth is the complement of absorption_color.
-	float depth_t = 1.0 - exp(-water_col / max(0.05, depth_distance) * beers_law);
-	vec3 absorbed = clamp(bed_col - absorption_color * depth_t, vec3(0.0), vec3(1.0));
-	vec3 deep_through = mix(absorbed, vec3(1.0) - absorption_color, depth_t * depth_t);
-	vec3 refracted = mix(deep_through, shallow_tint, clamp(depth_t * 0.35, 0.0, 0.35));
+	// Beer-Lambert, applied once: each wavelength attenuates as exp(-k*d).
+	// `absorption_color` here is the per-meter absorption coefficient.
+	vec3 transmittance = exp(-absorption_color * (water_col / max(0.05, depth_distance)));
+	vec3 absorbed = bed_col * transmittance;
+	float depth_t = clamp(1.0 - (transmittance.r + transmittance.g + transmittance.b) / 3.0, 0.0, 1.0);
+	vec3 refracted = mix(absorbed, shallow_tint, clamp(depth_t * 0.35, 0.0, 0.35));
 
 	// Fresnel reflectance.
 	float f = pow(1.0 - clamp(dot(VIEW, NORMAL), 0.0, 1.0), fresnel_power);
@@ -2091,8 +2166,10 @@ func _build_lake_water_material() -> ShaderMaterial:
 	mat.set_shader_parameter("shallow_tint", Color(0.40, 0.62, 0.60))
 	mat.set_shader_parameter("fresnel_color", Color(0.55, 0.78, 0.82))
 	mat.set_shader_parameter("depth_distance", 4.5)
-	mat.set_shader_parameter("beers_law", 2.6)
 	# Lake mesh writes COLOR.r=0; bias keeps a whisper of motion.
+	# Calm lake → kill vertex waves so the surface stays glassy.
+	mat.set_shader_parameter("wave_amplitude", 0.015)
+	mat.set_shader_parameter("wave_speed", 0.25)
 	mat.set_shader_parameter("flow_factor_scale", 1.0)
 	mat.set_shader_parameter("flow_factor_bias", 0.18)
 	mat.set_shader_parameter("scroll_speed", 0.04)
@@ -2253,7 +2330,9 @@ func _make_basin_water_mesh(basin: Dictionary) -> MeshInstance3D:
 	var y_func := func(_wx: float, _wz: float, _r: float) -> float:
 		return water_y
 	var uv_func := func(wx: float, wz: float, _r: float) -> Vector2:
-		return Vector2(wx * 0.08, wz * 0.08)
+		# UV in world meters so the shader's normal_scale acts as cycles/meter
+		# uniformly across the river and the lake.
+		return Vector2(wx, wz)
 	var color_func := func(_wx: float, _wz: float, _r: float) -> Color:
 		return Color(0.0, 0.0, 0.0, 1.0)   # COLOR.r = 0 → flow factor zeroed
 	var am: ArrayMesh = _make_basin_surface_mesh(basin, y_func, uv_func, color_func)
@@ -3204,19 +3283,33 @@ func _load_tree_variants() -> Array:
 	return _load_glb_variants(_discover_tree_paths())
 
 func _discover_tree_paths() -> Array:
+	# Polyhaven layout is `trees/<asset>/<asset>_2k.gltf` (one folder per asset
+	# so textures stay grouped). Recurse one level so both flat and per-folder
+	# layouts work.
 	var paths: Array = []
-	var dir := DirAccess.open(TREE_DIR)
-	if dir != null:
-		dir.list_dir_begin()
-		var fname: String = dir.get_next()
-		while fname != "":
-			if not dir.current_is_dir() and (fname.ends_with(".glb") or fname.ends_with(".gltf")):
-				paths.append(TREE_DIR + fname)
-			fname = dir.get_next()
+	_scan_tree_dir(TREE_DIR, paths, 2)
 	if paths.is_empty():
-		push_warning("[Terrain] No tree GLBs in %s — using Kenney fallback. Drop Quaternius .glb files into that folder for the mature look." % TREE_DIR)
+		push_warning("[Terrain] No tree GLBs in %s — using Kenney fallback. Drop .glb/.gltf files into that folder for the mature look." % TREE_DIR)
 		paths = TREE_FALLBACK_PATHS.duplicate()
 	return paths
+
+func _scan_tree_dir(path: String, out: Array, depth_left: int) -> void:
+	var dir := DirAccess.open(path)
+	if dir == null:
+		return
+	dir.list_dir_begin()
+	var fname: String = dir.get_next()
+	while fname != "":
+		if fname == "." or fname == "..":
+			fname = dir.get_next()
+			continue
+		var full: String = path + fname
+		if dir.current_is_dir():
+			if depth_left > 0:
+				_scan_tree_dir(full + "/", out, depth_left - 1)
+		elif fname.ends_with(".glb") or fname.ends_with(".gltf"):
+			out.append(full)
+		fname = dir.get_next()
 
 # Returns an Array of {"mesh": Mesh, "xform": Transform3D} for every
 # MeshInstance3D in the GLB, with xforms baked relative to the scene root so
@@ -3235,7 +3328,14 @@ func _load_tree_parts(path: String) -> Array:
 		if node is Node3D:
 			x = x * (node as Node3D).transform
 		if node is MeshInstance3D and (node as MeshInstance3D).mesh != null:
-			parts.append({"mesh": (node as MeshInstance3D).mesh, "xform": x})
+			var m: Mesh = (node as MeshInstance3D).mesh
+			# Path-based dispatch: trees get green-leaf tint + matte; flowers
+			# only get matte (keep natural petal color); stones get nothing.
+			if path.contains("/trees/"):
+				_tint_leaf_materials(m)
+			elif path.contains("/flowers/"):
+				_matte_flower_materials(m)
+			parts.append({"mesh": m, "xform": x})
 		for c in node.get_children():
 			stack.append({"node": c, "xform": x})
 	root.free()
@@ -4210,6 +4310,63 @@ func _add_debug_ring(im: ImmediateMesh, center: Vector2, y: float, radius: float
 		var p1 := Vector3(center.x + cos(a1) * radius, y, center.y + sin(a1) * radius)
 		im.surface_add_vertex(p0)
 		im.surface_add_vertex(p1)
+# Modulate leaf material albedo toward a healthy green AND kill the spec/metal
+# response. Polyhaven leaf/petal materials ship with low roughness + glossy
+# speculars that, combined with mipmap shrinkage of the alpha cutout, make
+# distant foliage look chrome-white as only the highlights survive the alpha.
+# Material names vary wildly (Polyhaven uses *_leaves, *_leaf, *_twigs,
+# *_branches, or just the asset name for whole-plant flowers), so we blacklist
+# trunk/bark/wood/stone instead of whitelisting leaf keywords.
+const LEAF_TINT := Color(0.68, 0.78, 0.48)
+# Green tint uses a STRICT whitelist — some Polyhaven trees name the trunk
+# material just `island_tree_01` with no "trunk"/"bark" word, so a blacklist
+# would tint the trunk green. Foliage names are predictable; trunk names aren't.
+const FOLIAGE_KEYWORDS: PackedStringArray = [
+	"leaf", "leaves", "twig", "twigs", "foliage", "canopy", "needle", "needles",
+]
+# Matte (kill spec) is broader: applied to everything except obviously woody/stone parts.
+const WOODY_OR_STONE_KEYWORDS: PackedStringArray = [
+	"trunk", "bark", "wood", "stump", "rock", "stone", "boulder", "ground",
+]
+
+func _tint_leaf_materials(m: Mesh) -> void:
+	# Tree pipeline: tint foliage green, matte non-woody surfaces.
+	_apply_material_pass(m, true, true)
+
+func _matte_flower_materials(m: Mesh) -> void:
+	# Flower pipeline: matte everything, no green tint (keep petal colors).
+	_apply_material_pass(m, false, true)
+
+func _apply_material_pass(m: Mesh, do_tint: bool, do_matte: bool) -> void:
+	if m == null:
+		return
+	for i in m.get_surface_count():
+		var mat: Material = m.surface_get_material(i)
+		if mat == null or not (mat is BaseMaterial3D):
+			continue
+		var name_l: String = mat.resource_name.to_lower()
+		var is_foliage: bool = false
+		for kw in FOLIAGE_KEYWORDS:
+			if name_l.contains(kw):
+				is_foliage = true
+				break
+		var is_woody_or_stone: bool = false
+		for kw in WOODY_OR_STONE_KEYWORDS:
+			if name_l.contains(kw):
+				is_woody_or_stone = true
+				break
+		var want_tint: bool = do_tint and is_foliage
+		var want_matte: bool = do_matte and not is_woody_or_stone
+		if not want_tint and not want_matte:
+			continue
+		var tuned: BaseMaterial3D = (mat as BaseMaterial3D).duplicate() as BaseMaterial3D
+		if want_tint:
+			tuned.albedo_color = LEAF_TINT
+		if want_matte:
+			tuned.roughness = 1.0
+			tuned.metallic = 0.0
+			tuned.metallic_specular = 0.0
+		m.surface_set_material(i, tuned)
 
 # --- Sampling helpers ---------------------------------------------------------
 
@@ -4809,7 +4966,10 @@ func _build_flower_tile(tx: int, tz: int) -> Array:
 			var align := Basis(Quaternion(Vector3.UP, up))
 			var yaw := Basis(Vector3.UP, rng.randf() * TAU)
 			var s: float = FLOWER_SCALE_BASE + rng.randf() * FLOWER_SCALE_JITTER
-			var scale_basis := Basis().scaled(Vector3(s, s + rng.randf() * 0.35, s))
+			# Stretch Y so flowers stand taller than they are wide — Polyhaven
+			# species are mostly low spreaders at natural scale.
+			var s_y: float = s * 1.8 + rng.randf() * 0.7
+			var scale_basis := Basis().scaled(Vector3(s, s_y, s))
 			(per_variant[variant] as Array).append(
 				Transform3D(align * yaw * scale_basis, Vector3(wx, h - FLOWER_SINK, wz))
 			)
