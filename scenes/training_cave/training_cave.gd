@@ -32,11 +32,14 @@ func _unhandled_input(event: InputEvent) -> void:
 		_reset()
 
 func _reset() -> void:
-	# Reload would tear down the multiplayer session for everyone in the room.
-	# Skip in multiplayer; users can leave via the menu (TODO: in-game menu).
-	if Network.is_in_room():
+	# Just teleport the local player back to the map's spawn point. Reloading
+	# the scene would tear down the multiplayer session for everyone in the
+	# room and is heavier than needed for a respawn.
+	if _player == null:
 		return
-	get_tree().reload_current_scene()
+	_player.global_position = Vector3(0.0, 2.0, 0.0)
+	if _player is CharacterBody3D:
+		(_player as CharacterBody3D).velocity = Vector3.ZERO
 
 # Honor `++ --spawn <name>` from the gametest shell wrapper. Unknown or missing
 # values leave the player at its scene-default transform.

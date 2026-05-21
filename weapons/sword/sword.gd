@@ -89,20 +89,34 @@ var _sheathed: bool = true
 var _sheathe_tween: Tween
 var _scabbard: Node3D
 
+# Captured at _ready from the editor-set rig transforms. All combat tweens
+# read from these so the rest pose you tune in the .tscn is the rest pose
+# the game uses (rather than the REST_* constants overriding it).
+var _rest_rot_tpv: Vector3
+var _rest_pos_tpv: Vector3
+var _rest_rot_fpv: Vector3
+var _rest_pos_fpv: Vector3
+
 func _ready() -> void:
 	super()
 	hit_area.monitoring = false
 	hit_area.body_entered.connect(_on_body_entered)
 	_setup_trail()
-	rig_tpv.rotation = REST_ROT_TPV
-	rig_tpv.position = REST_POS_TPV
-	rig_fpv.rotation = REST_ROT_FPV
-	rig_fpv.position = REST_POS_FPV
+	# Capture the editor-set rig pose as the rest pose. Combat tweens read
+	# these vars instead of the REST_* constants, so editor tuning is honored.
+	_rest_rot_tpv = rig_tpv.rotation
+	_rest_pos_tpv = rig_tpv.position
+	_rest_rot_fpv = rig_fpv.rotation
+	_rest_pos_fpv = rig_fpv.position
 	# Replace the scene's blocky sword visuals with a longer katana-shaped rig.
 	# HitArea and TipMarker (Marker3D) are kept untouched so combat reach and
 	# trail sampling don't change.
 	_install_katana_visuals(rig_tpv, false)
 	_install_katana_visuals(rig_fpv, true)
+	# Reposition the TipMarker children to the actual blade tip of the
+	# editor-instanced GLB so the trail tracks where the blade really is.
+	_position_tip_marker(rig_tpv, tip_tpv)
+	_position_tip_marker(rig_fpv, tip_fpv)
 
 # Override setup() so the scabbard can be parented to the player as soon as
 # the player ref is known (the base setup just stores `player`).
@@ -136,10 +150,10 @@ func equip() -> void:
 	else:
 		rig_tpv.visible = true
 		rig_fpv.visible = true
-		rig_tpv.rotation = REST_ROT_TPV
-		rig_tpv.position = REST_POS_TPV
-		rig_fpv.rotation = REST_ROT_FPV
-		rig_fpv.position = REST_POS_FPV
+		rig_tpv.rotation = _rest_rot_tpv
+		rig_tpv.position = _rest_pos_tpv
+		rig_fpv.rotation = _rest_rot_fpv
+		rig_fpv.position = _rest_pos_fpv
 
 func unequip() -> void:
 	# Kill any in-flight swing tween and force the hit area off, otherwise an
@@ -157,6 +171,10 @@ func unequip() -> void:
 
 func on_attack_pressed() -> void:
 	if attack_cd > 0.0 or _super_active:
+		return
+	# Roll-dashes (X key) lock out swings — the body is mid-roll and a swing
+	# tween would look pasted on. Normal C-dashes still allow dash-crit slashes.
+	if player != null and player.dash_time_left > 0.0 and player.get("_dash_is_roll"):
 		return
 	# First click while sheathed = quick draw, NOT a swing. A second click
 	# afterwards (immediately allowed — no cooldown set on the draw) performs
@@ -371,7 +389,7 @@ func _do_super() -> void:
 	if _active_swing_tween and _active_swing_tween.is_valid():
 		_active_swing_tween.kill()
 	var rig: Node3D = rig_fpv if is_fpv() else rig_tpv
-	var rest_rot: Vector3 = REST_ROT_FPV if is_fpv() else REST_ROT_TPV
+	var rest_rot: Vector3 = _rest_rot_fpv if is_fpv() else _rest_rot_tpv
 	# Flatten the blade to horizontal (X=0) for the corkscrew so it sweeps
 	# through targets sideways instead of tipped up.
 	rig.rotation = Vector3.ZERO
@@ -477,11 +495,19 @@ func _swing() -> void:
 	_combo_window_left = COMBO_WINDOW
 
 	var data := _combo_data(_combo_index)
+	# Drive the character body's sword swing animation in parallel with the
+	# weapon-rig tween. Lock is roughly the combo's total duration so the
+	# locomotion picker doesn't stomp the swing mid-strike.
+	if player and player.has_method("play_anim_locked"):
+		var total: float = 0.0
+		for kf in data.keyframes:
+			total += float(kf.dur)
+		player.play_anim_locked("Sword_Attack", total * 0.85, 1.1)
 	# Both rigs run the full position+rotation animation so the swing reads
 	# the same in third- and first-person. FPVPivot is already scaled down in
 	# the scene, so the offsets shrink appropriately for the closer camera.
-	_tween_keyframes(rig_tpv, data.keyframes, REST_ROT_TPV, REST_POS_TPV, true)
-	_tween_keyframes(rig_fpv, data.keyframes, REST_ROT_FPV, REST_POS_FPV, true)
+	_tween_keyframes(rig_tpv, data.keyframes, _rest_rot_tpv, _rest_pos_tpv, true)
+	_tween_keyframes(rig_fpv, data.keyframes, _rest_rot_fpv, _rest_pos_fpv, true)
 
 	var marker: Marker3D = tip_fpv if is_fpv() else tip_tpv
 	var base_tint: Color = data.tint
@@ -541,6 +567,9 @@ func _swing() -> void:
 func _combo_data(idx: int) -> Dictionary:
 	match idx:
 		0:
+			# Rising-left slash. kf.rot.x values include the +45° that the old
+			# box-sword rest pose used to bake in, so the blade trajectory
+			# matches what it was before the rest pose was moved to identity.
 			return {
 				"tint": Color(0.55, 0.95, 1.0, 1.0),
 				"strike_start": 0.20,
@@ -549,13 +578,13 @@ func _combo_data(idx: int) -> Dictionary:
 				"trail_end": 0.37,
 				"keyframes": [
 					# Chamber low-left: blade pitched down, tip yawed right, cocked across the body.
-					{"rot": Vector3(deg_to_rad(-75.0), deg_to_rad(95.0), deg_to_rad(15.0)), "pos": Vector3(-0.65, -0.35, -0.20), "dur": 0.16, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(-30.0), deg_to_rad(95.0), deg_to_rad(15.0)), "pos": Vector3(-0.65, -0.35, -0.20), "dur": 0.16, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
 					# Tip-lag overextension just before release.
-					{"rot": Vector3(deg_to_rad(-85.0), deg_to_rad(105.0), deg_to_rad(20.0)), "pos": Vector3(-0.70, -0.40, -0.22), "dur": 0.05, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(-40.0), deg_to_rad(105.0), deg_to_rad(20.0)), "pos": Vector3(-0.70, -0.40, -0.22), "dur": 0.05, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
 					# Mid-strike: blade extended forward at chest height, peak contact frame.
-					{"rot": Vector3(deg_to_rad(-30.0), 0.0, 0.0), "pos": Vector3(0.0, 0.15, -0.60), "dur": 0.06, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
+					{"rot": Vector3(deg_to_rad(15.0), 0.0, 0.0), "pos": Vector3(0.0, 0.15, -0.60), "dur": 0.06, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
 					# Follow-through high-right: blade pitched up, tip yawed past the shoulder.
-					{"rot": Vector3(deg_to_rad(15.0), deg_to_rad(-105.0), deg_to_rad(-20.0)), "pos": Vector3(0.65, 0.55, -0.20), "dur": 0.10, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(60.0), deg_to_rad(-105.0), deg_to_rad(-20.0)), "pos": Vector3(0.65, 0.55, -0.20), "dur": 0.10, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
 					{"rot": Vector3.ZERO, "pos": Vector3.ZERO, "dur": 0.32, "trans": Tween.TRANS_QUART, "ease": Tween.EASE_OUT},
 				],
 			}
@@ -568,17 +597,18 @@ func _combo_data(idx: int) -> Dictionary:
 				"trail_start": 0.16,
 				"trail_end": 0.37,
 				"keyframes": [
-					{"rot": Vector3(deg_to_rad(-75.0), deg_to_rad(-95.0), deg_to_rad(-15.0)), "pos": Vector3(0.65, -0.35, -0.20), "dur": 0.16, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
-					{"rot": Vector3(deg_to_rad(-85.0), deg_to_rad(-105.0), deg_to_rad(-20.0)), "pos": Vector3(0.70, -0.40, -0.22), "dur": 0.05, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
-					{"rot": Vector3(deg_to_rad(-30.0), 0.0, 0.0), "pos": Vector3(0.0, 0.15, -0.60), "dur": 0.06, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
-					{"rot": Vector3(deg_to_rad(15.0), deg_to_rad(105.0), deg_to_rad(20.0)), "pos": Vector3(-0.65, 0.55, -0.20), "dur": 0.10, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(-30.0), deg_to_rad(-95.0), deg_to_rad(-15.0)), "pos": Vector3(0.65, -0.35, -0.20), "dur": 0.16, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(-40.0), deg_to_rad(-105.0), deg_to_rad(-20.0)), "pos": Vector3(0.70, -0.40, -0.22), "dur": 0.05, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(deg_to_rad(15.0), 0.0, 0.0), "pos": Vector3(0.0, 0.15, -0.60), "dur": 0.06, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
+					{"rot": Vector3(deg_to_rad(60.0), deg_to_rad(105.0), deg_to_rad(20.0)), "pos": Vector3(-0.65, 0.55, -0.20), "dur": 0.10, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
 					{"rot": Vector3.ZERO, "pos": Vector3.ZERO, "dur": 0.32, "trans": Tween.TRANS_QUART, "ease": Tween.EASE_OUT},
 				],
 			}
 		_:
-			# Majestic left → right horizontal cleave. Blade stays flat (X = -45°
-			# cancels rest tilt) and out in front of the player (Z always
-			# negative) so it never carves through the player's torso.
+			# Majestic left → right horizontal cleave. Keyframes hold pitch at
+			# 0 (relative to rest) so the blade stays flat through the sweep
+			# regardless of the editor-set rest tilt. Position stays out in
+			# front (Z negative) so the cleave never carves the player.
 			return {
 				"tint": Color(1.0, 0.55, 0.75, 1.0),
 				# Strike now lands on KF3 (the cleave forward, 0.37 → 0.52)
@@ -589,24 +619,143 @@ func _combo_data(idx: int) -> Dictionary:
 				"trail_start": 0.24,
 				"trail_end": 0.52,
 				"keyframes": [
-					{"rot": Vector3(deg_to_rad(-45.0), deg_to_rad(95.0), deg_to_rad(15.0)), "pos": Vector3(-0.70, 0.35, -0.30), "dur": 0.24, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
-					{"rot": Vector3(deg_to_rad(-45.0), deg_to_rad(105.0), deg_to_rad(20.0)), "pos": Vector3(-0.75, 0.37, -0.32), "dur": 0.06, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
-					{"rot": Vector3(deg_to_rad(-45.0), 0.0, 0.0), "pos": Vector3(0.0, 0.35, -0.65), "dur": 0.07, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
-					{"rot": Vector3(deg_to_rad(-45.0), deg_to_rad(-105.0), deg_to_rad(-20.0)), "pos": Vector3(0.75, 0.35, -0.30), "dur": 0.15, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(0.0, deg_to_rad(95.0), deg_to_rad(15.0)), "pos": Vector3(-0.70, 0.35, -0.30), "dur": 0.24, "trans": Tween.TRANS_SINE, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(0.0, deg_to_rad(105.0), deg_to_rad(20.0)), "pos": Vector3(-0.75, 0.37, -0.32), "dur": 0.06, "trans": Tween.TRANS_LINEAR, "ease": Tween.EASE_OUT},
+					{"rot": Vector3(0.0, 0.0, 0.0), "pos": Vector3(0.0, 0.35, -0.65), "dur": 0.07, "trans": Tween.TRANS_CUBIC, "ease": Tween.EASE_IN},
+					{"rot": Vector3(0.0, deg_to_rad(-105.0), deg_to_rad(-20.0)), "pos": Vector3(0.75, 0.35, -0.30), "dur": 0.15, "trans": Tween.TRANS_EXPO, "ease": Tween.EASE_OUT},
 					{"rot": Vector3.ZERO, "pos": Vector3.ZERO, "dur": 0.40, "trans": Tween.TRANS_QUART, "ease": Tween.EASE_OUT},
 				],
 			}
 
+# ── Edge-aiming math ─────────────────────────────────────────────────────────
+# The blade's length and sharp-edge directions in the RIG'S local frame (i.e.
+# when rig.rotation = identity). With the amaryllis instanced under SwordRig
+# in the editor at its current pose, the blade tip points roughly along -Z
+# (rig forward) and the sharp edge points roughly along -Y (rig down).
+# Tweak these if your editor pose puts them along different axes.
+const BLADE_LENGTH_RIG_LOCAL := Vector3(0.0, 0.0, -1.0)
+const BLADE_EDGE_RIG_LOCAL := Vector3(0.0, -1.0, 0.0)
+
+# Take the authored rotation `base_rot` (rig-parent euler) and add a roll
+# about the blade's length axis so the sharp edge points along
+# `cut_dir_parent` (a direction in the rig's parent space — usually the
+# velocity vector of the rig moving from the previous keyframe to this one).
+# Preserves the authored pitch/yaw and only spins the blade about its own
+# length, so different combo strikes coming in from different angles each
+# get their edge re-aimed for that particular slice direction.
+# Walk the rig's children, find the first one that contains visible geometry
+# (i.e. the user-instanced amaryllis), measure its world AABB, and project the
+# 8 AABB corners onto BLADE_LENGTH_RIG_LOCAL (transformed into world space).
+# Whichever corner sits farthest along that axis from the rig origin is the
+# blade tip — convert that point to rig-local and put the TipMarker there.
+# This way the trail tracks the actual blade no matter how the user tuned the
+# GLB transform in the editor.
+func _position_tip_marker(rig: Node3D, tip_marker: Marker3D) -> void:
+	if rig == null or tip_marker == null:
+		return
+	var model_geom: Array = []
+	for c in rig.get_children():
+		if c == tip_marker:
+			continue
+		if c is Area3D:
+			continue
+		# The placeholder Blade/Core/Guard/Pommel/Tip MeshInstances are hidden
+		# by _install_katana_visuals; skip them so they don't bias the AABB.
+		if c is MeshInstance3D and not (c as MeshInstance3D).visible:
+			continue
+		_collect_visible_geom(c, model_geom)
+	if model_geom.is_empty():
+		return
+	var aabb := AABB()
+	var any := false
+	for g in model_geom:
+		var vi := g as VisualInstance3D
+		var world_aabb: AABB = vi.global_transform * vi.get_aabb()
+		if not any:
+			aabb = world_aabb
+			any = true
+		else:
+			aabb = aabb.merge(world_aabb)
+	var blade_axis_world: Vector3 = (rig.global_transform.basis * BLADE_LENGTH_RIG_LOCAL).normalized()
+	var rig_origin: Vector3 = rig.global_position
+	var best_d: float = -INF
+	var best_corner: Vector3 = aabb.position
+	for ix in 2:
+		for iy in 2:
+			for iz in 2:
+				var corner: Vector3 = aabb.position + Vector3(
+					aabb.size.x * float(ix),
+					aabb.size.y * float(iy),
+					aabb.size.z * float(iz)
+				)
+				var d: float = (corner - rig_origin).dot(blade_axis_world)
+				if d > best_d:
+					best_d = d
+					best_corner = corner
+	tip_marker.global_position = best_corner
+
+func _collect_visible_geom(n: Node, out: Array) -> void:
+	if n is VisualInstance3D:
+		var vis := true
+		if n is GeometryInstance3D:
+			vis = (n as GeometryInstance3D).visible
+		if vis:
+			out.append(n)
+	for c in n.get_children():
+		_collect_visible_geom(c, out)
+
+func _aim_edge(base_rot: Vector3, cut_dir_parent: Vector3) -> Vector3:
+	if cut_dir_parent.length_squared() < 1.0e-6:
+		return base_rot
+	var base_basis := Basis.from_euler(base_rot)
+	var blade_axis := (base_basis * BLADE_LENGTH_RIG_LOCAL).normalized()
+	# Component of cut_dir perpendicular to the blade axis — only the
+	# sideways component matters; motion along the blade is a stab, not a slice.
+	var cut_perp: Vector3 = cut_dir_parent - blade_axis * cut_dir_parent.dot(blade_axis)
+	if cut_perp.length_squared() < 1.0e-6:
+		return base_rot
+	cut_perp = cut_perp.normalized()
+	# Current edge direction in parent space after the authored rotation.
+	var edge_now := (base_basis * BLADE_EDGE_RIG_LOCAL).normalized()
+	var edge_perp: Vector3 = edge_now - blade_axis * edge_now.dot(blade_axis)
+	if edge_perp.length_squared() < 1.0e-6:
+		return base_rot
+	edge_perp = edge_perp.normalized()
+	# Signed angle from current edge direction to the cut direction, measured
+	# around the blade axis (right-hand rule). Roll the rig by that amount.
+	var angle: float = edge_perp.signed_angle_to(cut_perp, blade_axis)
+	var roll := Basis(blade_axis, angle)
+	return (roll * base_basis).get_euler()
+
 func _tween_keyframes(rig: Node3D, kfs: Array, rest_rot: Vector3, rest_pos: Vector3, animate_pos: bool) -> void:
 	var tr := create_tween()
 	var tp: Tween = create_tween() if animate_pos else null
-	for kf in kfs:
+	# Edge-aiming uses motion between keyframes as the cut direction. The
+	# swing begins at rest_pos, so the first keyframe's cut vector is
+	# (kf0.pos + rest_pos) - rest_pos = kf0.pos. After that, each kf's cut
+	# vector is its target position minus the previous one.
+	var prev_target_pos: Vector3 = rest_pos
+	var last_idx: int = kfs.size() - 1
+	for i in kfs.size():
+		var kf = kfs[i]
 		var dur: float = kf.dur
 		var trans: int = kf.trans
 		var ease: int = kf.ease
-		tr.tween_property(rig, "rotation", rest_rot + kf.rot, dur).set_trans(trans).set_ease(ease)
+		var target_pos: Vector3 = rest_pos + kf.pos
+		var base_rot: Vector3 = rest_rot + kf.rot
+		# Skip edge-aiming on the final (recovery) keyframe so the blade snaps
+		# back to its authored rest rotation — otherwise the roll computed for
+		# the return motion lingers and the next swing starts twisted.
+		var target_rot: Vector3
+		if i == last_idx:
+			target_rot = base_rot
+		else:
+			var cut_dir: Vector3 = target_pos - prev_target_pos
+			target_rot = _aim_edge(base_rot, cut_dir)
+		tr.tween_property(rig, "rotation", target_rot, dur).set_trans(trans).set_ease(ease)
 		if tp:
-			tp.tween_property(rig, "position", rest_pos + kf.pos, dur).set_trans(trans).set_ease(ease)
+			tp.tween_property(rig, "position", target_pos, dur).set_trans(trans).set_ease(ease)
+		prev_target_pos = target_pos
 
 func _on_body_entered(body: Node) -> void:
 	if body == player:
@@ -677,6 +826,23 @@ func _sample_trail(marker: Marker3D) -> void:
 	while _trail_points.size() > TRAIL_SAMPLES * 2:
 		_trail_points.remove_at(0)
 
+# Smoothing factor: each raw sample segment is subdivided into this many
+# sub-segments via Catmull-Rom interpolation, so the trail reads as a curve
+# rather than a polyline. 6 is a good balance between smoothness and overhead.
+const TRAIL_SUBDIVISIONS: int = 6
+
+func _catmull_rom(p0: Vector3, p1: Vector3, p2: Vector3, p3: Vector3, t: float) -> Vector3:
+	# Uniform Catmull-Rom — passes exactly through p1 and p2, with tangents
+	# defined by the neighbors so consecutive segments join smoothly.
+	var t2: float = t * t
+	var t3: float = t2 * t
+	return 0.5 * (
+		(2.0 * p1)
+		+ (-p0 + p2) * t
+		+ (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+		+ (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+	)
+
 func _rebuild_trail() -> void:
 	if _trail_im == null:
 		return
@@ -684,16 +850,48 @@ func _rebuild_trail() -> void:
 	var pair_count: int = _trail_points.size() / 2
 	if pair_count < 2:
 		return
-	_trail_im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+	# Split the interleaved sample buffer into the tip and hilt curves so each
+	# can be smoothed independently — the trail is the ribbon spanning the two.
+	var tips: Array[Vector3] = []
+	var hilts: Array[Vector3] = []
+	tips.resize(pair_count)
+	hilts.resize(pair_count)
+	for i in pair_count:
+		tips[i] = _trail_points[i * 2]
+		hilts[i] = _trail_points[i * 2 + 1]
+	# Build the subdivided ribbon. Each raw segment [i, i+1] becomes
+	# TRAIL_SUBDIVISIONS interpolated sub-segments. Endpoints use reflected
+	# control points so the first and last segments stay tangent-continuous.
+	var smooth_tips: Array[Vector3] = []
+	var smooth_hilts: Array[Vector3] = []
 	for i in range(pair_count - 1):
-		var t0: float = float(i) / float(pair_count - 1)
-		var t1: float = float(i + 1) / float(pair_count - 1)
+		var p0t: Vector3 = tips[i - 1] if i > 0 else 2.0 * tips[i] - tips[i + 1]
+		var p1t: Vector3 = tips[i]
+		var p2t: Vector3 = tips[i + 1]
+		var p3t: Vector3 = tips[i + 2] if i + 2 < pair_count else 2.0 * tips[i + 1] - tips[i]
+		var p0h: Vector3 = hilts[i - 1] if i > 0 else 2.0 * hilts[i] - hilts[i + 1]
+		var p1h: Vector3 = hilts[i]
+		var p2h: Vector3 = hilts[i + 1]
+		var p3h: Vector3 = hilts[i + 2] if i + 2 < pair_count else 2.0 * hilts[i + 1] - hilts[i]
+		var sub_count: int = TRAIL_SUBDIVISIONS if i < pair_count - 2 else TRAIL_SUBDIVISIONS + 1
+		for s in sub_count:
+			var t: float = float(s) / float(TRAIL_SUBDIVISIONS)
+			smooth_tips.append(_catmull_rom(p0t, p1t, p2t, p3t, t))
+			smooth_hilts.append(_catmull_rom(p0h, p1h, p2h, p3h, t))
+	var smooth_count: int = smooth_tips.size()
+	if smooth_count < 2:
+		return
+	_trail_im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+	var denom: float = float(smooth_count - 1)
+	for i in range(smooth_count - 1):
+		var t0: float = float(i) / denom
+		var t1: float = float(i + 1) / denom
 		var a0: float = pow(t0, 1.4)
 		var a1: float = pow(t1, 1.4)
-		var p0a: Vector3 = _trail_points[i * 2]
-		var p0b: Vector3 = _trail_points[i * 2 + 1]
-		var p1a: Vector3 = _trail_points[(i + 1) * 2]
-		var p1b: Vector3 = _trail_points[(i + 1) * 2 + 1]
+		var p0a: Vector3 = smooth_tips[i]
+		var p0b: Vector3 = smooth_hilts[i]
+		var p1a: Vector3 = smooth_tips[i + 1]
+		var p1b: Vector3 = smooth_hilts[i + 1]
 		_trail_im.surface_set_color(Color(_trail_tint.r, _trail_tint.g, _trail_tint.b, a0))
 		_trail_im.surface_add_vertex(p0a)
 		_trail_im.surface_set_color(Color(_trail_tint.r, _trail_tint.g, _trail_tint.b, a0))
@@ -937,18 +1135,18 @@ func _unsheathe(immediate: bool = false) -> void:
 	if rig_fpv:
 		rig_fpv.visible = true
 	if immediate:
-		rig_tpv.rotation = REST_ROT_TPV
-		rig_tpv.position = REST_POS_TPV
-		rig_fpv.rotation = REST_ROT_FPV
-		rig_fpv.position = REST_POS_FPV
+		rig_tpv.rotation = _rest_rot_tpv
+		rig_tpv.position = _rest_pos_tpv
+		rig_fpv.rotation = _rest_rot_fpv
+		rig_fpv.position = _rest_pos_fpv
 		return
 	# Start from the saya pose so the draw reads as "pulled out of the
 	# scabbard," then tween back to ready stance.
 	rig_tpv.position = SHEATHE_POS_TPV
 	rig_tpv.rotation = SHEATHE_ROT_TPV
 	_sheathe_tween = create_tween().set_parallel(true)
-	_sheathe_tween.tween_property(rig_tpv, "position", REST_POS_TPV, SHEATHE_TWEEN_OUT).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	_sheathe_tween.tween_property(rig_tpv, "rotation", REST_ROT_TPV, SHEATHE_TWEEN_OUT).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	_sheathe_tween.tween_property(rig_tpv, "position", _rest_pos_tpv, SHEATHE_TWEEN_OUT).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	_sheathe_tween.tween_property(rig_tpv, "rotation", _rest_rot_tpv, SHEATHE_TWEEN_OUT).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 func _draw_quick() -> void:
 	# Fast draw-from-saya. Sets attack_cd = 0 explicitly (in case some prior
@@ -959,14 +1157,14 @@ func _draw_quick() -> void:
 	_kill_sheathe_tween()
 	rig_tpv.visible = true
 	rig_fpv.visible = true
-	rig_fpv.rotation = REST_ROT_FPV
-	rig_fpv.position = REST_POS_FPV
+	rig_fpv.rotation = _rest_rot_fpv
+	rig_fpv.position = _rest_pos_fpv
 	# Start the TPV rig at the saya pose and tween it to ready, fast.
 	rig_tpv.position = SHEATHE_POS_TPV
 	rig_tpv.rotation = SHEATHE_ROT_TPV
 	_sheathe_tween = create_tween().set_parallel(true)
-	_sheathe_tween.tween_property(rig_tpv, "position", REST_POS_TPV, DRAW_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	_sheathe_tween.tween_property(rig_tpv, "rotation", REST_ROT_TPV, DRAW_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_sheathe_tween.tween_property(rig_tpv, "position", _rest_pos_tpv, DRAW_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_sheathe_tween.tween_property(rig_tpv, "rotation", _rest_rot_tpv, DRAW_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
 func _kill_sheathe_tween() -> void:
 	if _sheathe_tween and _sheathe_tween.is_valid():

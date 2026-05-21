@@ -9,3 +9,12 @@ relay/.venv/
 # Cloudflare Worker dependencies — recreated with `npm install`.
 worker/node_modules/
 worker/.wrangler/
+
+# macOS Finder duplicates ("foo 2.glb", "foo.glb 2.import", "foo 2").
+* 2
+* 2.*
+*.* 2.*
+
+# macOS metadata
+.DS_Store
+**/.DS_Store

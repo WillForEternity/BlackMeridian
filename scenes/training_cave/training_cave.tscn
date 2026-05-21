@@ -18,6 +18,7 @@
 [ext_resource type="PackedScene" uid="uid://c07s53wlxwa5m" path="res://assets/models/stone_lion.glb" id="15_stone_lion"]
 [ext_resource type="Script" uid="uid://mo0e0jvj4oam" path="res://entities/util/auto_trimesh_collider.gd" id="16_autocol"]
 [ext_resource type="PackedScene" uid="uid://dqc58n2up4tje" path="res://assets/models/weapons/sci-fi_gun.glb" id="17_scifigun"]
+[ext_resource type="PackedScene" uid="uid://b0kd8laciupuk" path="res://assets/models/characters/quaternius/Male_Ranger.gltf" id="18_ranger"]
 
 [sub_resource type="PanoramaSkyMaterial" id="Sky_Mat"]
 panorama = ExtResource("12_sky")
@@ -49,14 +50,6 @@ fog_depth_end = 215.0
 adjustment_enabled = true
 adjustment_contrast = 1.05
 adjustment_saturation = 1.15
-
-[sub_resource type="CapsuleMesh" id="CapsuleMesh_Player"]
-radius = 0.2
-height = 1.0667
-
-[sub_resource type="StandardMaterial3D" id="Mat_Player"]
-albedo_color = Color(0.85, 0.35, 0.25, 1)
-roughness = 0.55
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape_Player"]
 radius = 0.2
@@ -204,9 +197,8 @@ portal_light_path = NodePath("Weapons/PortalLight")
 portal_dark_path = NodePath("Weapons/PortalDark")
 spear_path = NodePath("Weapons/Spear")
 
-[node name="Body" type="MeshInstance3D" parent="Player" unique_id=331930478]
-mesh = SubResource("CapsuleMesh_Player")
-surface_material_override/0 = SubResource("Mat_Player")
+[node name="Character" parent="Player" unique_id=218311119 instance=ExtResource("18_ranger")]
+transform = Transform3D(-0.99992937, 0, 0.0118855145, 0, 1, 0, -0.0118855145, 0, -0.99992937, 0, -0.5, 0)
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Player" unique_id=2053668011]
 shape = SubResource("CapsuleShape_Player")
@@ -253,7 +245,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.7)
 shape = SubResource("BoxShape_SwordHit")
 
 [node name="Sketchfab_Scene" parent="Player/WeaponPivot/SwordRig" unique_id=1648588310 instance=ExtResource("5_lcwwa")]
-transform = Transform3D(0.017644627, -0.031277545, -0.06584362, 0.055493247, -0.038164116, 0.03299997, -0.047266968, -0.05648199, 0.014164016, -0.065015465, 0.06922126, 0.1685785)
+transform = Transform3D(-0.006068659, -0.00042185374, -0.074752845, 0.056880873, -0.048689853, -0.004342993, -0.048504993, -0.057044864, 0.0042597107, 0.03624758, 0.66256917, 0.16979527)
 
 [node name="GunRig" type="Node3D" parent="Player/WeaponPivot" unique_id=518384670]
 visible = false
@@ -535,7 +527,7 @@ script = ExtResource("11_pd")
 [node name="Spear" type="Node" parent="Player/Weapons" unique_id=2066928071]
 script = ExtResource("12_spear")
 
-[node name="RemotePlayers" type="Node3D" parent="."]
+[node name="RemotePlayers" type="Node3D" parent="." unique_id=119708127]
 
 [node name="Targets" type="Node3D" parent="." unique_id=1383728252]
 
@@ -590,6 +582,8 @@ layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
 mouse_filter = 2
 script = ExtResource("4_hotbar")
 player_path = NodePath("../../Player")

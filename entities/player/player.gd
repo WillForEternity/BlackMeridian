@@ -6,7 +6,7 @@ enum ViewMode { THIRD_PERSON, FIRST_PERSON }
 signal weapon_changed(weapon: int)
 signal charge_changed(value: float)
 
-@export var speed: float = 8.5
+@export var speed: float = 13.0
 @export var jump_velocity: float = 5.5
 # Jump feel — coyote grace after walking off a ledge, falling-gravity boost
 # for a less floaty arc, and an early-release cut so tapping jump produces a
@@ -50,6 +50,13 @@ var dash_dir: Vector3 = Vector3.ZERO
 # Active dash speed — set in _start_dash so a boost-dash (Shift) can multiply
 # the base dash speed without permanently mutating dash_speed.
 var _current_dash_speed: float = 0.0
+# When true, the active dash plays the Roll body animation (X key). When false
+# (C key), the dash preserves whatever locomotion clip is playing and just
+# spawns translucent ghost copies of the character behind us.
+var _dash_is_roll: bool = false
+# Edge-detect for the raw X key (project.godot has no "roll" input action and
+# I'd rather not edit the input map for one key). True = X was down last tick.
+var _x_was_down: bool = false
 const BOOST_DASH_MULTIPLIER: float = 10.0
 # Fraction of dash_duration used when Shift is held. With post-dash skid
 # now clamped at DASH_EXIT_SKID_MAX m/s, a full-duration boost (1.0 frac)
@@ -76,13 +83,133 @@ var _pose_send_accum: float = 0.0
 const CAM_POS_3P := Vector3(0.5, 0.4, 4.5)
 const CAM_POS_1P := Vector3(0.0, 0.0, 0.0)
 
-@onready var body_mesh: MeshInstance3D = $Body
+@onready var body_mesh: MeshInstance3D = get_node_or_null("Body") as MeshInstance3D
 var _body_base_scale: Vector3 = Vector3.ONE
 var _dash_anim_tween: Tween
 @onready var weapon_pivot: Node3D = $WeaponPivot
 @onready var pitch_pivot: Node3D = $CameraPitchPivot
 @onready var camera: Camera3D = $CameraPitchPivot/Camera3D
 @onready var fpv_pivot: Node3D = $CameraPitchPivot/Camera3D/FPVPivot
+
+# Quaternius hooded ranger + Universal Animation Library. UAL1 and the
+# Male_Ranger outfit share the EXACT same 65-bone skeleton (same names, same
+# hierarchy), so no BoneMap/humanoid retargeting is needed — we just load the
+# UAL animations and copy them onto the character's AnimationPlayer at _ready.
+const UAL_SOURCE_PATH := "res://assets/models/characters/quaternius/UAL1_Standard.glb"
+@onready var _character: Node3D = get_node_or_null("Character")
+var _anim_player: AnimationPlayer
+var _current_anim: String = ""
+const ANIM_LIB_PREFIX: String = ""
+
+func _import_ual_animations() -> void:
+	# Create an AnimationPlayer on the Character, then copy every clip from
+	# UAL1's AnimationPlayer into the default ("") library on our new player.
+	# Same skeleton/bone names mean tracks bind without retargeting.
+	if _character == null:
+		return
+	_anim_player = _character.find_child("AnimationPlayer", true, false) as AnimationPlayer
+	if _anim_player == null:
+		_anim_player = AnimationPlayer.new()
+		_anim_player.name = "AnimationPlayer"
+		_character.add_child(_anim_player)
+		_anim_player.owner = _character
+	# Resolve our AnimationPlayer's tracks against the Character node so the
+	# remapped paths (rooted at Character) bind correctly regardless of where
+	# the AnimationPlayer sits in the tree.
+	_anim_player.root_node = _anim_player.get_path_to(_character)
+	var packed: PackedScene = load(UAL_SOURCE_PATH) as PackedScene
+	if packed == null:
+		push_warning("UAL animations failed to load at %s" % UAL_SOURCE_PATH)
+		return
+	var inst: Node = packed.instantiate()
+	var src_ap: AnimationPlayer = inst.find_child("AnimationPlayer", true, false) as AnimationPlayer
+	if src_ap == null:
+		inst.queue_free()
+		return
+	# UAL tracks are authored against UAL's own Skeleton3D path; without
+	# remapping they don't bind to Male_Ranger's skeleton (which is the same
+	# bone set under a possibly-different parent path) and the character stays
+	# in T-pose. Locate both skeletons and rewrite each bone-transform track to
+	# target our Skeleton3D's relative path.
+	var dst_skel: Skeleton3D = _find_skeleton(_character)
+	var src_root: Node = src_ap.get_node_or_null(src_ap.root_node)
+	if src_root == null:
+		src_root = inst
+	var src_skel: Skeleton3D = _find_skeleton(src_root)
+	var dst_skel_path: NodePath = _character.get_path_to(dst_skel) if dst_skel else NodePath()
+	var src_skel_path_str: String = String(src_root.get_path_to(src_skel)) if src_skel else ""
+	# Copy into a fresh DEFAULT library (name = ""). Animation keys then have
+	# no prefix — "Idle_Loop", "Jog_Fwd_Loop", etc. — so ANIM_LIB_PREFIX="" matches.
+	var lib := AnimationLibrary.new()
+	for src_lib_name in src_ap.get_animation_library_list():
+		var src_lib := src_ap.get_animation_library(src_lib_name)
+		for anim_name in src_lib.get_animation_list():
+			var anim: Animation = (src_lib.get_animation(anim_name) as Animation).duplicate(true)
+			if dst_skel != null:
+				for ti in anim.get_track_count():
+					var ttype := anim.track_get_type(ti)
+					if ttype != Animation.TYPE_POSITION_3D \
+						and ttype != Animation.TYPE_ROTATION_3D \
+						and ttype != Animation.TYPE_SCALE_3D:
+						continue
+					var p_str := String(anim.track_get_path(ti))
+					var colon := p_str.find(":")
+					var node_part := p_str if colon < 0 else p_str.substr(0, colon)
+					var sub: String = "" if colon < 0 else p_str.substr(colon)
+					# Any source path that points at the source skeleton (or its
+					# named variants) gets rewritten to our skeleton's path; the
+					# bone subname after the colon is unchanged.
+					if src_skel_path_str != "" and node_part == src_skel_path_str:
+						anim.track_set_path(ti, NodePath(String(dst_skel_path) + sub))
+					elif node_part == "Skeleton3D" or node_part == "Armature":
+						anim.track_set_path(ti, NodePath(String(dst_skel_path) + sub))
+			lib.add_animation(anim_name, anim)
+	# Replace any existing default library so we don't double-add.
+	if _anim_player.has_animation_library(""):
+		_anim_player.remove_animation_library("")
+	_anim_player.add_animation_library("", lib)
+	_anim_player.active = true
+	if not _anim_player.animation_finished.is_connected(_on_anim_finished):
+		_anim_player.animation_finished.connect(_on_anim_finished)
+	play_anim(ANIM_IDLE)
+	inst.queue_free()
+
+func _find_skeleton(root: Node) -> Skeleton3D:
+	if root == null:
+		return null
+	if root is Skeleton3D:
+		return root
+	for c in root.get_children():
+		var s := _find_skeleton(c)
+		if s != null:
+			return s
+	return null
+
+func _on_anim_finished(anim_name: String) -> void:
+	# Godot's gltf importer strips "_Loop" from looping clips and sets loop_mode
+	# instead. Restart by loop_mode, not by name suffix.
+	if not _anim_player.has_animation(anim_name):
+		return
+	var a: Animation = _anim_player.get_animation(anim_name)
+	if a != null and a.loop_mode != Animation.LOOP_NONE:
+		_anim_player.play(anim_name)
+
+func play_anim(name: String, custom_speed: float = 1.0, loop_override: bool = false) -> void:
+	if _anim_player == null:
+		return
+	var full := ANIM_LIB_PREFIX + name
+	if not _anim_player.has_animation(full):
+		full = name
+		if not _anim_player.has_animation(full):
+			return
+	# Only call play() on the FIRST tick we want this animation. Repeated
+	# play() calls reset the playhead to 0 every frame and visually freeze
+	# the character at the first pose. The animation_finished signal handler
+	# restarts loop clips when they end.
+	if _current_anim != full:
+		_current_anim = full
+		_anim_player.play(full)
+	_anim_player.speed_scale = custom_speed
 
 @onready var _sword: Node = get_node(sword_path)
 @onready var _gun: Node = get_node(gun_path)
@@ -166,10 +293,12 @@ func _update_wood_pickup_prompt() -> void:
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	add_to_group("player")
+	_import_ual_animations()
 	# Snapshot the body's resting scale so dash squash/stretch always tweens
 	# back to it. Reading body_mesh.scale mid-dash would capture a stretched
 	# value and the character would drift larger with every rapid dash.
-	_body_base_scale = body_mesh.scale
+	if body_mesh != null:
+		_body_base_scale = body_mesh.scale
 	# Build mode controller is a script-only Node child. We construct it here
 	# (rather than putting it in the scene) so build-related state stays out of
 	# the .tscn and travels with the player wherever they're placed.
@@ -338,7 +467,13 @@ func _physics_process(delta: float) -> void:
 		velocity.y *= JUMP_CUT_FACTOR
 
 	if Input.is_action_just_pressed("dash") and dash_cd_left <= 0.0 and not movement_locked:
+		_dash_is_roll = false
 		_start_dash()
+	elif Input.is_physical_key_pressed(KEY_X) and not _x_was_down \
+			and dash_cd_left <= 0.0 and not movement_locked:
+		_dash_is_roll = true
+		_start_dash()
+	_x_was_down = Input.is_physical_key_pressed(KEY_X)
 
 	if dash_time_left > 0.0:
 		# Cancel the dash if we're about to plow into an enemy: keep at least
@@ -409,6 +544,8 @@ func _physics_process(delta: float) -> void:
 	velocity.z += _floor_platform_velocity.z
 
 	move_and_slide()
+
+	_update_character_animation()
 
 	# Re-read the floor velocity from this frame's collisions for the next tick.
 	_floor_platform_velocity = _detect_floor_platform_velocity()
@@ -507,6 +644,13 @@ func _start_dash() -> void:
 
 	_play_dash_animation(duration)
 
+	# Only the X-key roll plays the Roll body clip. A normal C-dash keeps the
+	# locomotion animation running and relies on the ghost trail (below) to
+	# convey the dash visually.
+	if _dash_is_roll and _anim_player != null and _anim_player.has_animation(ANIM_ROLL):
+		var clip_len: float = _anim_player.get_animation(ANIM_ROLL).length
+		play_anim_locked(ANIM_ROLL, clip_len, 1.0)
+
 # Returns the distance from the player to the nearest enemy obstruction along
 # the current dash direction, or -1.0 if the path is clear within max_dist.
 func _dash_target_distance(max_dist: float) -> float:
@@ -535,10 +679,11 @@ func _play_dash_animation(duration: float) -> void:
 	# active when this dash starts.
 	if _dash_anim_tween and _dash_anim_tween.is_valid():
 		_dash_anim_tween.kill()
-	var stretch := Vector3(_body_base_scale.x * 0.7, _body_base_scale.y * 0.85, _body_base_scale.z * 1.45)
-	_dash_anim_tween = create_tween().set_parallel(false)
-	_dash_anim_tween.tween_property(body_mesh, "scale", stretch, 0.05)
-	_dash_anim_tween.tween_property(body_mesh, "scale", _body_base_scale, maxf(duration, 0.12) + 0.12).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	if body_mesh != null:
+		var stretch := Vector3(_body_base_scale.x * 0.7, _body_base_scale.y * 0.85, _body_base_scale.z * 1.45)
+		_dash_anim_tween = create_tween().set_parallel(false)
+		_dash_anim_tween.tween_property(body_mesh, "scale", stretch, 0.05)
+		_dash_anim_tween.tween_property(body_mesh, "scale", _body_base_scale, maxf(duration, 0.12) + 0.12).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 	# FOV punch for speed feel.
 	punch_fov(12.0, 0.05, 0.22)
@@ -547,11 +692,13 @@ func _play_dash_animation(duration: float) -> void:
 	if camera.has_method("add_trauma"):
 		camera.add_trauma(0.35)
 
-	# Afterimage trail: spawn ghost copies of the body mesh that fade out.
-	var ghost_count := 4
-	for i in ghost_count:
-		var delay := float(i) * (maxf(duration, 0.06) / float(ghost_count))
-		get_tree().create_timer(delay, true, false, false).timeout.connect(_spawn_dash_ghost)
+	# Afterimage trail. The roll variant has its own visual (the body animation),
+	# so only the non-roll C-dash spawns character ghosts behind the player.
+	if not _dash_is_roll:
+		var ghost_count := 5
+		for i in ghost_count:
+			var delay := float(i) * (maxf(duration, 0.06) / float(ghost_count))
+			get_tree().create_timer(delay, true, false, false).timeout.connect(_spawn_character_ghost)
 
 func _spawn_dash_ghost() -> void:
 	if body_mesh == null or body_mesh.mesh == null:
@@ -574,6 +721,66 @@ func _spawn_dash_ghost() -> void:
 	tw.tween_property(ghost, "scale", ghost.scale * 0.6, 0.28)
 	tw.chain().tween_callback(ghost.queue_free)
 
+# Freeze-frame ghost of the character mesh at its current pose. Used by the
+# C-dash to leave a translucent keyframe trail behind the player without
+# replacing the running locomotion animation.
+const GHOST_LIFETIME: float = 0.38
+const GHOST_TINT := Color(0.55, 0.85, 1.0, 1.0)
+const GHOST_START_ALPHA: float = 0.5
+
+func _spawn_character_ghost() -> void:
+	if _character == null or not is_instance_valid(_character):
+		return
+	var ghost: Node3D = _character.duplicate(0) as Node3D
+	if ghost == null:
+		return
+	# Strip any AnimationPlayer on the clone — we want the pose to freeze at
+	# the moment the ghost was spawned, not continue tracking our live one.
+	for ap in ghost.find_children("*", "AnimationPlayer", true, false):
+		ap.queue_free()
+	# Parent under the world so player movement doesn't drag the ghost along.
+	get_parent().add_child(ghost)
+	ghost.global_transform = _character.global_transform
+	# Copy the current bone poses across so the clone holds the exact silhouette
+	# the player has right now (otherwise the duplicated Skeleton3D would snap
+	# back to its rest pose).
+	var src_skel: Skeleton3D = _find_skeleton(_character)
+	var dst_skel: Skeleton3D = _find_skeleton(ghost)
+	if src_skel != null and dst_skel != null:
+		for i in src_skel.get_bone_count():
+			dst_skel.set_bone_pose_position(i, src_skel.get_bone_pose_position(i))
+			dst_skel.set_bone_pose_rotation(i, src_skel.get_bone_pose_rotation(i))
+			dst_skel.set_bone_pose_scale(i, src_skel.get_bone_pose_scale(i))
+	# Override every mesh with a translucent unshaded material so the ghost
+	# reads as an afterimage no matter what materials the character ships with.
+	var meshes: Array = []
+	_collect_mesh_instances(ghost, meshes)
+	var mats: Array[StandardMaterial3D] = []
+	for m in meshes:
+		var mat := StandardMaterial3D.new()
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(GHOST_TINT.r, GHOST_TINT.g, GHOST_TINT.b, GHOST_START_ALPHA)
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		(m as MeshInstance3D).material_override = mat
+		(m as MeshInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mats.append(mat)
+	# Single tween drives alpha on every override material in parallel.
+	var tw := create_tween()
+	tw.tween_method(
+		func(a: float) -> void:
+			for mat in mats:
+				mat.albedo_color.a = a,
+		GHOST_START_ALPHA, 0.0, GHOST_LIFETIME
+	).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_callback(ghost.queue_free)
+
+func _collect_mesh_instances(n: Node, out: Array) -> void:
+	if n is MeshInstance3D:
+		out.append(n)
+	for c in n.get_children():
+		_collect_mesh_instances(c, out)
+
 func _max_air_jumps() -> int:
 	if current_weapon_node != null and current_weapon_node.has_method("extra_air_jumps"):
 		return current_weapon_node.extra_air_jumps()
@@ -594,11 +801,12 @@ func _apply_view_mode() -> void:
 	# In first person we still want the body to throw a shadow on the ground —
 	# SHADOWS_ONLY keeps the mesh invisible to the camera but lets the directional
 	# light treat it as a normal occluder.
-	body_mesh.visible = true
-	body_mesh.cast_shadow = (
-		GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY if first
-		else GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	)
+	if body_mesh != null:
+		body_mesh.visible = true
+		body_mesh.cast_shadow = (
+			GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY if first
+			else GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		)
 	weapon_pivot.visible = not first
 	fpv_pivot.visible = first
 	EventBus.player_view_mode_changed.emit(int(view_mode))
@@ -666,3 +874,82 @@ func punch_fov(delta_fov: float, in_time: float, out_time: float) -> void:
 	var t := create_tween()
 	t.tween_property(camera, "fov", base_fov + delta_fov, in_time).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	t.tween_property(camera, "fov", base_fov, out_time).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+# ── Character animation state machine ────────────────────────────────────────
+# Pick which UAL clip to play this tick based on movement & combat state.
+# Names match Quaternius Universal Animation Library (UAL1_Standard).
+# NOTE: Godot's gltf importer strips the "_Loop" suffix from looping clips and
+# sets loop_mode on the animation instead. UAL's source clips named
+# "Idle_Loop", "Jog_Fwd_Loop", etc. become "Idle", "Jog_Fwd", … after import.
+# Non-looping clips ("Sword_Attack", "Roll", "Jump_Start", "Jump_Land") keep
+# their original names. Use the post-import names here.
+const ANIM_IDLE := "Idle"
+const ANIM_WALK := "Walk"
+const ANIM_JOG := "Jog_Fwd"
+const ANIM_SPRINT := "Sprint"
+const ANIM_JUMP_START := "Jump_Start"
+const ANIM_JUMP_LOOP := "Jump"
+const ANIM_JUMP_LAND := "Jump_Land"
+const ANIM_ROLL := "Roll"
+const ANIM_SWORD_ATTACK := "Sword_Attack"
+
+# Speed thresholds (m/s) for picking between walk/jog/sprint. Speeds are
+# measured on the horizontal plane only — vertical jump speed shouldn't
+# upgrade walk → run.
+const WALK_THRESHOLD: float = 0.35
+const JOG_THRESHOLD: float = 5.0
+const SPRINT_THRESHOLD: float = 11.0
+
+# Brief lock so a deliberately-triggered animation (sword swing, roll, jump
+# transition) isn't immediately stomped by the locomotion picker on the next
+# tick. play_anim_locked(name, dur) sets this; locomotion respects it.
+var _anim_lock_left: float = 0.0
+var _was_grounded: bool = true
+
+func play_anim_locked(name: String, lock_duration: float, custom_speed: float = 1.0) -> void:
+	_anim_lock_left = lock_duration
+	# Force a restart even if `name` matches the currently-playing animation —
+	# otherwise chaining the same one-shot (e.g. two sword swings back-to-back)
+	# would silently no-op in play_anim() and the body wouldn't re-swing.
+	_current_anim = ""
+	play_anim(name, custom_speed)
+
+var _anim_debug_accum: float = 0.0
+const MOVE_THRESHOLD: float = 0.35   # horiz m/s above which we play the jog loop
+
+func _update_character_animation() -> void:
+	if _anim_player == null:
+		return
+	var dt: float = get_physics_process_delta_time()
+	_anim_lock_left = maxf(_anim_lock_left - dt, 0.0)
+	# Jump phase transitions: edge-detect grounded↔airborne so Jump_Start fires
+	# exactly once on takeoff and Jump_Land fires exactly once on landing. Both
+	# are one-shots locked for their clip length; the airborne Jump loop in the
+	# picker below fills the gap between them.
+	var grounded_now: bool = is_on_floor()
+	if _was_grounded and not grounded_now:
+		if _anim_player.has_animation(ANIM_JUMP_START):
+			var sl: float = _anim_player.get_animation(ANIM_JUMP_START).length
+			play_anim_locked(ANIM_JUMP_START, sl, 1.0)
+	elif not _was_grounded and grounded_now:
+		if _anim_player.has_animation(ANIM_JUMP_LAND):
+			var ll: float = _anim_player.get_animation(ANIM_JUMP_LAND).length
+			play_anim_locked(ANIM_JUMP_LAND, ll, 1.0)
+	_was_grounded = grounded_now
+	if _anim_lock_left > 0.0:
+		return
+	var picked: String
+	if dash_time_left > 0.0 and _dash_is_roll:
+		picked = ANIM_ROLL
+		play_anim(picked)
+	elif not grounded_now:
+		picked = ANIM_JUMP_LOOP
+		play_anim(picked)
+	else:
+		var horiz_speed: float = Vector2(velocity.x, velocity.z).length()
+		if horiz_speed < MOVE_THRESHOLD:
+			picked = ANIM_IDLE
+			play_anim(picked)
+		else:
+			picked = ANIM_JOG
+			play_anim(picked, clampf(horiz_speed / 7.0, 0.8, 1.3))
