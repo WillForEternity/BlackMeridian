@@ -65,6 +65,13 @@ var camera_pitch: float = 0.0
 var base_fov: float = 75.0
 var _consume_next_click: bool = false
 
+# Multiplayer pose broadcast. Each peer is the authority on their own player
+# (no client/server prediction); we just push our transform to the others at
+# a fixed rate so they can render a puppet for us. 20 Hz is plenty smooth
+# for the puppet's interpolation step (see training_cave.gd::remote_pose).
+const POSE_SEND_HZ: float = 20.0
+var _pose_send_accum: float = 0.0
+
 const CAM_POS_3P := Vector3(0.5, 0.4, 4.5)
 const CAM_POS_1P := Vector3(0.0, 0.0, 0.0)
 
@@ -404,6 +411,21 @@ func _physics_process(delta: float) -> void:
 	velocity.z -= _floor_platform_velocity.z
 
 	_update_camera_collision()
+
+	# Broadcast pose to peers (no-op in single-player). The relay rebroadcasts
+	# to everyone else in the room; the world scene routes by sender id.
+	if Network.is_in_room():
+		_pose_send_accum += delta
+		var interval: float = 1.0 / POSE_SEND_HZ
+		if _pose_send_accum >= interval:
+			_pose_send_accum = 0.0
+			Network.send_message({
+				"type": "pose",
+				"pos": [global_position.x, global_position.y, global_position.z],
+				"yaw": rotation.y,
+				"pitch": camera_pitch,
+				"slot": int(current_slot),
+			})
 
 # Pulls the third-person camera in along the pivot→camera ray if any solid
 # surface is between the player and the camera's resting position. Keeps the

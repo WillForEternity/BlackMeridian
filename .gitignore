@@ -2,3 +2,10 @@ docs/
 
 # Godot 4 generated cache — regenerated on first project open.
 .godot/
+
+# Relay dev venv — recreated with `pip install -r relay/requirements.txt`.
+relay/.venv/
+
+# Cloudflare Worker dependencies — recreated with `npm install`.
+worker/node_modules/
+worker/.wrangler/

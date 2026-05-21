@@ -1,0 +1,19 @@
+# Fly.io deployment config. Adjust `app` to a unique name you choose,
+# then run: `fly launch --copy-config --no-deploy` once, `fly deploy` after.
+
+app = "blackmeridian-relay"  # rename to whatever — must be globally unique on fly.io
+primary_region = "ord"        # pick the region closest to both players
+
+[build]
+
+[http_service]
+internal_port = 8080
+force_https = true
+auto_stop_machines = "off"     # keep alive so first connection isn't a cold start
+auto_start_machines = true
+min_machines_running = 1
+
+[[vm]]
+cpu_kind = "shared"
+cpus = 1
+memory_mb = 256                # plenty — the relay sits at ~30 MB

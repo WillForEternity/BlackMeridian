@@ -641,6 +641,8 @@ script = ExtResource("11_pd")
 [node name="Spear" type="Node" parent="Player/Weapons"]
 script = ExtResource("12_spear")
 
+[node name="RemotePlayers" type="Node3D" parent="."]
+
 [node name="Targets" type="Node3D" parent="."]
 
 [node name="Target1" parent="Targets" instance=ExtResource("6_target_scn")]

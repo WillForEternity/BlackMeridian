@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="GameTest"
-run/main_scene="res://scenes/training_cave/training_cave.tscn"
+run/main_scene="res://scenes/menu/menu.tscn"
 config/features=PackedStringArray("4.6", "Mobile")
 
 [autoload]
@@ -19,6 +19,7 @@ config/features=PackedStringArray("4.6", "Mobile")
 EventBus="*res://globals/event_bus.gd"
 Vfx="*res://globals/vfx.gd"
 ProjectilePool="*res://weapons/gun/projectile_pool.gd"
+Network="*res://globals/network.gd"
 
 [input]
 
