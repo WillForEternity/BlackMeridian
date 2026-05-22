@@ -270,19 +270,29 @@ var _trail_points: PackedVector3Array = PackedVector3Array()
 var _trail_phase_at: PackedFloat32Array = PackedFloat32Array()
 var _sample_cd: float = 0.0
 var _light: OmniLight3D
+# Effective boost/cruise speeds for THIS missile. Default to the class
+# constants; the launcher may override via setup()'s speed_scale arg so e.g.
+# the passive trickle pair flies slower than the main salvo without needing
+# a separate script.
+var _boost_speed: float = BOOST_SPEED
+var _cruise_speed: float = CRUISE_SPEED
 
 
 # at: spawn position. initial_dir: unit launch direction (salvo fan).
 # src: leviathan (ignored on contact). tgt: homing target.
 # phase: weave angular offset (rad). spin: +1 or −1 swirl direction.
 # type_id: index into CRYSTAL_TYPES (picks model + boost/cruise color).
+# speed_scale: multiplier applied to BOOST_SPEED/CRUISE_SPEED for this
+#   instance. 1.0 = salvo default; pass a smaller value (e.g. 0.667) from
+#   the passive launcher to make those missiles drift slowly without
+#   forking a second script.
 #
 # Note on construction order: the launcher does `MissileScene.new();
 # add_child(m); m.setup(...)`. add_child fires _ready BEFORE setup runs, so
 # the color- and model-dependent visual builds (gem, trail, light) live HERE
 # in setup rather than in _ready — by the time we get here, crystal_type is
 # known and the right model/colors can be picked.
-func setup(at: Vector3, initial_dir: Vector3, src: Node, tgt: Node3D, phase: float = 0.0, spin: float = 1.0, type_id: int = 0) -> void:
+func setup(at: Vector3, initial_dir: Vector3, src: Node, tgt: Node3D, phase: float = 0.0, spin: float = 1.0, type_id: int = 0, speed_scale: float = 1.0) -> void:
 	global_position = at
 	shooter = src
 	target = tgt
@@ -293,13 +303,15 @@ func setup(at: Vector3, initial_dir: Vector3, src: Node, tgt: Node3D, phase: flo
 	_model_path = String(spec["path"])
 	_boost_color = spec["boost_color"]
 	_cruise_color = spec["cruise_color"]
+	_boost_speed = BOOST_SPEED * speed_scale
+	_cruise_speed = CRUISE_SPEED * speed_scale
 	# Deterministic per-missile rifling rate derived from the weave phase so
 	# adjacent missiles spin at slightly different speeds. Sign carries from
 	# weave_spin so half the salvo rifles left-handed and half right-handed.
 	var jitter: float = CRYSTAL_SPIN_JITTER * sin(weave_phase * 1.9)
 	_gem_spin_rate = CRYSTAL_SPIN_RATE * (1.0 + jitter) * weave_spin
 	if initial_dir.length_squared() > 0.0:
-		_velocity = initial_dir.normalized() * BOOST_SPEED
+		_velocity = initial_dir.normalized() * _boost_speed
 		look_at(global_position + _velocity, _safe_up(_velocity))
 	# All color/model-dependent visuals built here (see note above).
 	_build_visual()
@@ -357,7 +369,7 @@ func _compute_command() -> Vector3:
 	match _phase:
 		Phase.BOOST:
 			var ramp_t: float = clampf(_age / BOOST_DURATION, 0.0, 1.0)
-			var desired_speed: float = lerp(BOOST_SPEED, CRUISE_SPEED, ramp_t)
+			var desired_speed: float = lerp(_boost_speed, _cruise_speed, ramp_t)
 			var cur_speed: float = _velocity.length()
 			if cur_speed > 1e-6:
 				var dv: float = desired_speed - cur_speed
@@ -420,7 +432,7 @@ func _apn_guidance(aim_pos: Vector3, terminal: bool) -> Vector3:
 	# Closing speed and time-to-go.
 	var V_r: Vector3 = _est_vel - _velocity
 	var V_c: float = -R_hat.dot(V_r)
-	var V_c_eff: float = maxf(V_c, CRUISE_SPEED * V_C_FLOOR_FRAC)
+	var V_c_eff: float = maxf(V_c, _cruise_speed * V_C_FLOOR_FRAC)
 	var t_go: float = clampf(range_m / V_c_eff, T_GO_FLOOR, T_GO_CEIL)
 
 	# Zero-Effort-Miss: where R will be at intercept if neither party
@@ -497,7 +509,7 @@ func _integrate(a_cmd: Vector3, delta: float) -> void:
 	if _velocity.length_squared() <= 1e-6:
 		return
 	if _phase != Phase.BOOST:
-		_velocity = _velocity.normalized() * CRUISE_SPEED
+		_velocity = _velocity.normalized() * _cruise_speed
 	look_at(global_position + _velocity, _safe_up(_velocity))
 	global_position += _velocity * delta
 

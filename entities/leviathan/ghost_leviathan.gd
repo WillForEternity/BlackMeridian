@@ -46,7 +46,7 @@ var _health: float = MAX_HEALTH
 # chaotic / unfair.
 const LONG_BEAM_DURATION: float = 5.0       # matches LIFETIME in leviathan_long_beam.gd
 const VOLLEY_DURATION: float = 6.0          # total length of a volley salvo
-const ATTACK_BREAK: float = 8.0             # quiet pause between consecutive attacks — combined with the ~6–7 s attack durations this gives a cycle of roughly 15 s per scripted attack (missile salvo / fish-projectile / long beam)
+const ATTACK_BREAK: float = 13.0            # quiet pause between consecutive attacks — combined with the ~6–7 s attack durations this gives a cycle of roughly 20 s per scripted attack (missile salvo / fish-projectile / long beam)
 
 # Passive background fire: independent of the attack-state cycle, the boss
 # spits PASSIVE_MISSILE_COUNT gem missiles at the target every
@@ -55,7 +55,7 @@ const ATTACK_BREAK: float = 8.0             # quiet pause between consecutive at
 # so the player never gets a fully quiet window between scripted attacks.
 # Each missile is a normal homing crystal — same script as the salvo, just
 # spawned in pairs at a slow cadence instead of as a 12+ ring volley.
-const PASSIVE_FIRE_INTERVAL: float = 2.0
+const PASSIVE_FIRE_INTERVAL: float = 4.0
 const PASSIVE_MISSILE_COUNT: int = 2
 # Launch direction biases for passive missiles. Less UP than the main volley
 # fountain (we don't need a tall VLS arc for a constant drip), more FORWARD
@@ -64,6 +64,10 @@ const PASSIVE_MISSILE_UP_BIAS: float = 0.55
 const PASSIVE_MISSILE_RADIAL_BIAS: float = 0.35
 const PASSIVE_MISSILE_FORWARD_BIAS: float = 0.95
 const PASSIVE_MISSILE_RING_RADIUS: float = 1.5
+# Speed multiplier on the passive pair. 2/3 the salvo missile's tuned speed,
+# so passive missiles are visibly slower in the air — easier to spot and
+# dodge than the burst-tier missiles fired during a scripted volley.
+const PASSIVE_MISSILE_SPEED_SCALE: float = 2.0 / 3.0
 const VOLLEY_SHOT_MIN_GAP: float = 0.04     # minimum gap between successive volley shots
 const VOLLEY_SHOT_MAX_GAP: float = 0.18     # maximum gap — randomized so it reads as sporadic
 const VOLLEY_SPRAY_RADIUS: float = 1.0      # 1 m spread radius at target distance
@@ -138,7 +142,7 @@ var _next_attack: int = AttackState.MISSILE_VOLLEY
 var _volley_shot_cd: float = 0.0
 # Initialized to PASSIVE_FIRE_INTERVAL so the first passive burst lands a
 # beat after spawn, not on the spawn frame.
-var _passive_fire_cd: float = 2.0
+var _passive_fire_cd: float = 4.0
 # Staggered missile launch state. _missile_queue holds pending launches as
 # dicts { t, at, dir, phase, spin }; t is seconds-since-state-began. The queue
 # is drained in _tick_attacks during the MISSILE_VOLLEY state, popping any
@@ -466,7 +470,7 @@ func _fire_passive_missile_pair() -> void:
 		var ctype: int = randi() % 3
 		var m = MissileScene.new()
 		get_tree().current_scene.add_child(m)
-		m.setup(at, dir, self, _target, phase, spin, ctype)
+		m.setup(at, dir, self, _target, phase, spin, ctype, PASSIVE_MISSILE_SPEED_SCALE)
 
 func _find_closest_player() -> Node3D:
 	var scene: Node = get_tree().current_scene
