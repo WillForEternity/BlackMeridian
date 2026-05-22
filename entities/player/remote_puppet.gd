@@ -11,14 +11,24 @@ const SMOOTHING: float = 14.0
 const BODY_HEIGHT: float = 2.0
 const BODY_RADIUS: float = 0.4
 const WEAPON_NAMES := ["Sword", "Gun", "Sniper", "Light Portal", "Dark Portal"]
+const RANGER_PATH: String = "res://assets/models/characters/quaternius/Male_Ranger.gltf"
 
 var _peer_id: int = 0
-var _body: MeshInstance3D
+var _body: Node3D
 var _label: Label3D
 var _target_position: Vector3
 var _target_yaw: float = 0.0
 var _current_slot: int = -1
 var _has_first_pose: bool = false
+# Floating health bar above the puppet. Two billboarded PlaneMesh layers — a
+# dark backing and a green fill whose X-scale matches hp / hp_max.
+var _hp_bg: MeshInstance3D
+var _hp_fill: MeshInstance3D
+var _hp_fill_mat: StandardMaterial3D
+var _hp_ratio: float = 1.0
+const HP_BAR_WIDTH: float = 1.2
+const HP_BAR_HEIGHT: float = 0.12
+const HP_BAR_Y_OFFSET: float = 2.45
 
 func setup(peer_id: int) -> void:
 	_peer_id = peer_id
@@ -37,19 +47,64 @@ func _ready() -> void:
 	shape.position = Vector3(0, BODY_HEIGHT * 0.5, 0)
 	add_child(shape)
 
-	var capsule := CapsuleMesh.new()
-	capsule.radius = BODY_RADIUS
-	capsule.height = BODY_HEIGHT
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.95, 0.55, 0.35)
-	mat.emission_enabled = true
-	mat.emission = Color(0.6, 0.3, 0.15)
-	mat.emission_energy_multiplier = 0.25
-	capsule.material = mat
-	_body = MeshInstance3D.new()
-	_body.mesh = capsule
-	_body.position = Vector3(0, BODY_HEIGHT * 0.5, 0)
+	# Use the same Quaternius ranger mesh the local player uses so other
+	# players read as actual characters instead of orange capsules. The local
+	# player's Character is scaled 0.5 under a 2× player root (net 1×); here
+	# the puppet root has no scale, so instance the GLB at scale 1.
+	var packed: PackedScene = load(RANGER_PATH) as PackedScene
+	if packed != null:
+		_body = packed.instantiate() as Node3D
+	if _body == null:
+		# Fallback to a capsule if the model fails to load (kept so a missing
+		# asset doesn't leave the puppet invisible).
+		var capsule := CapsuleMesh.new()
+		capsule.radius = BODY_RADIUS
+		capsule.height = BODY_HEIGHT
+		var mi := MeshInstance3D.new()
+		mi.mesh = capsule
+		_body = mi
+		_body.position = Vector3(0, BODY_HEIGHT * 0.5, 0)
+	else:
+		# Ranger's pivot is at the feet; place it at puppet origin so the
+		# capsule collision (feet at y=0, head at y=BODY_HEIGHT) lines up.
+		_body.position = Vector3.ZERO
 	add_child(_body)
+
+	# Health bar: two billboarded planes. Backing reads damage taken (dark
+	# behind the green fill); fill shrinks toward the left as HP drops.
+	var bg_mat := StandardMaterial3D.new()
+	bg_mat.albedo_color = Color(0.05, 0.05, 0.06, 0.85)
+	bg_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bg_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	bg_mat.billboard_keep_scale = true
+	bg_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bg_mat.no_depth_test = true
+	var bg_mesh := PlaneMesh.new()
+	bg_mesh.size = Vector2(HP_BAR_WIDTH, HP_BAR_HEIGHT)
+	bg_mesh.orientation = PlaneMesh.FACE_Z
+	bg_mesh.material = bg_mat
+	_hp_bg = MeshInstance3D.new()
+	_hp_bg.mesh = bg_mesh
+	_hp_bg.position = Vector3(0, HP_BAR_Y_OFFSET, 0)
+	_hp_bg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_hp_bg)
+
+	_hp_fill_mat = StandardMaterial3D.new()
+	_hp_fill_mat.albedo_color = Color(0.35, 0.95, 0.35, 1.0)
+	_hp_fill_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_hp_fill_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	_hp_fill_mat.billboard_keep_scale = true
+	_hp_fill_mat.no_depth_test = true
+	var fill_mesh := PlaneMesh.new()
+	# Slightly smaller than the backing so a thin dark border remains visible.
+	fill_mesh.size = Vector2(HP_BAR_WIDTH - 0.04, HP_BAR_HEIGHT - 0.03)
+	fill_mesh.orientation = PlaneMesh.FACE_Z
+	fill_mesh.material = _hp_fill_mat
+	_hp_fill = MeshInstance3D.new()
+	_hp_fill.mesh = fill_mesh
+	_hp_fill.position = Vector3(0, HP_BAR_Y_OFFSET, 0.001)
+	_hp_fill.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_hp_fill)
 
 	_label = Label3D.new()
 	_label.position = Vector3(0, BODY_HEIGHT + 0.4, 0)
@@ -71,6 +126,29 @@ func set_pose(pos: Vector3, yaw: float, slot: int) -> void:
 	if slot != _current_slot:
 		_current_slot = slot
 		_refresh_label()
+
+func set_health(hp: float, hp_max: float) -> void:
+	if hp_max <= 0.0:
+		return
+	var new_ratio: float = clampf(hp / hp_max, 0.0, 1.0)
+	if absf(new_ratio - _hp_ratio) < 0.001:
+		return
+	_hp_ratio = new_ratio
+	if _hp_fill != null:
+		# Billboards keep the mesh facing the camera; scaling along X anchors
+		# at the center, so offset X by half the missing width to keep the
+		# fill aligned to the bar's left edge.
+		var max_w: float = HP_BAR_WIDTH - 0.04
+		_hp_fill.scale = Vector3(maxf(_hp_ratio, 0.0001), 1.0, 1.0)
+		_hp_fill.position.x = -(1.0 - _hp_ratio) * max_w * 0.5
+	if _hp_fill_mat != null:
+		# Tint shifts green → yellow → red as HP drops.
+		var c := Color(0.35, 0.95, 0.35, 1.0)
+		if _hp_ratio < 0.6:
+			c = Color(0.95, 0.85, 0.25, 1.0)
+		if _hp_ratio < 0.3:
+			c = Color(0.95, 0.3, 0.25, 1.0)
+		_hp_fill_mat.albedo_color = c
 
 func _refresh_label() -> void:
 	if _label == null:

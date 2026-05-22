@@ -92,6 +92,8 @@ func _handle_pose(msg: Dictionary) -> void:
 		return
 	var pos: Vector3 = Vector3(float(pos_arr[0]), float(pos_arr[1]), float(pos_arr[2]))
 	puppet.set_pose(pos, float(msg.get("yaw", 0.0)), int(msg.get("slot", -1)))
+	if puppet.has_method("set_health"):
+		puppet.set_health(float(msg.get("hp", 0.0)), float(msg.get("hp_max", 1.0)))
 	# pitch is in msg["pitch"] — reserved for a future head/aim indicator.
 
 func _spawn_puppet(peer_id: int) -> Node:

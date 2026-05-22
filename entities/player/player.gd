@@ -1022,6 +1022,8 @@ func _physics_process(delta: float) -> void:
 				"yaw": rotation.y,
 				"pitch": camera_pitch,
 				"slot": int(current_slot),
+				"hp": _health,
+				"hp_max": MAX_HEALTH,
 			})
 
 # Pulls the third-person camera in along the pivot→camera ray if any solid
@@ -1316,21 +1318,39 @@ func register_hit_heavy() -> void:
 # the world-space ray of the hit, used to lightly tilt the recoil camera so
 # the flinch reads as a direction (later when we have HP, the `amount` field
 # can decrement it).
-const MAX_HEALTH: float = 100.0
+const MAX_HEALTH: float = 25.0
 const REGEN_DELAY: float = 5.0
 const REGEN_PER_SEC: float = 10.0
 var _health: float = MAX_HEALTH
 var _regen_cooldown: float = 0.0
 var _health_bar: ProgressBar
+# Captured the first time take_damage runs, so it's the player's actual
+# spawn-in position regardless of cmdline --spawn overrides or scene tweaks.
+var _spawn_position: Vector3 = Vector3.INF
+var _spawn_yaw: float = 0.0
 
 func take_damage(amount: int, _direction: Vector3) -> void:
+	if _spawn_position == Vector3.INF:
+		_spawn_position = global_position
+		_spawn_yaw = rotation.y
 	_health = maxf(_health - float(amount), 0.0)
 	_regen_cooldown = REGEN_DELAY
 	_refresh_health_bar()
+	if _health <= 0.0:
+		_respawn()
+		return
 	if _anim_player != null and _anim_player.has_animation("Hit_Chest"):
 		var hl: float = _anim_player.get_animation("Hit_Chest").length
 		play_anim_locked("Hit_Chest", minf(hl, 0.35), 1.3)
 	_apply_hitstop(0.45, 0.08, 0.05)
+
+func _respawn() -> void:
+	global_position = _spawn_position
+	rotation.y = _spawn_yaw
+	velocity = Vector3.ZERO
+	_health = MAX_HEALTH
+	_regen_cooldown = 0.0
+	_refresh_health_bar()
 
 func _tick_health(delta: float) -> void:
 	if _regen_cooldown > 0.0:
