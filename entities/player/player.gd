@@ -88,11 +88,9 @@ var CAM_POS_1P: Vector3 = Vector3(0.0, 0.5, -0.05)
 # Filled in _ready: BoneAttachment3D on hand_r that the TPV SwordRig is moved
 # under so the katana tracks the right hand across all animations.
 var _hand_r_socket: BoneAttachment3D
-# F2 calibration panel — lets the user drag the sword's grip-in-hand pose
-# in real time. The position/rotation drive the reparented SwordRig (whose
-# origin is the rotation pivot), and the model-offset drives the sword
-# model *within* SwordRig so the user can park the grip onto that pivot.
-var _calib_panel: Control
+# Sword grip-in-hand pose, baked from a previous F2 calibration session.
+# Applied to the reparented SwordRig (whose origin is the rotation pivot)
+# and to the sword model *within* SwordRig so the grip sits on that pivot.
 var _sword_calib_pos: Vector3 = Vector3(0.0, 0.07, 0.0)
 var _sword_calib_rot: Vector3 = Vector3(deg_to_rad(153.0), 0.0, 0.0)
 # Accumulated yaw offset on CameraPitchPivot used only while the calibration
@@ -106,11 +104,8 @@ var _calib_yaw_offset: float = 0.0
 var _sword_model_offset: Vector3 = Vector3(0.0, 0.0, 0.05)
 # Reference to the visible sword model node under the TPV SwordRig.
 var _sword_model_node: Node3D
-# F3 calibration panel — same idea as the sword's, but drives the gun's
-# Model node (the sci-fi gun GLB instance) under GunRig. The rig itself is
-# overwritten by gun.gd's look_at() every tick, so the Model child is the
-# only stable handle for translate/rotate/scale tweaks.
-var _gun_calib_panel: Control
+# Gun pose, baked from a previous F3 calibration session. Drives the gun's
+# Model node (the sci-fi gun GLB instance) under GunRig.
 var _gun_calib_pos: Vector3 = Vector3(-0.02, 0.215, -0.01)
 var _gun_calib_rot: Vector3 = Vector3(deg_to_rad(9.0), deg_to_rad(93.0), deg_to_rad(76.0))
 var _gun_calib_scale: float = 0.052
@@ -120,6 +115,17 @@ var _gun_calib_scale: float = 0.052
 var _gun_muzzle_offset: Vector3 = Vector3(7.0, 0.0, 0.0)
 var _gun_model_node: Node3D
 var _gun_muzzle_node: Marker3D
+# F4 calibration panel for the railgun. The sniper has no Model wrapper —
+# its primitives are direct children of SniperRig — so calibration applies
+# to SniperRig itself, and the muzzle marker (still a child of SniperRig)
+# rides along automatically.
+var _sniper_calib_panel: Control
+var _sniper_calib_pos: Vector3 = Vector3(-0.02, 0.06, 0.11)
+var _sniper_calib_rot: Vector3 = Vector3(deg_to_rad(102.0), deg_to_rad(141.0), deg_to_rad(141.0))
+var _sniper_calib_scale: float = 0.47
+var _sniper_muzzle_offset: Vector3 = Vector3(0.0, -0.02, -1.18)
+var _sniper_rig_node: Node3D
+var _sniper_muzzle_node: Marker3D
 
 @onready var body_mesh: MeshInstance3D = get_node_or_null("Body") as MeshInstance3D
 var _body_base_scale: Vector3 = Vector3.ONE
@@ -397,8 +403,7 @@ func _ready() -> void:
 	_calibrate_fpv_eye_height()
 	_apply_view_mode()
 	_apply_weapon_visibility()
-	_build_sword_calib_panel()
-	_build_gun_calib_panel()
+	_build_sniper_calib_panel()
 
 # Move the TPV SwordRig from WeaponPivot to a BoneAttachment3D on the
 # right-hand bone so the katana stays in the hand during run/jump/swing.
@@ -463,6 +468,17 @@ func _attach_sword_to_hand() -> void:
 			_gun_model_node.add_child(muzzle)
 			_gun_muzzle_node = muzzle
 		_apply_gun_calib()
+	# Same treatment for the SniperRig — bone-attached, no per-tick look_at.
+	# The rig itself holds all the railgun primitives so calibration applies
+	# directly to it; the muzzle (already a SniperRig child) rides along.
+	var sniper_rig: Node3D = weapon_pivot.get_node_or_null("SniperRig") as Node3D
+	if sniper_rig != null:
+		weapon_pivot.remove_child(sniper_rig)
+		attach.add_child(sniper_rig)
+		sniper_rig.add_to_group("weapon_attached")
+		_sniper_rig_node = sniper_rig
+		_sniper_muzzle_node = sniper_rig.get_node_or_null("Muzzle") as Marker3D
+		_apply_sniper_calib()
 
 # Mirror _sword_calib_pos/_rot onto the reparented SwordRig and push the same
 # values into sword.gd's rest-pose cache so equip() can't snap them back.
@@ -479,111 +495,11 @@ func _apply_sword_calib_to(sword_rig: Node3D) -> void:
 	if _sword_model_node != null and is_instance_valid(_sword_model_node):
 		_sword_model_node.position = _sword_model_offset
 
-func _build_sword_calib_panel() -> void:
-	var ui: CanvasLayer = get_tree().current_scene.get_node_or_null("UI") as CanvasLayer
-	if ui == null:
-		return
-	var panel := PanelContainer.new()
-	panel.name = "SwordCalibPanel"
-	panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	panel.position = Vector2(20, 60)
-	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 4)
-	panel.add_child(vb)
-	var title := Label.new()
-	title.text = "Sword calibration  (F2 to toggle)"
-	vb.add_child(title)
-	# Each tuple: label, min, max, step, initial, idx
-	var defs: Array = [
-		["rig pos x", -2.0, 2.0, 0.005, _sword_calib_pos.x, 0],
-		["rig pos y", -2.0, 2.0, 0.005, _sword_calib_pos.y, 1],
-		["rig pos z", -2.0, 2.0, 0.005, _sword_calib_pos.z, 2],
-		["rot x (deg)", -180.0, 180.0, 1.0, rad_to_deg(_sword_calib_rot.x), 3],
-		["rot y (deg)", -180.0, 180.0, 1.0, rad_to_deg(_sword_calib_rot.y), 4],
-		["rot z (deg)", -180.0, 180.0, 1.0, rad_to_deg(_sword_calib_rot.z), 5],
-		# Move the visible sword model within SwordRig so the grip lands at the
-		# rig origin (= rotation pivot). Once the grip is at (0,0,0), rotations
-		# pivot around the hand instead of orbiting the sword around it.
-		["model dx", -5.0, 5.0, 0.01, _sword_model_offset.x, 6],
-		["model dy", -5.0, 5.0, 0.01, _sword_model_offset.y, 7],
-		["model dz", -5.0, 5.0, 0.01, _sword_model_offset.z, 8],
-	]
-	for d in defs:
-		_add_calib_row(vb, d)
-	var swing_btn := Button.new()
-	swing_btn.text = "Test swing"
-	swing_btn.pressed.connect(_test_swing)
-	vb.add_child(swing_btn)
-	var btn := Button.new()
-	btn.text = "Print to console"
-	btn.pressed.connect(_print_sword_calib)
-	vb.add_child(btn)
-	ui.add_child(panel)
-	panel.visible = false
-	_calib_panel = panel
-
-func _add_calib_row(vb: VBoxContainer, d: Array) -> void:
-	var row := HBoxContainer.new()
-	vb.add_child(row)
-	var lbl := Label.new()
-	lbl.text = String(d[0])
-	lbl.custom_minimum_size = Vector2(86, 0)
-	row.add_child(lbl)
-	var slider := HSlider.new()
-	slider.min_value = float(d[1])
-	slider.max_value = float(d[2])
-	slider.step = float(d[3])
-	slider.value = float(d[4])
-	slider.custom_minimum_size = Vector2(220, 0)
-	row.add_child(slider)
-	var vlbl := Label.new()
-	vlbl.text = "%.3f" % float(d[4])
-	vlbl.custom_minimum_size = Vector2(60, 0)
-	row.add_child(vlbl)
-	var idx: int = int(d[5])
-	slider.value_changed.connect(func(v: float) -> void:
-		vlbl.text = "%.3f" % v
-		_on_calib_changed(idx, v)
-	)
-
-func _on_calib_changed(idx: int, v: float) -> void:
-	match idx:
-		0: _sword_calib_pos.x = v
-		1: _sword_calib_pos.y = v
-		2: _sword_calib_pos.z = v
-		3: _sword_calib_rot.x = deg_to_rad(v)
-		4: _sword_calib_rot.y = deg_to_rad(v)
-		5: _sword_calib_rot.z = deg_to_rad(v)
-		6: _sword_model_offset.x = v
-		7: _sword_model_offset.y = v
-		8: _sword_model_offset.z = v
-	if _hand_r_socket != null:
-		_apply_sword_calib_to(_hand_r_socket.get_node_or_null("SwordRig") as Node3D)
-
-func _test_swing() -> void:
-	if _sword == null:
-		return
-	# Bypass cooldown so the button can be spammed for back-to-back tests.
-	_sword.set("attack_cd", 0.0)
-	_sword.call("on_attack_pressed")
-
-func _print_sword_calib() -> void:
-	print("[Sword calib] sword_rig.position = ", _sword_calib_pos)
-	print("[Sword calib] sword_rig.rotation_deg = (",
-		rad_to_deg(_sword_calib_rot.x), ", ",
-		rad_to_deg(_sword_calib_rot.y), ", ",
-		rad_to_deg(_sword_calib_rot.z), ")")
-	print("[Sword calib] sword_model_node.position = ", _sword_model_offset)
-
-# True when either the sword or gun calibration panel is currently open. Used
-# to gate input handling that needs to differ in inspection mode (mouse
-# recapture, freeze, etc.).
+# True while the railgun calibration panel is open. Used to gate input
+# handling that needs to differ in inspection mode (mouse recapture, freeze,
+# camera rotate-around-frozen-body).
 func _is_calibrating() -> bool:
-	if _calib_panel != null and _calib_panel.visible:
-		return true
-	if _gun_calib_panel != null and _gun_calib_panel.visible:
-		return true
-	return false
+	return _sniper_calib_panel != null and _sniper_calib_panel.visible
 
 # Apply _gun_calib_pos/_rot/_scale to the GunRig's Model child. Safe to call
 # before the rig is wired — it no-ops when the cached node ref is null.
@@ -595,44 +511,55 @@ func _apply_gun_calib() -> void:
 	if _gun_muzzle_node != null and is_instance_valid(_gun_muzzle_node):
 		_gun_muzzle_node.position = _gun_muzzle_offset
 
-func _build_gun_calib_panel() -> void:
+# Apply _sniper_calib_* to the SniperRig and muzzle marker. Unlike the gun,
+# calibration goes directly on SniperRig because the railgun's parts are
+# direct children (no Model wrapper).
+func _apply_sniper_calib() -> void:
+	if _sniper_rig_node != null and is_instance_valid(_sniper_rig_node):
+		_sniper_rig_node.position = _sniper_calib_pos
+		_sniper_rig_node.rotation = _sniper_calib_rot
+		_sniper_rig_node.scale = Vector3.ONE * _sniper_calib_scale
+	if _sniper_muzzle_node != null and is_instance_valid(_sniper_muzzle_node):
+		_sniper_muzzle_node.position = _sniper_muzzle_offset
+
+func _build_sniper_calib_panel() -> void:
 	var ui: CanvasLayer = get_tree().current_scene.get_node_or_null("UI") as CanvasLayer
 	if ui == null:
 		return
 	var panel := PanelContainer.new()
-	panel.name = "GunCalibPanel"
+	panel.name = "SniperCalibPanel"
 	panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	panel.position = Vector2(20, 60)
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 4)
 	panel.add_child(vb)
 	var title := Label.new()
-	title.text = "Gun calibration  (F3 to toggle)"
+	title.text = "Railgun calibration  (F4 to toggle)"
 	vb.add_child(title)
 	var defs: Array = [
-		["pos x", -1.0, 1.0, 0.005, _gun_calib_pos.x, 0],
-		["pos y", -1.0, 1.0, 0.005, _gun_calib_pos.y, 1],
-		["pos z", -1.0, 1.0, 0.005, _gun_calib_pos.z, 2],
-		["rot x (deg)", -180.0, 180.0, 1.0, rad_to_deg(_gun_calib_rot.x), 3],
-		["rot y (deg)", -180.0, 180.0, 1.0, rad_to_deg(_gun_calib_rot.y), 4],
-		["rot z (deg)", -180.0, 180.0, 1.0, rad_to_deg(_gun_calib_rot.z), 5],
-		["scale", 0.001, 0.2, 0.001, _gun_calib_scale, 6],
-		# Muzzle in MODEL-local space — values in the bbox range (x: -7..7).
-		["muzzle x", -10.0, 10.0, 0.05, _gun_muzzle_offset.x, 7],
-		["muzzle y", -10.0, 10.0, 0.05, _gun_muzzle_offset.y, 8],
-		["muzzle z", -10.0, 10.0, 0.05, _gun_muzzle_offset.z, 9],
+		["pos x", -1.0, 1.0, 0.005, _sniper_calib_pos.x, 0],
+		["pos y", -1.0, 1.0, 0.005, _sniper_calib_pos.y, 1],
+		["pos z", -1.0, 1.0, 0.005, _sniper_calib_pos.z, 2],
+		["rot x (deg)", -180.0, 180.0, 1.0, rad_to_deg(_sniper_calib_rot.x), 3],
+		["rot y (deg)", -180.0, 180.0, 1.0, rad_to_deg(_sniper_calib_rot.y), 4],
+		["rot z (deg)", -180.0, 180.0, 1.0, rad_to_deg(_sniper_calib_rot.z), 5],
+		["scale", 0.01, 3.0, 0.01, _sniper_calib_scale, 6],
+		# Muzzle in RIG-local coords (SniperRig holds the primitives directly).
+		["muzzle x", -2.0, 2.0, 0.01, _sniper_muzzle_offset.x, 7],
+		["muzzle y", -2.0, 2.0, 0.01, _sniper_muzzle_offset.y, 8],
+		["muzzle z", -2.0, 2.0, 0.01, _sniper_muzzle_offset.z, 9],
 	]
 	for d in defs:
-		_add_gun_calib_row(vb, d)
+		_add_sniper_calib_row(vb, d)
 	var print_btn := Button.new()
 	print_btn.text = "Print to console"
-	print_btn.pressed.connect(_print_gun_calib)
+	print_btn.pressed.connect(_print_sniper_calib)
 	vb.add_child(print_btn)
 	ui.add_child(panel)
 	panel.visible = false
-	_gun_calib_panel = panel
+	_sniper_calib_panel = panel
 
-func _add_gun_calib_row(vb: VBoxContainer, d: Array) -> void:
+func _add_sniper_calib_row(vb: VBoxContainer, d: Array) -> void:
 	var row := HBoxContainer.new()
 	vb.add_child(row)
 	var lbl := Label.new()
@@ -653,64 +580,41 @@ func _add_gun_calib_row(vb: VBoxContainer, d: Array) -> void:
 	var idx: int = int(d[5])
 	slider.value_changed.connect(func(v: float) -> void:
 		vlbl.text = "%.4f" % v
-		_on_gun_calib_changed(idx, v)
+		_on_sniper_calib_changed(idx, v)
 	)
 
-func _on_gun_calib_changed(idx: int, v: float) -> void:
+func _on_sniper_calib_changed(idx: int, v: float) -> void:
 	match idx:
-		0: _gun_calib_pos.x = v
-		1: _gun_calib_pos.y = v
-		2: _gun_calib_pos.z = v
-		3: _gun_calib_rot.x = deg_to_rad(v)
-		4: _gun_calib_rot.y = deg_to_rad(v)
-		5: _gun_calib_rot.z = deg_to_rad(v)
-		6: _gun_calib_scale = v
-		7: _gun_muzzle_offset.x = v
-		8: _gun_muzzle_offset.y = v
-		9: _gun_muzzle_offset.z = v
-	_apply_gun_calib()
+		0: _sniper_calib_pos.x = v
+		1: _sniper_calib_pos.y = v
+		2: _sniper_calib_pos.z = v
+		3: _sniper_calib_rot.x = deg_to_rad(v)
+		4: _sniper_calib_rot.y = deg_to_rad(v)
+		5: _sniper_calib_rot.z = deg_to_rad(v)
+		6: _sniper_calib_scale = v
+		7: _sniper_muzzle_offset.x = v
+		8: _sniper_muzzle_offset.y = v
+		9: _sniper_muzzle_offset.z = v
+	_apply_sniper_calib()
 
-func _print_gun_calib() -> void:
-	print("[Gun calib] model.position = ", _gun_calib_pos)
-	print("[Gun calib] model.rotation_deg = (",
-		rad_to_deg(_gun_calib_rot.x), ", ",
-		rad_to_deg(_gun_calib_rot.y), ", ",
-		rad_to_deg(_gun_calib_rot.z), ")")
-	print("[Gun calib] model.scale = ", _gun_calib_scale)
-	print("[Gun calib] muzzle.position = ", _gun_muzzle_offset)
+func _print_sniper_calib() -> void:
+	print("[Sniper calib] rig.position = ", _sniper_calib_pos)
+	print("[Sniper calib] rig.rotation_deg = (",
+		rad_to_deg(_sniper_calib_rot.x), ", ",
+		rad_to_deg(_sniper_calib_rot.y), ", ",
+		rad_to_deg(_sniper_calib_rot.z), ")")
+	print("[Sniper calib] rig.scale = ", _sniper_calib_scale)
+	print("[Sniper calib] muzzle.position = ", _sniper_muzzle_offset)
 
-func _toggle_gun_calib_panel() -> void:
-	if _gun_calib_panel == null:
+func _toggle_sniper_calib_panel() -> void:
+	if _sniper_calib_panel == null:
 		return
-	_gun_calib_panel.visible = not _gun_calib_panel.visible
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if _gun_calib_panel.visible else Input.MOUSE_MODE_CAPTURED
-	if _gun_calib_panel.visible:
-		# Equip the gun so the calibrated weapon is the visible one.
-		if current_slot != WeaponSlot.GUN:
-			_equip(WeaponSlot.GUN)
+	_sniper_calib_panel.visible = not _sniper_calib_panel.visible
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if _sniper_calib_panel.visible else Input.MOUSE_MODE_CAPTURED
+	if _sniper_calib_panel.visible:
+		if current_slot != WeaponSlot.SNIPER:
+			_equip(WeaponSlot.SNIPER)
 	else:
-		_calib_yaw_offset = 0.0
-		pitch_pivot.rotation = Vector3(camera_pitch, 0.0, 0.0)
-
-func _toggle_sword_calib_panel() -> void:
-	if _calib_panel == null:
-		return
-	_calib_panel.visible = not _calib_panel.visible
-	# Release mouse capture while the panel is open so sliders can be dragged.
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if _calib_panel.visible else Input.MOUSE_MODE_CAPTURED
-	# Equip the sword and pin it drawn so the calibrated grip pose is visible
-	# the entire time the panel is open — no auto-sheathe, no waiting on a
-	# quick-draw tween.
-	if _calib_panel.visible:
-		if current_slot != WeaponSlot.SWORD:
-			_equip(WeaponSlot.SWORD)
-		if _sword != null and _sword.has_method("set_force_drawn"):
-			_sword.call("set_force_drawn", true)
-	else:
-		if _sword != null and _sword.has_method("set_force_drawn"):
-			_sword.call("set_force_drawn", false)
-		# Snap the camera pivot back so the next mouse-look call doesn't start
-		# from a 270° yaw offset accumulated during inspection.
 		_calib_yaw_offset = 0.0
 		pitch_pivot.rotation = Vector3(camera_pitch, 0.0, 0.0)
 
@@ -755,11 +659,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				if _prompt_label != null:
 					_prompt_label.visible = false
 			return
-		if ek.keycode == KEY_F2:
-			_toggle_sword_calib_panel()
-			return
-		if ek.keycode == KEY_F3:
-			_toggle_gun_calib_panel()
+		if ek.keycode == KEY_F4:
+			_toggle_sniper_calib_panel()
 			return
 	if event.is_action_pressed("ui_cancel"):
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -1418,7 +1319,7 @@ func _update_character_animation() -> void:
 				and _sword.has_method("is_drawn") \
 				and bool(_sword.call("is_drawn")) \
 				and _anim_player.has_animation("Sword_Idle")
-			var pistol_idle: bool = current_slot == WeaponSlot.GUN \
+			var pistol_idle: bool = (current_slot == WeaponSlot.GUN or current_slot == WeaponSlot.SNIPER) \
 				and _anim_player.has_animation("Pistol_Idle")
 			if sword_drawn:
 				picked = "Sword_Idle"

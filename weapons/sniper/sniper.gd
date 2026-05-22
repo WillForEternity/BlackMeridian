@@ -65,11 +65,10 @@ func unequip() -> void:
 	rig_fpv.rotation = Vector3.ZERO
 
 func tick(delta: float) -> void:
-	if not _is_fpv and rig_tpv.visible and not _slamming:
-		var aim: Vector3 = player.get_aim_point()
-		var to_aim := aim - rig_tpv.global_position
-		if to_aim.length_squared() > 0.04:
-			rig_tpv.look_at(aim, Vfx.safe_up(to_aim.normalized()))
+	# TPV look_at intentionally removed (mirrors the plasma-gun change). The
+	# rig is now bone-attached to hand_r in player.gd, and the body animation
+	# drives its orientation; bullets still aim through the crosshair because
+	# the spawn dir is recomputed from the muzzle marker in _fire.
 	if _charging:
 		_charge_t = minf(_charge_t + delta, charge_time)
 		_update_charge_visuals()

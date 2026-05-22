@@ -17,6 +17,10 @@ const COMBO_WINDOW: float = 1.0
 const COMBO_MIN_GAP: float = 0.5
 const COMBO_COUNT: int = 3
 const TRAIL_SAMPLES: int = 14
+# Speed_scale applied to the body's Sword_Attack clip after the strike
+# moment (data.strike_end). Higher = the draw-back / re-shoulder portion
+# of the swing plays faster, blending into Idle without an obvious snap.
+const SWING_RECOVERY_SPEED: float = 2.5
 
 # Rest pose: blade tipped +45° up-forward at right hip (chudan-ish low guard).
 # FPV uses the same pitch baseline so combo keyframes (which are offsets from
@@ -569,13 +573,22 @@ func _swing() -> void:
 
 	var data := _combo_data(_combo_index)
 	# Drive the character body's sword swing animation in parallel with the
-	# weapon-rig tween. Lock is roughly the combo's total duration so the
-	# locomotion picker doesn't stomp the swing mid-strike.
+	# weapon-rig tween. The body clip used to be locked for total*0.85 at
+	# constant speed — the locomotion picker would then reclaim control mid-
+	# recovery and snap the body to Idle, which read as "swing → teleport
+	# to standing." Now we run the windup+strike at 1.1× and the recovery
+	# (everything after data.strike_end) at SWING_RECOVERY_SPEED, so the
+	# draw-back motion still plays but blends to idle faster instead of
+	# being clipped.
+	var swing_speed: float = 1.1
+	var s_end: float = float(data.strike_end)
+	var swing_total: float = 0.0
+	for kf in data.keyframes:
+		swing_total += float(kf.dur)
 	if player and player.has_method("play_anim_locked"):
-		var total: float = 0.0
-		for kf in data.keyframes:
-			total += float(kf.dur)
-		player.play_anim_locked("Sword_Attack", total * 0.85, 1.1)
+		var windup_dur: float = s_end / swing_speed
+		var recovery_dur: float = maxf(swing_total - s_end, 0.0) / SWING_RECOVERY_SPEED
+		player.play_anim_locked("Sword_Attack", windup_dur + recovery_dur, swing_speed)
 	# FPV rig keeps the keyframe tween (it lives off the camera, not a bone).
 	# TPV rig is bone-attached — the body's Sword_Attack clip already swings
 	# the hand, so adding the keyframe tween on top double-animates and
@@ -619,6 +632,14 @@ func _swing() -> void:
 	_active_swing_tween.tween_interval(strike_end - strike_start)
 	_active_swing_tween.tween_callback(func():
 		hit_area.monitoring = false
+		# Speed up the Sword_Attack recovery (everything past strike_end).
+		# The lock duration was sized to match this faster playback, so the
+		# clip ends right as the locomotion picker takes over for a smooth
+		# blend back into Idle.
+		if player != null:
+			var ap: AnimationPlayer = player.get("_anim_player") as AnimationPlayer
+			if ap != null:
+				ap.speed_scale = SWING_RECOVERY_SPEED
 	)
 	_active_swing_tween.tween_interval(maxf(trail_end - strike_end, 0.0))
 	_active_swing_tween.tween_callback(func():
