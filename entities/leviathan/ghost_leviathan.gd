@@ -46,7 +46,7 @@ var _health: float = MAX_HEALTH
 # chaotic / unfair.
 const LONG_BEAM_DURATION: float = 5.0       # matches LIFETIME in leviathan_long_beam.gd
 const VOLLEY_DURATION: float = 6.0          # total length of a volley salvo
-const ATTACK_BREAK: float = 2.5             # quiet pause between consecutive attacks
+const ATTACK_BREAK: float = 10.0            # quiet pause between consecutive attacks — sized to roughly double the cycle vs the original 2.5 s, so attacks land at half the prior frequency
 const VOLLEY_SHOT_MIN_GAP: float = 0.04     # minimum gap between successive volley shots
 const VOLLEY_SHOT_MAX_GAP: float = 0.18     # maximum gap — randomized so it reads as sporadic
 const VOLLEY_SPRAY_RADIUS: float = 1.0      # 1 m spread radius at target distance
