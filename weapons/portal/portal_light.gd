@@ -216,9 +216,8 @@ func _apply_visibility() -> void:
 		_rig_fpv.visible = equipped
 
 func on_attack_pressed() -> void:
-	if attack_cd > 0.0 or player == null:
+	if player == null:
 		return
-	attack_cd = cooldown()
 	_fire()
 
 func _fire() -> void:

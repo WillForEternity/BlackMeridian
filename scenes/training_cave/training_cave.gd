@@ -7,6 +7,7 @@ const RemotePuppet := preload("res://entities/player/remote_puppet.gd")
 @onready var _player: Node3D = $Player
 @onready var _terrain: Node = $Terrain
 @onready var _remote_root: Node3D = $RemotePlayers
+@onready var _targets: Node3D = $Targets
 
 func _ready() -> void:
 	_reset_button.pressed.connect(_reset)
@@ -18,6 +19,8 @@ func _ready() -> void:
 	# peer (in case peer_joined ordering races with pose arrival) and cleaned
 	# up on peer_left or disconnect.
 	if Network.is_in_room():
+		if _targets != null:
+			_targets.queue_free()
 		Network.message_received.connect(_on_network_message)
 		Network.peer_left.connect(_on_peer_left)
 		Network.disconnected.connect(_on_disconnected)

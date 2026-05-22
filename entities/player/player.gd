@@ -1016,9 +1016,7 @@ func _start_dash() -> void:
 	# speed × BOOST_DASH_MULTIPLIER, duration cut to BOOST_DASH_DURATION_FRAC of
 	# normal. Net travel is still longer than a base dash but bounded so the
 	# player doesn't rocket across the map.
-	# Super dash (shift-held) is disabled in multiplayer — too much travel
-	# distance for a relay-synced session, makes other players un-targetable.
-	var boost: bool = Input.is_key_pressed(KEY_SHIFT) and not Network.is_in_room()
+	var boost: bool = Input.is_key_pressed(KEY_SHIFT)
 	_current_dash_speed = dash_speed * (BOOST_DASH_MULTIPLIER if boost else 1.0)
 	var base_duration: float = dash_duration * (BOOST_DASH_DURATION_FRAC if boost else 1.0)
 
@@ -1220,6 +1218,8 @@ func _equip(s: WeaponSlot) -> void:
 	current_slot = s
 	current_weapon_node = next
 	current_weapon_node.equip()
+	if s == WeaponSlot.SNIPER:
+		_apply_sniper_calib()
 	_apply_weapon_visibility()
 	weapon_changed.emit(int(s))
 

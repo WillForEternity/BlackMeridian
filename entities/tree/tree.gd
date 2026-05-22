@@ -27,8 +27,7 @@ var _log_axis: Vector3
 var _half_len: float = 1.0
 
 func _ready() -> void:
-	# Layers 1 + 3: player blocks (layer 1), sword + gun can deal damage (layer 3).
-	collision_layer = 5
+	collision_layer = 1
 	collision_mask = 0
 	_terrain = get_parent()
 
