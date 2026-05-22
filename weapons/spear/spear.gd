@@ -37,12 +37,15 @@ const JAB1_OUT: float = 0.10
 const JAB1_DWELL: float = 0.03
 const JAB1_IN: float = 0.16
 const JAB1_DMG_MULT: float = 1.0
+# Note: JAB2_DMG_MULT and SPIN_DMG_MULT are forced to 1.0 below so every spear
+# swing lands at the flat base damage (3). Re-introduce variance later if the
+# combo wants a damage ramp again.
 
 const JAB2_REACH: float = 1.35
 const JAB2_OUT: float = 0.085
 const JAB2_DWELL: float = 0.04
 const JAB2_IN: float = 0.16
-const JAB2_DMG_MULT: float = 1.35
+const JAB2_DMG_MULT: float = 1.0
 
 # Damage window inside a jab is the time the tip is travelling near peak speed:
 # from STRIKE_FRAC_START·t_out to (t_out + dwell). The early window opens just
@@ -56,7 +59,7 @@ const STRIKE_FRAC_START: float = 0.45
 # 8.57 rad/s; at spear tip r ≈ target_len/2 ≈ 2.4m this gives v_tip ≈ 20.6 m/s.
 const SPIN_SWEEP: float = TAU * 1.5    # 540° total
 const SPIN_DURATION: float = 0.55
-const SPIN_DMG_MULT: float = 1.8
+const SPIN_DMG_MULT: float = 2.0
 # Periodic _hits_this_swing clear so the spin can re-hit the same enemy on each
 # rotation pass instead of damaging once and then sliding through them.
 const SPIN_REHIT_INTERVAL: float = 0.11
@@ -274,11 +277,18 @@ func _build_rigs() -> void:
 	hit_area.monitoring = false
 	hit_area.collision_layer = 0
 	hit_area.collision_mask = 4  # enemies
+	# Hit volume covers the entire TPV spear mesh, not just the tip. The TPV
+	# model is scaled to target_len = 4.8 m and offset so the rig origin sits
+	# `grip_back_frac` (0.25) of the way back from the tip — i.e. the holder
+	# center is at z = -4.8 * (0.5 - 0.25) = -1.2, with the spear extending
+	# ±2.4 along its rotated axis from there (tip at z=-3.6, butt at z=+1.2).
+	# Sizing the box 4.8 long, centered at z=-1.2, makes any contact along
+	# the shaft register damage during a thrust or spin.
 	var cs := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(0.35, 0.35, 1.6)
+	box.size = Vector3(0.45, 0.45, 4.8)
 	cs.shape = box
-	cs.position = Vector3(0, 0, -0.9)
+	cs.position = Vector3(0, 0, -1.2)
 	hit_area.add_child(cs)
 	rig_tpv.add_child(hit_area)
 	hit_area.body_entered.connect(_on_body_entered)
