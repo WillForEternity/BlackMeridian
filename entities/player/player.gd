@@ -1024,6 +1024,8 @@ func _physics_process(delta: float) -> void:
 				"slot": int(current_slot),
 				"hp": _health,
 				"hp_max": MAX_HEALTH,
+				"anim": _current_anim,
+				"anim_speed": _anim_player.speed_scale if _anim_player else 1.0,
 			})
 
 # Pulls the third-person camera in along the pivot→camera ray if any solid

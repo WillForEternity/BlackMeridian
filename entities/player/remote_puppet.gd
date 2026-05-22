@@ -30,6 +30,11 @@ const HP_BAR_WIDTH: float = 1.2
 const HP_BAR_HEIGHT: float = 0.12
 const HP_BAR_Y_OFFSET: float = 2.45
 
+# Mirrored from the owner's player.gd: name of the currently-playing clip on
+# the remote, and the AnimationPlayer that drives the puppet's skeleton.
+var _anim_player: AnimationPlayer
+var _current_anim: String = ""
+
 func setup(peer_id: int) -> void:
 	_peer_id = peer_id
 	name = "Puppet_%d" % peer_id
@@ -69,6 +74,14 @@ func _ready() -> void:
 		# capsule collision (feet at y=0, head at y=BODY_HEIGHT) lines up.
 		_body.position = Vector3.ZERO
 	add_child(_body)
+	# Same UAL clip library the local player uses, so anim names broadcast in
+	# the pose RPC ("Jog_Fwd", "Sword_Attack", etc.) resolve correctly on the
+	# puppet's skeleton.
+	if packed != null:
+		_anim_player = UALLoader.install(_body)
+		if _anim_player != null and _anim_player.has_animation("Idle"):
+			_anim_player.play("Idle")
+			_current_anim = "Idle"
 
 	# Health bar: two billboarded planes. Backing reads damage taken (dark
 	# behind the green fill); fill shrinks toward the left as HP drops.
@@ -126,6 +139,14 @@ func set_pose(pos: Vector3, yaw: float, slot: int) -> void:
 	if slot != _current_slot:
 		_current_slot = slot
 		_refresh_label()
+
+func set_anim(anim_name: String, speed: float) -> void:
+	if _anim_player == null or anim_name == "":
+		return
+	if anim_name != _current_anim and _anim_player.has_animation(anim_name):
+		_current_anim = anim_name
+		_anim_player.play(anim_name)
+	_anim_player.speed_scale = speed
 
 func set_health(hp: float, hp_max: float) -> void:
 	if hp_max <= 0.0:
