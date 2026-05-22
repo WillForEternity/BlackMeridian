@@ -108,6 +108,20 @@ const PATCH_SUPER_CORE_GRID: int = 275       # 275²/14² ≈ 386 blades/m² —
 const PATCH_SUPER_CORE_FADE_INNER: float = 5.0
 const PATCH_SUPER_CORE_FADE_OUTER: float = 7.0
 const PATCH_SNAP: float = 1.0              # snap follow to whole meters (no shimmer)
+
+# --- Near-grass duck. In third-person, tilting the look way up swings the
+# follow camera down close to the ground; while sprinting that puts grass
+# blades directly between the camera and the player, covering the view. When
+# both conditions hold — camera looking up at a steep angle (pitch ≥
+# DUCK_PITCH_UP_DEG) AND horizontal speed ≥ DUCK_SPEED_THRESHOLD — we push
+# CORE / SUPER_CORE patch grass's fade_in_inner/outer outward so a hole opens
+# around the camera. The transition is smoothed over DUCK_SMOOTH_RATE so
+# grass doesn't pop on/off.
+const DUCK_RADIUS_INNER: float = 6.0         # m — full cull within this radius when active
+const DUCK_RADIUS_OUTER: float = 8.5         # m — full density past this radius
+const DUCK_PITCH_UP_DEG: float = 35.0        # pitch ≥ this (degrees above horizontal) triggers
+const DUCK_SPEED_THRESHOLD: float = 5.0      # horiz m/s — matches player.gd JOG_THRESHOLD
+const DUCK_SMOOTH_RATE: float = 9.0          # 1/s — exponential lerp toward target inner/outer
 # Density profile: full inside FADE_INNER, tapers smoothly to zero at FADE_OUTER
 # via per-blade probabilistic skip — no visible ring at the boundary.
 const PATCH_FADE_INNER: float = 56.0
@@ -334,6 +348,10 @@ var _grass_material_patch_core: ShaderMaterial
 var _grass_material_patch_super_core: ShaderMaterial
 var _last_sun_dir_world: Vector3 = Vector3.INF
 var _last_patch_center: Vector2 = Vector2(INF, INF)
+# Smoothed near-grass duck state. Defaults match the shader's no-op values
+# (fade_in_inner ≤ fade_in_outer → smoothstep = 1 everywhere → no cull).
+var _duck_inner: float = -1.0
+var _duck_outer: float = 0.0
 var _last_offset_short: Vector2 = Vector2(INF, INF)
 var _last_offset_tall: Vector2 = Vector2(INF, INF)
 var _last_offset_core: Vector2 = Vector2(INF, INF)
@@ -794,6 +812,7 @@ func _process(_dt: float) -> void:
 	var cam: Camera3D = get_viewport().get_camera_3d()
 	if cam == null:
 		return
+	_update_grass_near_cull(cam, _dt)
 	var pos: Vector3 = cam.global_position
 	# Patch follows the camera every frame, snapped to whole meters so blades
 	# don't crawl. Heights are resolved GPU-side — no rebuild cost.
@@ -886,6 +905,49 @@ func _process(_dt: float) -> void:
 	_flush_stone_queue()
 	_flush_brook_queue()
 	_flush_flower_queue()
+
+
+# Near-grass duck. See DUCK_* constants header for the design rationale.
+#   1) Pitch from horizontal — derived from camera forward, so it works
+#      whether the pitch lives on the camera, on a parent pivot, or on
+#      anything in between. fwd.y == sin(pitch); asin gives the angle.
+#      Positive pitch = looking up.
+#   2) Running — horizontal velocity of the local Player CharacterBody3D.
+#      Falls back to "not running" if the player isn't in the scene yet.
+#   3) Target inner/outer = DUCK_RADIUS_* when both conditions hold, else
+#      the shader-default (-1, 0) no-op pair.
+#   4) Exponential-lerp the smoothed values toward target so the cull
+#      grows/relaxes over ~0.1 s instead of popping the same frame.
+#   5) Push to CORE and SUPER_CORE patch grass materials (the layers that
+#      cover the inner ~40 m around the camera). SHORT/TALL/tile grass
+#      live farther out and aren't what's obstructing the view.
+func _update_grass_near_cull(cam: Camera3D, dt: float) -> void:
+	if _grass_material_patch_core == null and _grass_material_patch_super_core == null:
+		return
+	var target_inner: float = -1.0
+	var target_outer: float = 0.0
+	var fwd: Vector3 = -cam.global_basis.z
+	var pitch: float = asin(clampf(fwd.y, -1.0, 1.0))
+	var looking_up: bool = pitch >= deg_to_rad(DUCK_PITCH_UP_DEG)
+	var running: bool = false
+	if looking_up:
+		var pl: Node = get_tree().current_scene.get_node_or_null("Player")
+		if pl is CharacterBody3D:
+			var v: Vector3 = (pl as CharacterBody3D).velocity
+			running = Vector2(v.x, v.z).length() >= DUCK_SPEED_THRESHOLD
+	if looking_up and running:
+		target_inner = DUCK_RADIUS_INNER
+		target_outer = DUCK_RADIUS_OUTER
+	var alpha: float = 1.0 - exp(-DUCK_SMOOTH_RATE * dt)
+	_duck_inner = lerpf(_duck_inner, target_inner, alpha)
+	_duck_outer = lerpf(_duck_outer, target_outer, alpha)
+	if _grass_material_patch_core:
+		_grass_material_patch_core.set_shader_parameter("fade_in_inner", _duck_inner)
+		_grass_material_patch_core.set_shader_parameter("fade_in_outer", _duck_outer)
+	if _grass_material_patch_super_core:
+		_grass_material_patch_super_core.set_shader_parameter("fade_in_inner", _duck_inner)
+		_grass_material_patch_super_core.set_shader_parameter("fade_in_outer", _duck_outer)
+
 
 func _build_far_terrain() -> void:
 	var verts_side: int = int(SIZE / FAR_CELL) + 1

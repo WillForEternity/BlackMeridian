@@ -12,6 +12,7 @@ const WORLD_SCENE: String = "res://scenes/training_cave/training_cave.tscn"
 @onready var _join_button: Button = $Panel/Margin/Box/JoinButton
 @onready var _solo_button: Button = $Panel/Margin/Box/SoloButton
 @onready var _cancel_button: Button = $Panel/Margin/Box/CancelButton
+@onready var _enter_world_button: Button = $Panel/Margin/Box/EnterWorldButton
 @onready var _code_display: Label = $Panel/Margin/Box/CodeDisplay
 @onready var _status: Label = $Panel/Margin/Box/Status
 
@@ -24,6 +25,7 @@ func _ready() -> void:
 	_join_button.pressed.connect(_on_join)
 	_solo_button.pressed.connect(_on_solo)
 	_cancel_button.pressed.connect(_on_cancel)
+	_enter_world_button.pressed.connect(_on_enter_world)
 	_code_input.text_submitted.connect(func(_t: String) -> void: _on_join())
 
 	Network.hosted.connect(_on_hosted)
@@ -42,6 +44,7 @@ func _set_state_idle() -> void:
 	_code_input.visible = true
 	_code_input.editable = true
 	_cancel_button.visible = false
+	_enter_world_button.visible = false
 	_code_display.visible = false
 	_status.text = ""
 
@@ -52,9 +55,10 @@ func _set_state_hosting(code: String) -> void:
 	_solo_button.visible = false
 	_code_input.visible = false
 	_cancel_button.visible = true
+	_enter_world_button.visible = true
 	_code_display.visible = true
 	_code_display.text = code
-	_status.text = "Share this code. Waiting for someone to join…\n(You can also click Enter World to play solo for now — others can join anytime.)"
+	_status.text = "Share this code. Click Enter World to start playing — others can join anytime."
 
 func _set_state_joining() -> void:
 	_is_joining = true
@@ -63,6 +67,7 @@ func _set_state_joining() -> void:
 	_solo_button.visible = false
 	_code_input.editable = false
 	_cancel_button.visible = true
+	_enter_world_button.visible = false
 	_code_display.visible = false
 	_status.text = "Connecting…"
 
@@ -86,6 +91,12 @@ func _on_solo() -> void:
 func _on_cancel() -> void:
 	Network.leave()
 	_set_state_idle()
+
+func _on_enter_world() -> void:
+	# Host drops into the world without waiting for joiners. The network
+	# session stays open, so anyone who later types the code will pop into
+	# the same world.
+	get_tree().change_scene_to_file(WORLD_SCENE)
 
 func _on_hosted(code: String) -> void:
 	_set_state_hosting(code)

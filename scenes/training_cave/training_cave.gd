@@ -3,6 +3,7 @@ extends Node3D
 const RemotePuppet := preload("res://entities/player/remote_puppet.gd")
 
 @onready var _reset_button: Button = $UI/HotbarRoot/ResetButton
+@onready var _room_code_label: Label = $UI/HotbarRoot/RoomCodeLabel
 @onready var _player: Node3D = $Player
 @onready var _terrain: Node = $Terrain
 @onready var _remote_root: Node3D = $RemotePlayers
@@ -26,6 +27,10 @@ func _ready() -> void:
 			var angle: float = float(Network.my_peer_id - 1) * (TAU / 6.0)
 			var offset: Vector3 = Vector3(cos(angle), 0.0, sin(angle)) * 3.0
 			_player.global_position += offset
+		_room_code_label.text = "Room: %s" % Network.room_code
+		_room_code_label.visible = true
+	else:
+		_room_code_label.visible = false
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("reset"):
@@ -66,6 +71,16 @@ func _on_network_message(msg: Dictionary) -> void:
 			_handle_pose(msg)
 		"damage":
 			_handle_damage(msg)
+		"leviathan_killed":
+			_handle_leviathan_killed(msg)
+
+func _handle_leviathan_killed(msg: Dictionary) -> void:
+	# Another peer just killed their local leviathan instance. Their score
+	# bumps on every client's scoreboard so everyone sees the same totals.
+	var killer_id: int = int(msg.get("peer_id", 0))
+	var leviathan: Node = get_node_or_null("GhostLeviathan")
+	if leviathan != null and leviathan.has_method("credit_remote_kill"):
+		leviathan.credit_remote_kill(killer_id)
 
 func _handle_damage(msg: Dictionary) -> void:
 	# Target-authoritative: only the peer whose puppet was hit applies the

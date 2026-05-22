@@ -1,10 +1,16 @@
 extends CharacterBody3D
 
 # Boss creature: tracks the closest player (local + remote puppets), hovers
-# above them, and fires two attack patterns —
+# above them, and fires three attack patterns —
 #   - LONG BEAM: a single 5-second laser aimed at the target. 2.5 dps.
 #   - VOLLEY: a sporadic burst of small beams sprayed in a 1 m radius cone
 #             around the target. Each shot deals gun-tier damage (2).
+#   - MISSILE VOLLEY: a lock-on warning, then a VLS-style staggered salvo of
+#             N homing missiles. Missiles launch with a heavy UP bias (VLS
+#             fountain), pitch over to a lofted midcourse, climb above the
+#             target, then plunge down in a terminal dive. See
+#             leviathan_missile.gd for the three-phase BOOST/LOFT/TERMINAL
+#             flight model and leviathan_lock_indicator.gd for the warning.
 # Beams are CharacterBody3D-detectable (layer 1), so they hit player hurtboxes
 # the same way bullets do.
 # HP is local-per-client (no relay) so each client sees its own simulation.
@@ -12,6 +18,8 @@ extends CharacterBody3D
 
 const BeamScene := preload("res://entities/leviathan/leviathan_beam.gd")
 const LongBeamScene := preload("res://entities/leviathan/leviathan_long_beam.gd")
+const MissileScene := preload("res://entities/leviathan/leviathan_missile.gd")
+const LockIndicatorScene := preload("res://entities/leviathan/leviathan_lock_indicator.gd")
 const MODEL_PATH := "res://assets/models/ghost_leviathan.glb"
 
 # Health bar (billboarded above the boss, like the remote-puppet bars).
@@ -22,7 +30,7 @@ const SWIM_ANIM_SUBSTRING := "swimF"
 
 const ALTITUDE_OVER_TARGET: float = 18.0
 const TARGET_LENGTH: float = 42.0
-const FOLLOW_SPEED: float = 14.0
+const FOLLOW_SPEED: float = 9.33
 # Don't get too close to the target — beams need flight time to read as dodgeable.
 const MIN_DISTANCE: float = 28.0
 
@@ -30,22 +38,75 @@ const MAX_HEALTH: float = 500.0
 var _health: float = MAX_HEALTH
 
 # Attack timing.
-const LONG_BEAM_INTERVAL: float = 9.0       # seconds between long-beam casts
-const VOLLEY_INTERVAL: float = 3.0          # seconds between volley salvos (2× as frequent)
+# Attacks run as a cycle, not in parallel: LONG_BEAM → break → VOLLEY → break
+# → MISSILE_VOLLEY → break → LONG_BEAM → … so only one attack pattern is
+# active at a time. Earlier versions ran independent cooldowns for each, which
+# could overlap the long beam and a volley salvo simultaneously and feel
+# chaotic / unfair.
+const LONG_BEAM_DURATION: float = 5.0       # matches LIFETIME in leviathan_long_beam.gd
 const VOLLEY_DURATION: float = 6.0          # total length of a volley salvo
+const ATTACK_BREAK: float = 2.5             # quiet pause between consecutive attacks
 const VOLLEY_SHOT_MIN_GAP: float = 0.04     # minimum gap between successive volley shots
 const VOLLEY_SHOT_MAX_GAP: float = 0.18     # maximum gap — randomized so it reads as sporadic
 const VOLLEY_SPRAY_RADIUS: float = 1.0      # 1 m spread radius at target distance
 
+# Missile volley: lock-on warning, then a VLS-style staggered salvo. The total
+# state window is sized to cover the longest expected per-missile flight time
+# (boost + loft + dive) plus the staggered launch sequence, so the screen has
+# resolved by the time the next attack queues up.
+#
+# Sequence inside MISSILE_VOLLEY state:
+#   t = 0                     state begins; lock indicator spawned on target
+#   t = MISSILE_LOCK_DURATION first missile launches (lock indicator self-frees)
+#   t = MISSILE_LOCK_DURATION + (i-1)·MISSILE_LAUNCH_STAGGER
+#                             missile i launches (VLS hot-launch cadence)
+#   t = MISSILE_VOLLEY_DURATION  state ends, ATTACK_BREAK begins
+const MISSILE_VOLLEY_COUNT: int = 12            # ring petal count — keep even so spin-sign alternation is symmetric
+const MISSILE_VOLLEY_DURATION: float = 6.0      # full window: lock + launch sequence + flight resolution
+const MISSILE_LOCK_DURATION: float = 1.2        # pre-launch warning — gives the player time to spot the lock and reposition
+const MISSILE_LAUNCH_STAGGER: float = 0.08      # per-missile launch gap; reads as VLS firing cadence rather than a single salvo
+const MISSILE_RING_RADIUS: float = 5.0          # how wide the initial ring fans out from the boss head
+# Launch direction = UP·MISSILE_UP_BIAS + radial·MISSILE_RADIAL_BIAS +
+# forward·MISSILE_FORWARD_BIAS, then normalized. UP dominates so missiles climb
+# vertically first (VLS fountain); radial gives a visible fan; forward leans
+# them mildly toward the player. The pitch-over to target is handled by the
+# missile's LOFT phase, not by the launch direction.
+const MISSILE_UP_BIAS: float = 1.10             # dominant vertical component → VLS fountain
+const MISSILE_RADIAL_BIAS: float = 0.45         # mild sideways fan around the ring
+const MISSILE_FORWARD_BIAS: float = 0.20        # mild forward lean toward player
+
+enum AttackState { IDLE, LONG_BEAM, VOLLEY, MISSILE_VOLLEY }
+
+# Long beam is the most punishing pattern, so it should feel like a rare
+# special — between long beams the boss alternates VOLLEY ↔ MISSILE_VOLLEY.
+# A value of 5 means 1-in-5 attacks is a long beam (~one every 35-40 s given
+# average attack duration + ATTACK_BREAK).
+const LONG_BEAM_FREQUENCY: int = 5
+
 var _anim_player: AnimationPlayer
 var _model: Node3D
 var _last_facing: Vector3 = Vector3.FORWARD
-# Initial cooldowns delay the boss's first attack by 10 s so the player has
-# time to orient / fight other enemies before the leviathan opens fire.
-var _long_beam_cd: float = 10.0
-var _volley_cd: float = 10.0
-var _volley_remaining: float = 0.0
+# Initial 10 s break before the first attack so the player has time to orient
+# / fight other enemies before the leviathan opens fire.
+var _attack_state: int = AttackState.IDLE
+var _attack_state_timer: float = 10.0
+# Counter for the LONG_BEAM_FREQUENCY rotation. Starts near the threshold so
+# the first ~few attacks are short ones and the long beam shows up after the
+# player has had a moment to settle in.
+var _attacks_since_long_beam: int = 0
+# Toggles VOLLEY ↔ MISSILE_VOLLEY for the in-between attacks so consecutive
+# short attacks aren't always the same type.
+var _next_short_attack: int = AttackState.VOLLEY
+var _next_attack: int = AttackState.MISSILE_VOLLEY
 var _volley_shot_cd: float = 0.0
+# Staggered missile launch state. _missile_queue holds pending launches as
+# dicts { t, at, dir, phase, spin }; t is seconds-since-state-began. The queue
+# is drained in _tick_attacks during the MISSILE_VOLLEY state, popping any
+# entry whose t has been reached. _lock_indicator holds the lock-on warning
+# instance so we can clean it up on respawn/death.
+var _missile_queue: Array = []
+var _missile_queue_time: float = 0.0
+var _lock_indicator: Node = null
 var _target: Node3D
 var _hp_root: Node3D
 var _hp_bg: MeshInstance3D
@@ -62,6 +123,12 @@ const CHASE_SPEED_MULT: float = 1.5
 const CHASE_SPEED: float = PLAYER_BASE_SPEED * CHASE_SPEED_MULT
 var _chaser_pos: Vector3 = Vector3.ZERO
 var _chaser_seeded: bool = false
+
+# Scoreboard: { peer_id: int -> kill_count: int }. peer_id 0 represents the
+# local player in single-player sessions; in MP each peer's kills are keyed
+# by their Network.my_peer_id.
+var _kills_by_peer: Dictionary = {}
+var _score_label: Label3D
 
 func chaser_position() -> Vector3:
 	return _chaser_pos
@@ -152,6 +219,50 @@ func _build_hp_bar() -> void:
 	_hp_fill.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_hp_root.add_child(_hp_fill)
 
+	# Scoreboard label sits above the HP bar. Billboard-on so it stays
+	# readable from any angle, no_depth_test so it draws through terrain
+	# (matches the HP bar's behavior).
+	_score_label = Label3D.new()
+	_score_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_score_label.no_depth_test = true
+	_score_label.font_size = 36
+	_score_label.outline_size = 8
+	_score_label.modulate = Color(1.0, 1.0, 1.0)
+	_score_label.position = Vector3(0, HP_BAR_HEIGHT * 0.5 + 0.6, 0)
+	_score_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_hp_root.add_child(_score_label)
+	_refresh_score_label()
+
+# Render the kill scoreboard. In solo: "Kills: N". In MP: one line per peer,
+# top-down sorted by descending kills (then peer_id). The local player's row
+# is bracketed "[Peer 5]" so you can tell yours apart at a glance.
+func _refresh_score_label() -> void:
+	if _score_label == null:
+		return
+	if not Network.is_in_room():
+		var n: int = int(_kills_by_peer.get(0, 0))
+		_score_label.text = "Kills: %d" % n
+		return
+	var rows: Array = []
+	for pid in _kills_by_peer.keys():
+		rows.append([int(pid), int(_kills_by_peer[pid])])
+	rows.sort_custom(func(a, b):
+		if a[1] != b[1]:
+			return a[1] > b[1]
+		return a[0] < b[0]
+	)
+	var lines: Array = []
+	for r in rows:
+		var pid: int = r[0]
+		var k: int = r[1]
+		if pid == Network.my_peer_id:
+			lines.append("[You] %d" % k)
+		else:
+			lines.append("Peer %d: %d" % [pid, k])
+	if lines.is_empty():
+		lines.append("No kills yet")
+	_score_label.text = "\n".join(lines)
+
 func _update_hp_bar() -> void:
 	if _hp_root == null:
 		return
@@ -173,7 +284,6 @@ func _update_hp_bar() -> void:
 		if _hp_ratio < 0.3:
 			c = Color(0.95, 0.25, 0.25, 1.0)
 		_hp_fill_mat.albedo_color = c
-	print("[GhostLeviathan] spawned at ", global_position, ", model=", _model, ", anim_player=", _anim_player)
 
 func _find_anim_containing(ap: AnimationPlayer, needle: String) -> String:
 	for n in ap.get_animation_list():
@@ -295,21 +405,66 @@ func _find_closest_player() -> Node3D:
 func _tick_attacks(delta: float) -> void:
 	if _target == null:
 		return
-	_long_beam_cd = maxf(_long_beam_cd - delta, 0.0)
-	_volley_cd = maxf(_volley_cd - delta, 0.0)
-	if _long_beam_cd <= 0.0:
+	_attack_state_timer -= delta
+	match _attack_state:
+		AttackState.IDLE:
+			if _attack_state_timer <= 0.0:
+				_begin_attack(_next_attack)
+		AttackState.LONG_BEAM:
+			# Long beam is fire-and-forget — the LongBeamScene self-destructs
+			# after its own LIFETIME. We just wait out LONG_BEAM_DURATION and
+			# then cool down.
+			if _attack_state_timer <= 0.0:
+				_end_attack()
+		AttackState.VOLLEY:
+			_volley_shot_cd -= delta
+			if _volley_shot_cd <= 0.0:
+				_fire_volley_shot()
+				_volley_shot_cd = randf_range(VOLLEY_SHOT_MIN_GAP, VOLLEY_SHOT_MAX_GAP)
+			if _attack_state_timer <= 0.0:
+				_end_attack()
+		AttackState.MISSILE_VOLLEY:
+			# Two-phase tick:
+			#   1. While the lock warning plays + the salvo is launching, drain
+			#      any queue entries whose scheduled launch time has been
+			#      reached. Each pop spawns a missile with the precomputed
+			#      launch vector and Itano phase/spin assigned at queue time.
+			#   2. Once the queue is empty, the remaining window is just flight
+			#      resolution — wait for the timer to expire.
+			_missile_queue_time += delta
+			while not _missile_queue.is_empty() and float(_missile_queue[0].get("t", 0.0)) <= _missile_queue_time:
+				var d: Dictionary = _missile_queue.pop_front()
+				var m = MissileScene.new()
+				get_tree().current_scene.add_child(m)
+				m.setup(d["at"], d["dir"], self, _target, d["phase"], d["spin"], int(d.get("type", 0)))
+			if _attack_state_timer <= 0.0:
+				_end_attack()
+
+func _begin_attack(which: int) -> void:
+	_attack_state = which
+	if which == AttackState.LONG_BEAM:
 		_fire_long_beam()
-		_long_beam_cd = LONG_BEAM_INTERVAL
-	if _volley_cd <= 0.0 and _volley_remaining <= 0.0:
-		_volley_remaining = VOLLEY_DURATION
+		_attack_state_timer = LONG_BEAM_DURATION
+	elif which == AttackState.VOLLEY:
+		_attack_state_timer = VOLLEY_DURATION
 		_volley_shot_cd = 0.0
-		_volley_cd = VOLLEY_INTERVAL + VOLLEY_DURATION
-	if _volley_remaining > 0.0:
-		_volley_remaining -= delta
-		_volley_shot_cd -= delta
-		if _volley_shot_cd <= 0.0:
-			_fire_volley_shot()
-			_volley_shot_cd = randf_range(VOLLEY_SHOT_MIN_GAP, VOLLEY_SHOT_MAX_GAP)
+	else:
+		_queue_missile_volley()
+		_attack_state_timer = MISSILE_VOLLEY_DURATION
+	_next_attack = _pick_next_attack()
+
+# Picks the next attack. TEMPORARILY locked to MISSILE_VOLLEY while the
+# missile system is being tuned — leaves the VOLLEY / LONG_BEAM machinery in
+# place so the rotation can be reinstated by restoring the original body.
+# Original rotation:
+#   - LONG_BEAM every LONG_BEAM_FREQUENCY attacks
+#   - the rest alternate VOLLEY ↔ MISSILE_VOLLEY
+func _pick_next_attack() -> int:
+	return AttackState.MISSILE_VOLLEY
+
+func _end_attack() -> void:
+	_attack_state = AttackState.IDLE
+	_attack_state_timer = ATTACK_BREAK
 
 # Spawn origin for beams. The user preferred the chest-origin look (raw
 # global_position) over the snout-tip, so HEAD_OFFSET is 0. Kept as a named
@@ -320,30 +475,198 @@ const HEAD_OFFSET: float = 0.0
 func _head_position() -> Vector3:
 	return global_position + global_transform.basis.z * HEAD_OFFSET
 
+# How far off the target the chaser should sit when a long beam fires. The
+# chaser tracks the player continuously, so by fire-time it's usually right on
+# them — which makes the beam appear to spawn directly on the player. Nudging
+# the chaser 5 m back along the target→leviathan line gives a brief visible
+# "leadup" before the laser closes the gap and can still hit normally.
+const LONG_BEAM_SPAWN_OFFSET: float = 5.0
+
 func _fire_long_beam() -> void:
 	# Continuous tracking beam anchored at the leviathan's HEAD (so it visibly
 	# emanates from its mouth, not its belly). See leviathan_long_beam.gd.
+	# Snap the chaser to LONG_BEAM_SPAWN_OFFSET m off the target toward the
+	# leviathan first, so the beam doesn't visually spawn on the player. From
+	# there the chaser resumes its normal CHASE_SPEED pursuit.
+	if _target != null:
+		var t_pos: Vector3 = _target.global_position
+		var to_lev: Vector3 = _head_position() - t_pos
+		if to_lev.length_squared() > 1e-4:
+			_chaser_pos = t_pos + to_lev.normalized() * LONG_BEAM_SPAWN_OFFSET
+			_chaser_seeded = true
 	var beam = LongBeamScene.new()
 	get_tree().current_scene.add_child(beam)
 	beam.setup(self, _target)
 
 func _fire_volley_shot() -> void:
-	# Spray around the target with a 1 m radius spread; spawn at the head so
-	# the volley beam clears the leviathan's own hurtbox (otherwise the beam
-	# would spawn inside the body capsule, detect the leviathan on layer 1,
-	# and despawn instantly — which is why volley shots were invisible).
-	var head: Vector3 = _head_position()
-	var aim_point: Vector3 = _target.global_position + Vector3(
+	# Spawn from the leviathan's head and fly at the target. Earlier versions
+	# spawned the beam a few meters off the player to give it a "pops in next
+	# to you" threat feel, but that read as bullets teleporting on top of the
+	# player. Real projectile flight from the boss is the fair-feeling version.
+	var t_pos: Vector3 = _target.global_position
+	var spawn_pos: Vector3 = _head_position()
+	var aim_point: Vector3 = t_pos + Vector3(
 		randf_range(-VOLLEY_SPRAY_RADIUS, VOLLEY_SPRAY_RADIUS),
 		randf_range(-VOLLEY_SPRAY_RADIUS, VOLLEY_SPRAY_RADIUS) * 0.5,
 		randf_range(-VOLLEY_SPRAY_RADIUS, VOLLEY_SPRAY_RADIUS)
 	)
-	var dir: Vector3 = (aim_point - head).normalized()
+	var dir: Vector3 = (aim_point - spawn_pos).normalized()
 	var beam = BeamScene.new()
 	get_tree().current_scene.add_child(beam)
-	beam.setup(head, dir, self, _target)
+	beam.setup(spawn_pos, dir, self, _target)
+
+func _queue_missile_volley() -> void:
+	# Two-stage salvo: lock-on warning + VLS-style staggered launch with full
+	# spatial and phase deconfliction. Three pieces of structure ensure the
+	# salvo reads as a real missile-system engagement rather than a hose:
+	#
+	#   (a) Lock-on warning — a billboarded reticle and pulsing "MISSILE LOCK"
+	#       text appear on the target for MISSILE_LOCK_DURATION before the
+	#       first missile spawns. Real fighters get a radar-lock indication
+	#       that precedes warhead arrival; the player gets the same lead time
+	#       to spot the reticle and reposition.
+	#
+	#   (b) Staggered launches — missiles fire one at a time, MISSILE_LAUNCH
+	#       _STAGGER seconds apart, not in a single frame. This matches the
+	#       firing cadence of a real VLS (vertical-launch system) deck where
+	#       cells fire in sequence. The launch direction is dominated by
+	#       Vector3.UP, so the salvo reads as a fountain climbing out of the
+	#       boss; pitch-over toward the player is handled by the missile's
+	#       LOFT phase, not by the initial direction.
+	#
+	#   (c) Phase deconfliction — every missile is told its helix phase φ_i
+	#       and a ±1 spin sign. Phase is offset by 2π·i/N around the ring so
+	#       opposite missiles are at opposite phases; the spin sign alternates
+	#       so adjacent missiles corkscrew in opposite directions. The result
+	#       is a braided "Itano Circus" pattern where the trails interleave.
+	_missile_queue.clear()
+	_missile_queue_time = 0.0
+	if _target == null:
+		return
+	_spawn_lock_indicator(_target)
+	var spawn_pos: Vector3 = _head_position()
+	var to_target: Vector3 = _target.global_position - spawn_pos
+	if to_target.length_squared() < 1e-4:
+		return
+	var forward: Vector3 = to_target.normalized()
+	# Stable basis perpendicular to `forward`. Cross with world up unless
+	# forward is nearly vertical (then fall back to world forward).
+	var up_ref: Vector3 = Vector3.UP
+	if absf(forward.dot(Vector3.UP)) > 0.95:
+		up_ref = Vector3.FORWARD
+	var right: Vector3 = forward.cross(up_ref).normalized()
+	var up: Vector3 = right.cross(forward).normalized()
+	for i in range(MISSILE_VOLLEY_COUNT):
+		var ring_angle: float = TAU * float(i) / float(MISSILE_VOLLEY_COUNT)
+		var radial: Vector3 = right * cos(ring_angle) + up * sin(ring_angle)
+		# Launch direction: dominant UP (VLS fountain) + mild radial fan +
+		# mild forward lean. Normalized so the three biases give a unit vector
+		# regardless of how the constants are retuned.
+		var dir: Vector3 = (Vector3.UP * MISSILE_UP_BIAS + radial * MISSILE_RADIAL_BIAS + forward * MISSILE_FORWARD_BIAS).normalized()
+		# Spawn point offset outward along the ring so missiles visibly emerge
+		# from a circle around the head, not all from one point.
+		var at: Vector3 = spawn_pos + radial * MISSILE_RING_RADIUS * 0.25
+		# Phase = ring position; spin = alternating ±1 → braided helices.
+		var phase: float = ring_angle
+		var spin: float = 1.0 if (i % 2 == 0) else -1.0
+		# Crystal type rotates 0,1,2,0,1,2,… across the ring so every salvo
+		# mixes all three crystals (cyan / darker cyan / pink) regardless of
+		# MISSILE_VOLLEY_COUNT.
+		var ctype: int = i % 3
+		# Launch time = lock duration + stagger·i, so launches begin AFTER the
+		# warning indicator has played out.
+		var t_launch: float = MISSILE_LOCK_DURATION + float(i) * MISSILE_LAUNCH_STAGGER
+		_missile_queue.append({
+			"t": t_launch,
+			"at": at,
+			"dir": dir,
+			"phase": phase,
+			"spin": spin,
+			"type": ctype,
+		})
+
+func _spawn_lock_indicator(tgt: Node3D) -> void:
+	if _lock_indicator != null and is_instance_valid(_lock_indicator):
+		_lock_indicator.queue_free()
+	var ind = LockIndicatorScene.new()
+	get_tree().current_scene.add_child(ind)
+	ind.setup(tgt)
+	_lock_indicator = ind
 
 func take_damage(amount: int, _direction: Vector3) -> void:
 	_health = maxf(_health - float(amount), 0.0)
 	if _health <= 0.0:
-		queue_free()
+		_on_killed_locally()
+
+# Killed by the local player. Credit the local peer (or 0 in solo),
+# broadcast to peers so their scoreboards update, then respawn.
+func _on_killed_locally() -> void:
+	var killer_id: int = Network.my_peer_id if Network.is_in_room() else 0
+	_credit_kill(killer_id)
+	if Network.is_in_room():
+		Network.send_message({
+			"type": "leviathan_killed",
+			"peer_id": killer_id,
+		})
+	_respawn()
+
+# Called by training_cave.gd when a "leviathan_killed" message arrives from
+# another peer. Just bumps the scoreboard — does NOT respawn the local
+# leviathan, since each client runs its own HP simulation.
+func credit_remote_kill(peer_id: int) -> void:
+	_credit_kill(peer_id)
+
+func _credit_kill(peer_id: int) -> void:
+	_kills_by_peer[peer_id] = int(_kills_by_peer.get(peer_id, 0)) + 1
+	_refresh_score_label()
+
+# Reset HP, position, attack cooldowns, and chaser so the leviathan is
+# functionally a fresh spawn. Keeps the same model/anim_player instance.
+func _respawn() -> void:
+	_health = MAX_HEALTH
+	_hp_ratio = 1.0
+	# Defensive visibility reset — something in the death/respawn path was
+	# leaving the boss invisible. Force the body, model, and HP bar back on
+	# so respawn always produces a visible boss regardless of what cleared
+	# them.
+	visible = true
+	if _model != null:
+		_model.visible = true
+	if _hp_root != null:
+		_hp_root.visible = true
+	# CharacterBody3D carries velocity across frames — zero it so a fresh
+	# spawn doesn't inherit motion from before death.
+	velocity = Vector3.ZERO
+	# Reset orientation; _process re-applies look_at on the next frame.
+	rotation = Vector3.ZERO
+	scale = Vector3.ONE
+	if _hp_fill != null:
+		_hp_fill.scale = Vector3.ONE
+		_hp_fill.position.x = 0.0
+	if _hp_fill_mat != null:
+		_hp_fill_mat.albedo_color = Color(0.95, 0.35, 0.95, 1.0)
+	_attack_state = AttackState.IDLE
+	_attack_state_timer = 5.0      # half the initial-spawn delay — fresh respawn cooldown
+	_attacks_since_long_beam = 0
+	_next_short_attack = AttackState.VOLLEY
+	_next_attack = AttackState.MISSILE_VOLLEY
+	_volley_shot_cd = 0.0
+	# Drop any in-flight missile-volley state: pending launches and the
+	# lock-on indicator. Without this, a death mid-MISSILE_VOLLEY would leave
+	# the indicator pulsing on a stale target and queue ghosts of the salvo
+	# into the next attack cycle.
+	_missile_queue.clear()
+	_missile_queue_time = 0.0
+	if _lock_indicator != null and is_instance_valid(_lock_indicator):
+		_lock_indicator.queue_free()
+	_lock_indicator = null
+	_chaser_seeded = false
+	_target = null
+	_last_facing = Vector3.FORWARD
+	# Restart the swim animation in case it was paused/stopped at death.
+	if _anim_player != null and _anim_player.has_animation(_anim_player.current_animation):
+		_anim_player.play(_anim_player.current_animation)
+	var local_player: Node3D = get_tree().current_scene.get_node_or_null("Player") as Node3D
+	if local_player != null:
+		var fwd: Vector3 = -local_player.global_transform.basis.z
+		global_position = local_player.global_position + fwd * 50.0 + Vector3(0.0, 25.0, 0.0)

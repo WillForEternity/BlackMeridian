@@ -12,7 +12,10 @@ const LIFETIME: float = 5.0
 # long-lived invisible pursuer that has been tracking the player from the
 # moment the leviathan spawned, at 1.5× the player's run speed — so by the
 # time a long beam fires, the chaser is already on (or near) the player,
-# never starting from origin.
+# never starting from origin. The leviathan nudges the chaser 2 m off the
+# target at fire time (see ghost_leviathan.gd: _fire_long_beam) so the beam
+# doesn't visually spawn on top of the player; from that 2 m offset it can
+# then chase and hit normally.
 const DAMAGE_RADIUS: float = 1.6
 const DAMAGE_PER_TICK: int = 1
 const DAMAGE_TICK_INTERVAL: float = 0.15
