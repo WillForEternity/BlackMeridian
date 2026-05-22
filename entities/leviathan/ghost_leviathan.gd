@@ -47,6 +47,16 @@ var _health: float = MAX_HEALTH
 const LONG_BEAM_DURATION: float = 5.0       # matches LIFETIME in leviathan_long_beam.gd
 const VOLLEY_DURATION: float = 6.0          # total length of a volley salvo
 const ATTACK_BREAK: float = 10.0            # quiet pause between consecutive attacks — sized to roughly double the cycle vs the original 2.5 s, so attacks land at half the prior frequency
+
+# Passive background fire: independent of the attack-state cycle, the boss
+# spits PASSIVE_FIRE_COUNT volley beams at the target every
+# PASSIVE_FIRE_INTERVAL seconds. Runs in parallel with whatever discrete
+# attack state is currently active (long beam, missile salvo, fish, idle),
+# so the player never gets a fully quiet window between scripted attacks.
+# Each shot reuses _fire_volley_shot's spray so the pair looks like two
+# loose tracers rather than a perfectly mirrored pair.
+const PASSIVE_FIRE_INTERVAL: float = 2.0
+const PASSIVE_FIRE_COUNT: int = 2
 const VOLLEY_SHOT_MIN_GAP: float = 0.04     # minimum gap between successive volley shots
 const VOLLEY_SHOT_MAX_GAP: float = 0.18     # maximum gap — randomized so it reads as sporadic
 const VOLLEY_SPRAY_RADIUS: float = 1.0      # 1 m spread radius at target distance
@@ -62,7 +72,7 @@ const VOLLEY_SPRAY_RADIUS: float = 1.0      # 1 m spread radius at target distan
 #   t = MISSILE_LOCK_DURATION + (i-1)·MISSILE_LAUNCH_STAGGER
 #                             missile i launches (VLS hot-launch cadence)
 #   t = MISSILE_VOLLEY_DURATION  state ends, ATTACK_BREAK begins
-const MISSILE_VOLLEY_COUNT: int = 12            # ring petal count — keep even so spin-sign alternation is symmetric
+const MISSILE_VOLLEY_COUNT: int = 18            # ring petal count — keep even so spin-sign alternation is symmetric (~1.5x the previous 12)
 const MISSILE_VOLLEY_DURATION: float = 6.0      # full window: lock + launch sequence + flight resolution
 const MISSILE_LOCK_DURATION: float = 1.2        # pre-launch warning — gives the player time to spot the lock and reposition
 const MISSILE_LAUNCH_STAGGER: float = 0.08      # per-missile launch gap; reads as VLS firing cadence rather than a single salvo
@@ -119,6 +129,9 @@ var _attacks_since_long_beam: int = 0
 var _next_short_attack: int = AttackState.VOLLEY
 var _next_attack: int = AttackState.MISSILE_VOLLEY
 var _volley_shot_cd: float = 0.0
+# Initialized to PASSIVE_FIRE_INTERVAL so the first passive burst lands a
+# beat after spawn, not on the spawn frame.
+var _passive_fire_cd: float = 2.0
 # Staggered missile launch state. _missile_queue holds pending launches as
 # dicts { t, at, dir, phase, spin }; t is seconds-since-state-began. The queue
 # is drained in _tick_attacks during the MISSILE_VOLLEY state, popping any
@@ -381,6 +394,7 @@ func _process(delta: float) -> void:
 			look_at(global_position - head_dir, Vector3.UP)
 	_tick_chaser(delta)
 	_tick_attacks(delta)
+	_tick_passive_fire(delta)
 	_update_hp_bar()
 
 func _tick_chaser(delta: float) -> void:
@@ -404,6 +418,19 @@ func _tick_chaser(delta: float) -> void:
 		_chaser_pos += diff.normalized() * step
 	else:
 		_chaser_pos = t_pos
+
+# Passive background fire: ticks independently of the attack-state machine
+# so the boss always has trickle pressure on the player. Skips on respawn
+# frames where _target hasn't been resolved yet.
+func _tick_passive_fire(delta: float) -> void:
+	if _target == null:
+		return
+	_passive_fire_cd -= delta
+	if _passive_fire_cd > 0.0:
+		return
+	_passive_fire_cd = PASSIVE_FIRE_INTERVAL
+	for i in range(PASSIVE_FIRE_COUNT):
+		_fire_volley_shot()
 
 func _find_closest_player() -> Node3D:
 	var scene: Node = get_tree().current_scene
@@ -732,6 +759,7 @@ func _respawn() -> void:
 	_next_short_attack = AttackState.VOLLEY
 	_next_attack = AttackState.MISSILE_VOLLEY
 	_volley_shot_cd = 0.0
+	_passive_fire_cd = PASSIVE_FIRE_INTERVAL
 	# Drop any in-flight missile-volley state: pending launches and the
 	# lock-on indicator. Without this, a death mid-MISSILE_VOLLEY would leave
 	# the indicator pulsing on a stale target and queue ghosts of the salvo
