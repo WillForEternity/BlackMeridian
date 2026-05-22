@@ -96,7 +96,9 @@ func _on_body_entered(body: Node) -> void:
 		body.take_damage(damage, direction)
 		if source_weapon != null and is_instance_valid(source_weapon) and source_weapon.has_method("add_super_charge"):
 			source_weapon.add_super_charge(float(damage))
-	Vfx.impact_burst(global_position, 0.9, Color(1, 0.45, 0.95, 1))
+	# Sparks fly back from the impact surface (roughly -velocity).
+	var spark_dir: Vector3 = -direction if direction.length_squared() > 1e-6 else Vector3.UP
+	Vfx.sparks(global_position, spark_dir, 1.0, Color(1, 0.45, 0.95, 1), 16)
 	_despawn()
 
 func _despawn() -> void:

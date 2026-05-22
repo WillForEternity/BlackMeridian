@@ -83,6 +83,61 @@ func muzzle_flash(at: Vector3, scale_mul: float, tint: Color) -> void:
 	, 1.0, 0.0, 0.14)
 	get_tree().create_timer(0.18).timeout.connect(mi.queue_free)
 
+# Scattering spark burst. Emits N small emissive streaks from `at` along a
+# cone around `dir`. Streaks fly outward, droop under fake gravity, and fade.
+# A brief OmniLight tints the surroundings so the burst still reads as a flash
+# at a glance without the chunky sphere/cross primitives of the older effects.
+func sparks(at: Vector3, dir: Vector3, scale_mul: float, tint: Color, count: int = 14) -> void:
+	var d := dir.normalized() if dir.length_squared() > 1e-6 else Vector3.UP
+	var up := safe_up(d)
+	var right := d.cross(up).normalized()
+	if right.length() < 0.1:
+		right = Vector3.RIGHT
+	up = right.cross(d).normalized()
+	var light := OmniLight3D.new()
+	light.light_color = tint
+	light.light_energy = 4.5 * scale_mul
+	light.omni_range = 3.0 * scale_mul
+	_attach(light)
+	light.global_position = at
+	var lt := light.create_tween()
+	lt.tween_property(light, "light_energy", 0.0, 0.16)
+	get_tree().create_timer(0.2).timeout.connect(light.queue_free)
+	for i in count:
+		var theta: float = randf() * TAU
+		var spread: float = lerpf(0.1, 1.3, randf() * randf())
+		var lateral: Vector3 = (right * cos(theta) + up * sin(theta)) * sin(spread)
+		var forward: Vector3 = d * cos(spread)
+		var v: Vector3 = (forward + lateral).normalized() * lerpf(3.5, 8.5, randf()) * scale_mul
+		_spawn_spark(at, v, tint, scale_mul)
+
+func _spawn_spark(at: Vector3, vel: Vector3, tint: Color, scale_mul: float) -> void:
+	var mi := MeshInstance3D.new()
+	var box := BoxMesh.new()
+	box.size = Vector3(0.014, 0.014, 0.22)
+	mi.mesh = box
+	var mat := flat_emissive_mat(tint, 14.0)
+	mi.set_surface_override_material(0, mat)
+	_attach(mi)
+	mi.global_position = at
+	var ndir: Vector3 = vel.normalized()
+	mi.look_at(at + ndir, safe_up(ndir))
+	mi.scale = Vector3(1.0, 1.0, 0.55 * scale_mul)
+	var life: float = lerpf(0.22, 0.42, randf())
+	var gravity: float = -9.0
+	var start: Vector3 = at
+	var tw := mi.create_tween()
+	tw.set_parallel(true)
+	tw.tween_method(func(t: float) -> void:
+		mi.global_position = start + vel * t + Vector3(0.0, 0.5 * gravity * t * t, 0.0)
+	, 0.0, life, life)
+	tw.tween_property(mi, "scale", Vector3(1.0, 1.0, 1.6 * scale_mul), life * 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_method(func(a: float) -> void:
+		mat.emission_energy_multiplier = a * 14.0
+		mat.albedo_color.a = a
+	, 1.0, 0.0, life).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	get_tree().create_timer(life + 0.05).timeout.connect(mi.queue_free)
+
 func muzzle_flash_cross(at: Vector3, fire_dir: Vector3, scale_mul: float, tint: Color) -> void:
 	var parent := Node3D.new()
 	_attach(parent)

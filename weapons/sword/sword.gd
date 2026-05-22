@@ -55,73 +55,14 @@ var _active_swing_tween: Tween
 # if the dash expires before strike_end fires.
 var _swing_was_crit: bool = false
 
-const TRAIL_DECAY_INTERVAL: float = 1.0 / 33.0  # seconds between trail point drops
-
-# ── Katana idle-sheathe ──────────────────────────────────────────────────────
-# After IDLE_SHEATHE_TIME of no swings while equipped, the rig tweens onto
-# the saya on the player's left hip. Any swing or super yanks it back out.
-const IDLE_SHEATHE_TIME: float = 5.0
-const SHEATHE_TWEEN_IN: float = 0.65
-const SHEATHE_TWEEN_OUT: float = 0.0
-# Quick-draw flourish: when the player clicks while sheathed, the click
-# *draws* the blade (no attack). A follow-up click within the next moment
-# performs the actual swing. The draw animation has to be short enough that
-# the second click feels responsive.
-const DRAW_DURATION: float = 0.12
-# TPV sheathed pose — rig glides toward the saya on the left hip. The rig is
-# hidden at the end of the sheathe (and re-shown on unsheathe), so this pose
-# only needs to roughly aim at the saya — it doesn't have to match perfectly.
-const SHEATHE_POS_TPV := Vector3(-0.78, 0.15, 0.35)
-const SHEATHE_ROT_TPV := Vector3(deg_to_rad(-20.0), deg_to_rad(180.0), deg_to_rad(-10.0))
-
-# Katana visual styling
-const KATANA_BLADE_TINT := Color(0.92, 0.96, 1.0, 1.0)
-const KATANA_EDGE_TINT := Color(1.0, 1.0, 1.0, 1.0)
-const KATANA_HILT_DARK := Color(0.07, 0.05, 0.05, 1.0)
-const KATANA_WRAP_TINT := Color(0.30, 0.08, 0.10, 1.0)
-const KATANA_GOLD := Color(0.96, 0.78, 0.30, 1.0)
-const SCABBARD_TINT := Color(0.05, 0.04, 0.07, 1.0)
-
-var _idle_t: float = 0.0
-# Default state at spawn: sword is in the saya. The player has to swing (or
-# trigger a super) to draw it out.
-var _sheathed: bool = true
-# Set true while the F2 grip-calibration panel is open: forces the blade to
-# stay drawn so the user can see/tweak its hand pose continuously.
-var _force_drawn: bool = false
-# Set by player.gd after the TPV SwordRig is reparented onto the hand bone.
-# When the body's Sword_Attack clip drives the hand (and thus the sword),
-# the legacy rig_tpv keyframe tween — authored for a hip-mounted rig —
-# stacks on top and causes wild flailing. Skip it for the TPV when set.
+# Set by player.gd after the TPV SwordRig is reparented onto the right-hand
+# bone. When the body's Sword_Attack_RM clip drives the hand (and thus the
+# sword), the rig's own keyframe tween — authored for a hip-mounted rig —
+# stacks on top of the bone animation and the swing looks doubled. Skip the
+# TPV rig animation entirely when this flag is set.
 var _tpv_rig_follows_bone: bool = false
 
-# Public: true when the blade is out of its saya, false when stowed. Used by
-# the player's animation picker to swap Idle → Sword_Idle while drawn.
-func is_drawn() -> bool:
-	return not _sheathed
-
-# Called by player.gd when the F2 sword-calibration panel is toggled. Forces
-# the blade out of the saya (skipping the quick-draw tween) and disables the
-# idle-sheathe timer while engaged.
-func set_force_drawn(force: bool) -> void:
-	_force_drawn = force
-	if force and _sheathed:
-		_draw_immediate()
-	_idle_t = 0.0
-
-# No-tween draw — snap the rig from saya to ready pose. Used by calibration
-# mode so the blade is visible the instant the panel opens.
-func _draw_immediate() -> void:
-	_sheathed = false
-	_kill_sheathe_tween()
-	rig_tpv.visible = true
-	rig_fpv.visible = true
-	rig_tpv.position = _rest_pos_tpv
-	rig_tpv.rotation = _rest_rot_tpv
-	rig_fpv.position = _rest_pos_fpv
-	rig_fpv.rotation = _rest_rot_fpv
-var _sheathe_tween: Tween
-var _scabbard: Node3D
+const TRAIL_DECAY_INTERVAL: float = 1.0 / 33.0  # seconds between trail point drops
 
 # Captured at _ready from the editor-set rig transforms. All combat tweens
 # read from these so the rest pose you tune in the .tscn is the rest pose
@@ -142,59 +83,18 @@ func _ready() -> void:
 	_rest_pos_tpv = rig_tpv.position
 	_rest_rot_fpv = rig_fpv.rotation
 	_rest_pos_fpv = rig_fpv.position
-	# Replace the scene's blocky sword visuals with a longer katana-shaped rig.
-	# HitArea and TipMarker (Marker3D) are kept untouched so combat reach and
-	# trail sampling don't change.
-	_install_katana_visuals(rig_tpv, false)
-	_install_katana_visuals(rig_fpv, true)
-	# TPV sword model is instanced in the scene under WeaponPivot/SwordRig.
-	# FPV SwordRig had no real model attached, so the FPV view showed nothing
-	# even after a draw. Instance the same GLB under rig_fpv at runtime.
-	_install_fpv_sword_model()
 	# Reposition the TipMarker children to the actual blade tip of the
 	# editor-instanced GLB so the trail tracks where the blade really is.
 	_position_tip_marker(rig_tpv, tip_tpv)
 	_position_tip_marker(rig_fpv, tip_fpv)
 
-# Mirror of the scene-defined Sketchfab_Scene transform used by the TPV rig,
-# so the FPV sword has the same orientation / scale relative to its rig as
-# the TPV one (the sword model is at huge native dimensions and needs the
-# basis to scale it down to roughly human-sword length).
-const _SKETCHFAB_SCENE_TRANSFORM := Transform3D(
-	Vector3(-0.006068659, -0.00042185374, -0.074752845),
-	Vector3(0.056880873, -0.048689853, -0.004342993),
-	Vector3(-0.048504993, -0.057044864, 0.0042597107),
-	Vector3(0.03624758, 0.66256917, 0.16979527)
-)
-
-func _install_fpv_sword_model() -> void:
-	if rig_fpv == null:
-		return
-	if rig_fpv.has_node("Sketchfab_Scene"):
-		return
-	var packed: PackedScene = load(AMARYLLIS_MODEL_PATH) as PackedScene
-	if packed == null:
-		push_warning("[Sword] FPV katana model failed to load at %s" % AMARYLLIS_MODEL_PATH)
-		return
-	var inst: Node3D = packed.instantiate() as Node3D
-	if inst == null:
-		return
-	inst.name = "Sketchfab_Scene"
-	inst.transform = _SKETCHFAB_SCENE_TRANSFORM
-	rig_fpv.add_child(inst)
-	# FPV weapons shouldn't cast shadows — the body that would shadow them is
-	# hidden anyway, and the close-up cast looks broken from the camera.
-	for n in inst.find_children("*", "GeometryInstance3D", true, false):
-		(n as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-
-# Override setup() so the scabbard can be parented to the player as soon as
-# the player ref is known (the base setup just stores `player`).
-func setup(p: Node) -> void:
-	super(p)
-	_build_scabbard()
-
 func cooldown() -> float:
 	return data.cooldown if data else 0.42
+
+# Sheath system removed — the katana is always out. Kept so player.gd's
+# locomotion picker can still swap Idle → Sword_Idle when the sword is equipped.
+func is_drawn() -> bool:
+	return true
 
 # Katana quirk: while equipped, the player dashes twice as often.
 func dash_cooldown_mult() -> float:
@@ -207,22 +107,13 @@ func _damage() -> int:
 	return data.damage if data else damage
 
 func equip() -> void:
-	_idle_t = 0.0
-	_kill_sheathe_tween()
-	if _scabbard != null:
-		_scabbard.visible = true
-	# Preserve the sheathed/drawn state across weapon swaps. On initial spawn
-	# `_sheathed` defaults to true so the player sees just the saya on the hip.
-	if _sheathed:
-		rig_tpv.visible = false
-		rig_fpv.visible = false
-	else:
-		rig_tpv.visible = true
-		rig_fpv.visible = true
+	rig_tpv.visible = true
+	rig_fpv.visible = true
+	if not _tpv_rig_follows_bone:
 		rig_tpv.rotation = _rest_rot_tpv
 		rig_tpv.position = _rest_pos_tpv
-		rig_fpv.rotation = _rest_rot_fpv
-		rig_fpv.position = _rest_pos_fpv
+	rig_fpv.rotation = _rest_rot_fpv
+	rig_fpv.position = _rest_pos_fpv
 
 func unequip() -> void:
 	# Kill any in-flight swing tween and force the hit area off, otherwise an
@@ -230,13 +121,10 @@ func unequip() -> void:
 	if _active_swing_tween and _active_swing_tween.is_valid():
 		_active_swing_tween.kill()
 	_active_swing_tween = null
-	_kill_sheathe_tween()
 	hit_area.monitoring = false
 	_trail_sampling = false
 	rig_tpv.visible = false
 	rig_fpv.visible = false
-	if _scabbard != null:
-		_scabbard.visible = false
 
 func on_attack_pressed() -> void:
 	if attack_cd > 0.0 or _super_active:
@@ -244,12 +132,6 @@ func on_attack_pressed() -> void:
 	# Roll-dashes (X key) lock out swings — the body is mid-roll and a swing
 	# tween would look pasted on. Normal C-dashes still allow dash-crit slashes.
 	if player != null and player.dash_time_left > 0.0 and player.get("_dash_is_roll"):
-		return
-	# First click while sheathed = quick draw, NOT a swing. A second click
-	# afterwards (immediately allowed — no cooldown set on the draw) performs
-	# the actual attack.
-	if _sheathed:
-		_draw_quick()
 		return
 	_swing()
 
@@ -447,11 +329,6 @@ func on_super_pressed() -> void:
 
 func _do_super() -> void:
 	_super_active = true
-	# Treat super as "using" the sword — refresh the idle clock and yank the
-	# blade out if it was holstered.
-	if _sheathed:
-		_unsheathe(true)
-	_idle_t = 0.0
 	attack_cd = SUPER_DURATION + 0.2
 	_hits_this_swing.clear()
 
@@ -469,7 +346,6 @@ func _do_super() -> void:
 	# Damage is dealt wherever the sword actually slashes: hit_area stays on
 	# for the whole spin, and we periodically clear the hit list so the same
 	# target can be struck once per rotation.
-	hit_area.monitoring = true
 	# Super counts as a crit (is_crit() returns true while _super_active).
 	_trail_sampling = true
 	_begin_trail(CRIT_TINT)
@@ -478,11 +354,13 @@ func _do_super() -> void:
 	var rehits: int = int(floor(SUPER_DURATION / SUPER_REHIT_INTERVAL))
 	for i in rehits:
 		_active_swing_tween.tween_interval(SUPER_REHIT_INTERVAL)
-		_active_swing_tween.tween_callback(func(): _hits_this_swing.clear())
+		_active_swing_tween.tween_callback(func():
+			_hits_this_swing.clear()
+			_perform_swing_hit_scan()
+		)
 	_active_swing_tween.tween_interval(maxf(SUPER_DURATION - rehits * SUPER_REHIT_INTERVAL, 0.0))
 	_active_swing_tween.tween_callback(func():
 		_spawn_crit_slash(1.0)
-		hit_area.monitoring = false
 		_trail_sampling = false
 		_trail_t_left = 0.18
 		_super_active = false
@@ -499,17 +377,6 @@ func _do_super() -> void:
 
 func tick(delta: float) -> void:
 	_combo_window_left = maxf(_combo_window_left - delta, 0.0)
-	# Idle-sheathe timing: counts only while equipped (tick runs only then).
-	# Swings/supers reset _idle_t to 0, so this trips exactly when the player
-	# hasn't swung for IDLE_SHEATHE_TIME seconds.
-	_idle_t += delta
-	var busy: bool = _super_active or (_active_swing_tween != null and _active_swing_tween.is_valid())
-	# Calibration mode pins the blade in the open hand so the user can tweak
-	# its grip transform without it stashing itself onto the hip every 5 s.
-	if _force_drawn:
-		_idle_t = 0.0
-	elif not _sheathed and not busy and _idle_t >= IDLE_SHEATHE_TIME:
-		_sheathe()
 	if not _trail_active:
 		return
 	var marker: Marker3D = tip_fpv if is_fpv() else tip_tpv
@@ -518,7 +385,7 @@ func tick(delta: float) -> void:
 		_trail_t_left = 0.18
 		_trail_decay_accum = 0.0
 		# Upgrade trail/latch to crit if a dash kicks in mid-swing.
-		if hit_area.monitoring and not _swing_was_crit and is_crit():
+		if _trail_sampling and not _swing_was_crit and is_crit():
 			_swing_was_crit = true
 			if _trail_mat:
 				_trail_mat.emission = CRIT_TINT
@@ -548,24 +415,18 @@ func tick(delta: float) -> void:
 			_trail_im.clear_surfaces()
 
 func _swing() -> void:
-	# Drawing-from-sheathe is handled by `_draw_quick` on the prior click,
-	# but if anything still has the saya-tween running (e.g. a draw mid-tween)
-	# we kill it so the swing keyframes own the rig transform cleanly.
-	_kill_sheathe_tween()
-	_idle_t = 0.0
 	attack_cd = cooldown()
 	_hits_this_swing.clear()
 
-	# Combo advances only when the next click lands inside the chain window
-	# [COMBO_MIN_GAP, COMBO_WINDOW] since the previous slash; earlier or later
-	# clicks restart the combo at strike 0.
-	var elapsed: float = COMBO_WINDOW - _combo_window_left
-	var in_window: bool = _combo_window_left > 0.0 and elapsed >= COMBO_MIN_GAP
-	if in_window:
-		_combo_index = (_combo_index + 1) % COMBO_COUNT
-	else:
-		_combo_index = 0
-	_combo_window_left = COMBO_WINDOW
+	# Combo system disabled — every click plays strike 0 (rising-left).
+	#var elapsed: float = COMBO_WINDOW - _combo_window_left
+	#var in_window: bool = _combo_window_left > 0.0 and elapsed >= COMBO_MIN_GAP
+	#if in_window:
+	#	_combo_index = (_combo_index + 1) % COMBO_COUNT
+	#else:
+	#	_combo_index = 0
+	#_combo_window_left = COMBO_WINDOW
+	_combo_index = 0
 
 	var data := _combo_data(_combo_index)
 	# Drive the character body's sword swing animation in parallel with the
@@ -576,10 +437,11 @@ func _swing() -> void:
 		for kf in data.keyframes:
 			total += float(kf.dur)
 		player.play_anim_locked("Sword_Attack", total * 0.85, 1.1)
-	# FPV rig keeps the keyframe tween (it lives off the camera, not a bone).
-	# TPV rig is bone-attached — the body's Sword_Attack clip already swings
-	# the hand, so adding the keyframe tween on top double-animates and
-	# flails. Skip it when bone-attached.
+	# Both rigs run the full position+rotation animation so the swing reads
+	# the same in third- and first-person. FPVPivot is already scaled down in
+	# the scene, so the offsets shrink appropriately for the closer camera.
+	# Skip the TPV rig when the body's bone animation already drives it,
+	# otherwise the two animations stack and the swing looks doubled.
 	if not _tpv_rig_follows_bone:
 		_tween_keyframes(rig_tpv, data.keyframes, _rest_rot_tpv, _rest_pos_tpv, true)
 	_tween_keyframes(rig_fpv, data.keyframes, _rest_rot_fpv, _rest_pos_fpv, true)
@@ -607,19 +469,29 @@ func _swing() -> void:
 		_trail_sampling = true
 		_begin_trail(base_tint)
 	)
+	# Captured at strike-start, used by the delayed hit scan. Locks the
+	# attack's position+facing to the moment the swing was committed so
+	# moving sideways during the HIT_SCAN_DELAY doesn't redirect the slash.
+	var anchor_pos := {"pos": Vector3.ZERO, "basis": Basis()}
 	_active_swing_tween.tween_interval(maxf(strike_start - trail_start, 0.0))
 	_active_swing_tween.tween_callback(func():
-		hit_area.monitoring = true
+		anchor_pos["pos"] = player.global_position
+		anchor_pos["basis"] = player.global_transform.basis
 		if is_crit():
 			_swing_was_crit = true
 			if _trail_mat:
 				_trail_mat.emission = CRIT_TINT
 			_trail_tint = CRIT_TINT
 	)
-	_active_swing_tween.tween_interval(strike_end - strike_start)
+	# Delay damage to match the visual: the body's Sword_Attack clip takes
+	# ~0.5s after strike_start before the blade visibly meets the target,
+	# so the hit-scan fires at that moment instead of strike_start.
+	_active_swing_tween.tween_interval(HIT_SCAN_DELAY)
 	_active_swing_tween.tween_callback(func():
-		hit_area.monitoring = false
+		_perform_swing_hit_scan(anchor_pos["pos"], anchor_pos["basis"])
 	)
+	_active_swing_tween.tween_interval(maxf(strike_end - strike_start - HIT_SCAN_DELAY, 0.0))
+	_active_swing_tween.tween_callback(func(): pass)
 	_active_swing_tween.tween_interval(maxf(trail_end - strike_end, 0.0))
 	_active_swing_tween.tween_callback(func():
 		_trail_sampling = false
@@ -734,8 +606,6 @@ func _position_tip_marker(rig: Node3D, tip_marker: Marker3D) -> void:
 			continue
 		if c is Area3D:
 			continue
-		# The placeholder Blade/Core/Guard/Pommel/Tip MeshInstances are hidden
-		# by _install_katana_visuals; skip them so they don't bias the AABB.
 		if c is MeshInstance3D and not (c as MeshInstance3D).visible:
 			continue
 		_collect_visible_geom(c, model_geom)
@@ -832,6 +702,50 @@ func _tween_keyframes(rig: Node3D, kfs: Array, rest_rot: Vector3, rest_pos: Vect
 			tp.tween_property(rig, "position", target_pos, dur).set_trans(trans).set_ease(ease)
 		prev_target_pos = target_pos
 
+# Box (in player-local space, centered HIT_BOX_FORWARD m in front) used as the
+# generic melee hit volume. Replaces the blade-following Area3D — modern action
+# games hit anything inside a swing cone in front of the character regardless of
+# whether the blade mesh literally intersects it, which feels far more reliable.
+const HIT_BOX_SIZE: Vector3 = Vector3(1.2, 1.8, 2.6)
+const HIT_BOX_FORWARD: float = 1.3
+const HIT_BOX_HEIGHT: float = 1.0
+const HIT_SCAN_DELAY: float = 0.3
+
+func _perform_swing_hit_scan(anchor_pos: Vector3 = Vector3.INF, anchor_basis: Basis = Basis()) -> void:
+	if player == null:
+		return
+	# Anchor: if the caller captured the player pose at swing-commit time,
+	# scan from that captured pos+basis instead of the player's current pose.
+	# Locks the hit volume so strafing during the HIT_SCAN_DELAY can't drag
+	# the attack box sideways.
+	var origin_pos: Vector3 = anchor_pos
+	var origin_basis: Basis = anchor_basis
+	if origin_pos == Vector3.INF:
+		origin_pos = player.global_position
+		origin_basis = player.global_transform.basis
+	# Light slice shake. Fires once per swing at the visual contact moment
+	# (HIT_SCAN_DELAY after strike_start), so the camera punch syncs with the
+	# blade meeting the target. add_trauma's diminishing-returns curve keeps
+	# rapid combos from saturating.
+	if player.camera != null and player.camera.has_method("add_trauma"):
+		player.camera.add_trauma(0.18)
+	var space: PhysicsDirectSpaceState3D = player.get_world_3d().direct_space_state
+	var shape := BoxShape3D.new()
+	shape.size = HIT_BOX_SIZE
+	var center: Vector3 = origin_pos \
+		+ Vector3(0, HIT_BOX_HEIGHT, 0) \
+		+ (-origin_basis.z) * HIT_BOX_FORWARD
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = shape
+	query.transform = Transform3D(origin_basis, center)
+	query.collide_with_bodies = true
+	query.collide_with_areas = false
+	query.exclude = [player.get_rid()]
+	for r in space.intersect_shape(query, 16):
+		var body: Node = r.get("collider")
+		if body != null:
+			_on_body_entered(body)
+
 func _on_body_entered(body: Node) -> void:
 	if body == player:
 		return
@@ -866,29 +780,34 @@ func _on_body_entered(body: Node) -> void:
 	player.register_hit(0.4)
 
 func _setup_trail() -> void:
-	_trail_mi = MeshInstance3D.new()
-	_trail_im = ImmediateMesh.new()
-	_trail_mi.mesh = _trail_im
-	_trail_mat = StandardMaterial3D.new()
-	_trail_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_trail_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	_trail_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_trail_mat.vertex_color_use_as_albedo = true
-	_trail_mat.albedo_color = Color(1, 1, 1, 1)
-	_trail_mat.emission_enabled = true
-	_trail_mat.emission = Color(0.55, 0.95, 1, 1)
-	_trail_mat.emission_energy_multiplier = 6.0
-	_trail_mi.material_override = _trail_mat
-	_trail_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	get_tree().current_scene.add_child.call_deferred(_trail_mi)
+	# Sword trail disabled — commented out.
+	return
+	#_trail_mi = MeshInstance3D.new()
+	#_trail_im = ImmediateMesh.new()
+	#_trail_mi.mesh = _trail_im
+	#_trail_mat = StandardMaterial3D.new()
+	#_trail_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	#_trail_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	#_trail_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	#_trail_mat.vertex_color_use_as_albedo = true
+	#_trail_mat.albedo_color = Color(1, 1, 1, 1)
+	#_trail_mat.emission_enabled = true
+	#_trail_mat.emission = Color(0.55, 0.95, 1, 1)
+	#_trail_mat.emission_energy_multiplier = 6.0
+	#_trail_mi.material_override = _trail_mat
+	#_trail_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	#get_tree().current_scene.add_child.call_deferred(_trail_mi)
 
 func _begin_trail(tint: Color) -> void:
-	_trail_points.clear()
-	_trail_active = true
-	_trail_t_left = 0.0
-	_trail_tint = tint
-	if _trail_mat:
-		_trail_mat.emission = tint
+	# Sword trail disabled — commented out. _trail_active stays false so the
+	# tick() handler short-circuits and no ribbon gets built.
+	return
+	#_trail_points.clear()
+	#_trail_active = true
+	#_trail_t_left = 0.0
+	#_trail_tint = tint
+	#if _trail_mat:
+	#	_trail_mat.emission = tint
 
 func _sample_trail(marker: Marker3D) -> void:
 	if marker == null:
@@ -982,266 +901,3 @@ func _rebuild_trail() -> void:
 		_trail_im.surface_add_vertex(p1a)
 	_trail_im.surface_end()
 
-# ── Katana visuals & scabbard ────────────────────────────────────────────────
-
-# Replace the scene's stubby box-sword children with the amaryllis GLB.
-# HitArea and TipMarker (Marker3D) are left in place so combat reach is unchanged.
-const AMARYLLIS_MODEL_PATH := "res://assets/models/weapons/amaryllis.glb"
-
-# ── Manual amaryllis positioning ────────────────────────────────────────────
-# TPV and FPV rigs live under completely different parent transforms (TPV under
-# WeaponPivot at (0.35,-0.1,-0.25) on the 2x-scaled player; FPV under FPVPivot
-# at (0.3,-0.22,-0.4) with a 0.65x scale, and the FPV SwordRig itself carries
-# a 1.538x scale). The same offset/rotation values produce very different
-# world-space results in each view, so each rig gets its own tunables.
-#
-# All values are in the holder's local space (i.e. inside the SwordRig).
-# Tweak these freely until the sword sits where you want it.
-const SWORD_TARGET_LEN_TPV: float = 4.1
-const SWORD_TARGET_LEN_FPV: float = 3.9
-const SWORD_HOLDER_POS_TPV := Vector3(0.0, 0.4, -0.2)   # (x, y, z) — +x = right, -z = forward, +y = up
-const SWORD_HOLDER_POS_FPV := Vector3(0.4, 0.0, -3.9 * 0.334)
-const SWORD_HOLDER_ROT_TPV := Vector3(0.0, 0.0, 0.0)            # extra euler (rad) on top of auto axis-align
-const SWORD_HOLDER_ROT_FPV := Vector3(0.0, 0.0, 0.0)
-
-func _install_katana_visuals(rig: Node3D, fpv: bool) -> void:
-	# Runtime visual build disabled — sword model is instanced directly in the
-	# scene (.tscn) under each SwordRig and positioned manually in the editor.
-	if rig == null:
-		return
-	for n in ["Blade", "Core", "Guard", "Pommel", "Tip"]:
-		var c := rig.get_node_or_null(n)
-		if c is MeshInstance3D:
-			(c as MeshInstance3D).visible = false
-	return
-	var packed: PackedScene = load(AMARYLLIS_MODEL_PATH) as PackedScene
-	var model: Node3D = (packed.instantiate() as Node3D) if packed != null else null
-	if model == null:
-		push_warning("[Sword] amaryllis model failed to load at %s" % AMARYLLIS_MODEL_PATH)
-		return
-	var holder := Node3D.new()
-	holder.name = "ModelHolder"
-	holder.add_child(model)
-	rig.add_child(holder)
-	# Measure the raw model, then scale-to-fit a canonical blade length so the
-	# katana combat constants (~1.6m tip reach) still apply visually.
-	var raw: AABB = _world_aabb_sword(model)
-	var longest: float = maxf(raw.size.x, maxf(raw.size.y, raw.size.z))
-	var target_len: float = SWORD_TARGET_LEN_FPV if fpv else SWORD_TARGET_LEN_TPV
-	var fit_scale: float = (target_len / longest) if longest > 0.0001 else 1.0
-	model.scale = Vector3(fit_scale, fit_scale, fit_scale)
-	var center: Vector3 = (raw.position + raw.size * 0.5) * fit_scale
-	model.position = -center
-	# Orient longest axis along -Z (forward).
-	var axis_idx := 0
-	if raw.size.y >= raw.size.x and raw.size.y >= raw.size.z:
-		axis_idx = 1
-	elif raw.size.z >= raw.size.x and raw.size.z >= raw.size.y:
-		axis_idx = 2
-	var auto_rot := Vector3.ZERO
-	match axis_idx:
-		0:
-			auto_rot = Vector3(0, deg_to_rad(90.0), 0)
-		1:
-			auto_rot = Vector3(deg_to_rad(90.0), 0, 0)
-		2:
-			auto_rot = Vector3(0, deg_to_rad(180.0), 0)
-	var manual_rot: Vector3 = SWORD_HOLDER_ROT_FPV if fpv else SWORD_HOLDER_ROT_TPV
-	holder.rotation = auto_rot + manual_rot
-	holder.position = SWORD_HOLDER_POS_FPV if fpv else SWORD_HOLDER_POS_TPV
-	if fpv:
-		for n in _gather_geom_sword(holder):
-			if n is GeometryInstance3D:
-				(n as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-
-func _world_aabb_sword(n: Node) -> AABB:
-	var box := AABB()
-	var any := false
-	for c in _gather_geom_sword(n):
-		var local: AABB = c.get_aabb()
-		var world: AABB = c.global_transform * local
-		if not any:
-			box = world
-			any = true
-		else:
-			box = box.merge(world)
-	return box
-
-func _gather_geom_sword(n: Node) -> Array:
-	var out: Array = []
-	if n is VisualInstance3D:
-		out.append(n)
-	for c in n.get_children():
-		out.append_array(_gather_geom_sword(c))
-	return out
-
-func _add_box(parent: Node3D, size: Vector3, pos: Vector3, rot: Vector3, mat: StandardMaterial3D) -> MeshInstance3D:
-	var mi := MeshInstance3D.new()
-	var bm := BoxMesh.new()
-	bm.size = size
-	mi.mesh = bm
-	mi.position = pos
-	mi.rotation = rot
-	mi.material_override = mat
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	parent.add_child(mi)
-	return mi
-
-func _add_cyl(parent: Node3D, radius: float, height: float, pos: Vector3, rot: Vector3, mat: StandardMaterial3D) -> MeshInstance3D:
-	var mi := MeshInstance3D.new()
-	var cm := CylinderMesh.new()
-	cm.top_radius = radius
-	cm.bottom_radius = radius
-	cm.height = height
-	cm.radial_segments = 20
-	mi.mesh = cm
-	mi.position = pos
-	mi.rotation = rot
-	mi.material_override = mat
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	parent.add_child(mi)
-	return mi
-
-func _katana_blade_mat() -> StandardMaterial3D:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = KATANA_BLADE_TINT
-	m.metallic = 0.85
-	m.roughness = 0.18
-	m.emission_enabled = true
-	m.emission = KATANA_BLADE_TINT
-	m.emission_energy_multiplier = 0.45
-	return m
-
-func _katana_edge_mat() -> StandardMaterial3D:
-	var m := StandardMaterial3D.new()
-	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	m.albedo_color = KATANA_EDGE_TINT
-	m.emission_enabled = true
-	m.emission = KATANA_EDGE_TINT
-	m.emission_energy_multiplier = 1.4
-	return m
-
-func _katana_hilt_mat() -> StandardMaterial3D:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = KATANA_HILT_DARK
-	m.roughness = 0.62
-	return m
-
-func _katana_wrap_mat() -> StandardMaterial3D:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = KATANA_WRAP_TINT
-	m.roughness = 0.55
-	return m
-
-func _katana_gold_mat() -> StandardMaterial3D:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = KATANA_GOLD
-	m.metallic = 0.9
-	m.roughness = 0.28
-	m.emission_enabled = true
-	m.emission = KATANA_GOLD
-	m.emission_energy_multiplier = 0.25
-	return m
-
-# Scabbard (saya) parented to the player's body so it stays on the left hip
-# regardless of whether the katana is the active weapon. WeaponPivot sits on
-# the right hip, so the saya is offset to the player's left and tipped back
-# in the classic worn-katana angle.
-func _build_scabbard() -> void:
-	if _scabbard != null or player == null:
-		return
-	_scabbard = Node3D.new()
-	_scabbard.name = "Scabbard"
-	player.add_child(_scabbard)
-	# Player-local: -X = left, +Y = up, -Z = forward. The saya is mounted on
-	# the left hip and tilted forward + slightly horizontal like a worn
-	# katana hanging from the obi.
-	# Mouth (koiguchi) sits at the player's waist on the left hip. The saya
-	# runs almost horizontal from there, dipping slightly toward the ground
-	# as it extends behind the player.
-	_scabbard.position = Vector3(-0.42, 0.05, 0.10)
-	# Small X tilt = saya tip dips slightly toward the floor. No Y rotation
-	# is needed — body extends along local +Z, which in player-local space
-	# already points behind the player.
-	_scabbard.rotation = Vector3(deg_to_rad(18.0), 0.0, deg_to_rad(-10.0))
-
-	# Saya body now extends in +Z so the mouth (z≈0) stays at the waist and
-	# the tip is the part that swings out behind — fixes the previous
-	# upside-down orientation.
-	var body_mat := StandardMaterial3D.new()
-	body_mat.albedo_color = SCABBARD_TINT
-	body_mat.roughness = 0.32
-	body_mat.metallic = 0.1
-	_add_box(_scabbard, Vector3(0.085, 0.045, 1.62), Vector3(0, 0, 0.82), Vector3.ZERO, body_mat)
-	# Gold koiguchi (mouth) at the front/waist end.
-	_add_box(_scabbard, Vector3(0.094, 0.052, 0.06), Vector3(0, 0, 0.04), Vector3.ZERO, _katana_gold_mat())
-	# Gold kojiri (tip cap) at the far end.
-	_add_box(_scabbard, Vector3(0.094, 0.052, 0.06), Vector3(0, 0, 1.60), Vector3.ZERO, _katana_gold_mat())
-	# Gold sageo wrap band partway down.
-	_add_box(_scabbard, Vector3(0.095, 0.053, 0.04), Vector3(0, 0, 0.32), Vector3.ZERO, _katana_gold_mat())
-
-# ── Sheathe / unsheathe ──────────────────────────────────────────────────────
-
-func _sheathe() -> void:
-	if _sheathed:
-		return
-	_sheathed = true
-	_kill_sheathe_tween()
-	# TPV rig glides toward the saya, then hides — the visible saya does the
-	# rest of the storytelling. FPV rig has no sensible in-frustum holster pose
-	# so it just hides at the same time.
-	_sheathe_tween = create_tween().set_parallel(true)
-	_sheathe_tween.tween_property(rig_tpv, "position", SHEATHE_POS_TPV, SHEATHE_TWEEN_IN).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN_OUT)
-	_sheathe_tween.tween_property(rig_tpv, "rotation", SHEATHE_ROT_TPV, SHEATHE_TWEEN_IN).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN_OUT)
-	_sheathe_tween.tween_callback(func():
-		if is_instance_valid(rig_tpv):
-			rig_tpv.visible = false
-		if is_instance_valid(rig_fpv):
-			rig_fpv.visible = false
-	).set_delay(SHEATHE_TWEEN_IN * 0.9)
-
-func _unsheathe(immediate: bool = false) -> void:
-	if not _sheathed and not immediate:
-		return
-	_sheathed = false
-	_kill_sheathe_tween()
-	if rig_tpv:
-		rig_tpv.visible = true
-	if rig_fpv:
-		rig_fpv.visible = true
-	if immediate:
-		rig_tpv.rotation = _rest_rot_tpv
-		rig_tpv.position = _rest_pos_tpv
-		rig_fpv.rotation = _rest_rot_fpv
-		rig_fpv.position = _rest_pos_fpv
-		return
-	# Start from the saya pose so the draw reads as "pulled out of the
-	# scabbard," then tween back to ready stance.
-	rig_tpv.position = SHEATHE_POS_TPV
-	rig_tpv.rotation = SHEATHE_ROT_TPV
-	_sheathe_tween = create_tween().set_parallel(true)
-	_sheathe_tween.tween_property(rig_tpv, "position", _rest_pos_tpv, SHEATHE_TWEEN_OUT).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	_sheathe_tween.tween_property(rig_tpv, "rotation", _rest_rot_tpv, SHEATHE_TWEEN_OUT).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-
-func _draw_quick() -> void:
-	# Fast draw-from-saya. Sets attack_cd = 0 explicitly (in case some prior
-	# state left it non-zero) so the player can chain a swing immediately.
-	# Resets idle so the sword doesn't sheathe itself again right away.
-	_sheathed = false
-	_idle_t = 0.0
-	_kill_sheathe_tween()
-	rig_tpv.visible = true
-	rig_fpv.visible = true
-	rig_fpv.rotation = _rest_rot_fpv
-	rig_fpv.position = _rest_pos_fpv
-	# Start the TPV rig at the saya pose and tween it to ready, fast.
-	rig_tpv.position = SHEATHE_POS_TPV
-	rig_tpv.rotation = SHEATHE_ROT_TPV
-	_sheathe_tween = create_tween().set_parallel(true)
-	_sheathe_tween.tween_property(rig_tpv, "position", _rest_pos_tpv, DRAW_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	_sheathe_tween.tween_property(rig_tpv, "rotation", _rest_rot_tpv, DRAW_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-
-func _kill_sheathe_tween() -> void:
-	if _sheathe_tween and _sheathe_tween.is_valid():
-		_sheathe_tween.kill()
-	_sheathe_tween = null

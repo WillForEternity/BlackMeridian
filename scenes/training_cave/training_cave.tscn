@@ -55,42 +55,6 @@ adjustment_saturation = 1.15
 radius = 0.2
 height = 1.0667
 
-[sub_resource type="BoxMesh" id="Mesh_SwordBlade"]
-size = Vector3(0.1, 0.025, 1)
-
-[sub_resource type="StandardMaterial3D" id="Mat_SwordBlade"]
-albedo_color = Color(0.85, 0.95, 1, 1)
-metallic = 0.9
-roughness = 0.05
-emission_enabled = true
-emission = Color(0.35, 0.85, 1, 1)
-emission_energy_multiplier = 1.8
-
-[sub_resource type="BoxMesh" id="Mesh_SwordCore"]
-size = Vector3(0.022, 0.04, 0.92)
-
-[sub_resource type="StandardMaterial3D" id="Mat_SwordCore"]
-emission_enabled = true
-emission = Color(0.7, 1, 1, 1)
-emission_energy_multiplier = 6.0
-
-[sub_resource type="BoxMesh" id="Mesh_SwordGuard"]
-size = Vector3(0.22, 0.04, 0.06)
-
-[sub_resource type="StandardMaterial3D" id="Mat_SwordHilt"]
-albedo_color = Color(0.1, 0.1, 0.13, 1)
-metallic = 0.85
-roughness = 0.25
-
-[sub_resource type="SphereMesh" id="Mesh_SwordPommel"]
-radius = 0.04
-height = 0.09
-radial_segments = 12
-rings = 6
-
-[sub_resource type="PrismMesh" id="Mesh_SwordTip"]
-size = Vector3(0.1, 0.18, 0.025)
-
 [sub_resource type="BoxShape3D" id="BoxShape_SwordHit"]
 size = Vector3(1.2, 0.7, 1.5)
 
@@ -207,30 +171,6 @@ shape = SubResource("CapsuleShape_Player")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.35, -0.1, -0.25)
 
 [node name="SwordRig" type="Node3D" parent="Player/WeaponPivot" unique_id=1796862559]
-
-[node name="Blade" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig" unique_id=697766635]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.6)
-mesh = SubResource("Mesh_SwordBlade")
-surface_material_override/0 = SubResource("Mat_SwordBlade")
-
-[node name="Core" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig" unique_id=1694687887]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.6)
-mesh = SubResource("Mesh_SwordCore")
-surface_material_override/0 = SubResource("Mat_SwordCore")
-
-[node name="Guard" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig" unique_id=1481538349]
-mesh = SubResource("Mesh_SwordGuard")
-surface_material_override/0 = SubResource("Mat_SwordHilt")
-
-[node name="Pommel" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig" unique_id=2077933733]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.08)
-mesh = SubResource("Mesh_SwordPommel")
-surface_material_override/0 = SubResource("Mat_SwordCore")
-
-[node name="Tip" type="MeshInstance3D" parent="Player/WeaponPivot/SwordRig" unique_id=1396460083]
-transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, -1.19)
-mesh = SubResource("Mesh_SwordTip")
-surface_material_override/0 = SubResource("Mat_SwordBlade")
 
 [node name="TipMarker" type="Marker3D" parent="Player/WeaponPivot/SwordRig" unique_id=2071503311]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1.28)
@@ -361,30 +301,6 @@ visible = false
 
 [node name="SwordRig" type="Node3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot" unique_id=1150193774]
 transform = Transform3D(1.538, 0, 0, 0, 1.538, 0, 0, 0, 1.538, 0, 0, 0)
-
-[node name="Blade" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig" unique_id=1831223697]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.6)
-mesh = SubResource("Mesh_SwordBlade")
-surface_material_override/0 = SubResource("Mat_SwordBlade")
-
-[node name="Core" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig" unique_id=1932198008]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.6)
-mesh = SubResource("Mesh_SwordCore")
-surface_material_override/0 = SubResource("Mat_SwordCore")
-
-[node name="Guard" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig" unique_id=1285737959]
-mesh = SubResource("Mesh_SwordGuard")
-surface_material_override/0 = SubResource("Mat_SwordHilt")
-
-[node name="Pommel" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig" unique_id=883114193]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.08)
-mesh = SubResource("Mesh_SwordPommel")
-surface_material_override/0 = SubResource("Mat_SwordCore")
-
-[node name="Tip" type="MeshInstance3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig" unique_id=396712931]
-transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, -1.19)
-mesh = SubResource("Mesh_SwordTip")
-surface_material_override/0 = SubResource("Mat_SwordBlade")
 
 [node name="TipMarker" type="Marker3D" parent="Player/CameraPitchPivot/Camera3D/FPVPivot/SwordRig" unique_id=2084708023]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1.28)

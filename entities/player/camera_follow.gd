@@ -20,7 +20,11 @@ func _ready() -> void:
 	_noise.seed = randi()
 
 func add_trauma(amount: float) -> void:
-	trauma = clampf(trauma + amount, 0.0, 1.0)
+	# Diminishing returns so rapid-fire weapons can't keep trauma pegged at 1.0.
+	# Each add only fills (1 - trauma) of the remaining headroom — a single
+	# heavy hit at low trauma still lands at near-full strength, but spammed
+	# light hits settle to a calm steady state instead of sustained thrashing.
+	trauma = clampf(trauma + amount * (1.0 - trauma), 0.0, 1.0)
 
 func _process(delta: float) -> void:
 	# Undo last frame's shake delta first so external position writes win.

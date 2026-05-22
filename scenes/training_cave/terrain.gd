@@ -5607,6 +5607,13 @@ func _apply_material_pass(m: Mesh, do_tint: bool, do_matte: bool) -> void:
 			tuned.roughness = 1.0
 			tuned.metallic = 0.0
 			tuned.metallic_specular = 0.0
+		# Foliage textures store black RGB in transparent texels; ALPHA blending
+		# mixes that black with the background and produces a dark fringe around
+		# every leaf. Scissor clips instead of blending, removing the border.
+		if is_foliage and tuned.transparency != BaseMaterial3D.TRANSPARENCY_DISABLED:
+			tuned.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+			tuned.alpha_scissor_threshold = 0.5
+			tuned.alpha_antialiasing_mode = BaseMaterial3D.ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE
 		m.surface_set_material(i, tuned)
 
 # --- Sampling helpers ---------------------------------------------------------
