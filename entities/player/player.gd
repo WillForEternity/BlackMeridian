@@ -405,6 +405,12 @@ func _ready() -> void:
 		_health_bar.offset_top = 24
 		_health_bar.offset_bottom = 42
 		ui.add_child(_health_bar)
+		# Top-down minimap. Reads local player + RemotePlayers root each frame
+		# and draws wedges for everyone. Self-contained Control.
+		var minimap_script := preload("res://entities/player/minimap.gd")
+		var minimap: Control = minimap_script.new()
+		minimap.name = "Minimap"
+		ui.add_child(minimap)
 	# Generous so the player can walk up rocky ridge slopes. The cylinder
 	# side-drag bug that previously needed a 30° cap is now handled by the
 	# manual platform-velocity system below (which only fires on true floor
@@ -642,22 +648,63 @@ func _toggle_sniper_calib_panel() -> void:
 		_calib_yaw_offset = 0.0
 		pitch_pivot.rotation = Vector3(camera_pitch, 0.0, 0.0)
 
+func _toggle_sword_calib_panel() -> void:
+	if _calib_panel == null:
+		return
+	_calib_panel.visible = not _calib_panel.visible
+	# Release mouse capture while the panel is open so sliders can be dragged.
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if _calib_panel.visible else Input.MOUSE_MODE_CAPTURED
+	# Equip the sword and pin it drawn so the calibrated grip pose is visible
+	# the entire time the panel is open — no auto-sheathe, no waiting on a
+	# quick-draw tween.
+	if _calib_panel.visible:
+		if current_slot != WeaponSlot.SWORD:
+			_equip(WeaponSlot.SWORD)
+		if _sword != null and _sword.has_method("set_force_drawn"):
+			_sword.call("set_force_drawn", true)
+	else:
+		if _sword != null and _sword.has_method("set_force_drawn"):
+			_sword.call("set_force_drawn", false)
+		# Snap the camera pivot back so the next mouse-look call doesn't start
+		# from a 270° yaw offset accumulated during inspection.
+		_calib_yaw_offset = 0.0
+		pitch_pivot.rotation = Vector3(camera_pitch, 0.0, 0.0)
+
+var _head_bone_idx: int = -1
+var _skel: Skeleton3D
+# Tiny but non-zero so skinning weights that touch the head bone don't blow
+# up to infinity from a 0-scale matrix inversion. Visually identical to gone.
+const HEAD_HIDE_SCALE := Vector3(0.001, 0.001, 0.001)
+
+
 # Measure the Head bone's local-Y offset from CameraPitchPivot in the rest
 # pose and use that as CAM_POS_1P.y so the FPV camera sits at eye level
 # regardless of how the character mesh is scaled.
 func _calibrate_fpv_eye_height() -> void:
 	if _character == null:
 		return
-	var skel: Skeleton3D = _find_skeleton(_character)
-	if skel == null:
+	_skel = _find_skeleton(_character)
+	if _skel == null:
 		return
-	var head_idx: int = skel.find_bone("Head")
+	var head_idx: int = _skel.find_bone("Head")
 	if head_idx < 0:
 		return
-	var head_global: Transform3D = skel.global_transform * skel.get_bone_global_pose(head_idx)
+	_head_bone_idx = head_idx
+	var head_global: Transform3D = _skel.global_transform * _skel.get_bone_global_pose(head_idx)
 	var local_offset: Vector3 = pitch_pivot.global_transform.affine_inverse() * head_global.origin
 	# Slight forward bias so the camera sits at the eyes, not the back of the head.
 	CAM_POS_1P = Vector3(0.0, local_offset.y, -0.08)
+
+# Collapse the head bone in FPV so the player can never see their own skull
+# from the inside (default UAL skin includes the head mesh; with the camera
+# sitting *inside* the head, the back/top of the skull and any hat geometry
+# would otherwise be visible whenever the player looks down or pans). Body
+# below the neck keeps its normal scale so feet, hands, and torso remain
+# visible from the head-camera perspective.
+func _apply_head_visibility(hide_head: bool) -> void:
+	if _skel == null or _head_bone_idx < 0:
+		return
+	_skel.set_bone_pose_scale(_head_bone_idx, HEAD_HIDE_SCALE if hide_head else Vector3.ONE)
 
 func _on_weapon_charge_changed(v: float) -> void:
 	charge_changed.emit(v)
@@ -718,6 +765,11 @@ func _process(delta: float) -> void:
 	dash_cd_left = maxf(dash_cd_left - delta, 0.0)
 	_tick_health(delta)
 	_update_wood_pickup_prompt()
+	# Animation tracks could in principle overwrite the head bone's pose scale
+	# each frame; re-stamp our hide-scale to be safe. Cheap (one API call) and
+	# only when in FPV.
+	if view_mode == ViewMode.FIRST_PERSON and _skel != null and _head_bone_idx >= 0:
+		_skel.set_bone_pose_scale(_head_bone_idx, HEAD_HIDE_SCALE)
 
 	# Build mode reuses 1/2 for log/plank selection, so we suppress the weapon-
 	# slot hotkeys (which share those bindings) while building.
@@ -917,10 +969,17 @@ func _physics_process(delta: float) -> void:
 		var interval: float = 1.0 / POSE_SEND_HZ
 		if _pose_send_accum >= interval:
 			_pose_send_accum = 0.0
+			# Broadcast the Character mesh's world yaw, not the Player root's
+			# yaw. The mesh independently rotates to face movement direction
+			# (see _update_character_facing), so the puppet matches what
+			# locally-rendered character is showing — otherwise the puppet
+			# would face the mouse direction while strafing/backpedaling and
+			# read as walking backward.
+			var char_world_yaw: float = rotation.y + (_character.rotation.y if _character != null else 0.0)
 			Network.send_message({
 				"type": "pose",
 				"pos": [global_position.x, global_position.y, global_position.z],
-				"yaw": rotation.y,
+				"yaw": char_world_yaw,
 				"pitch": camera_pitch,
 				"slot": int(current_slot),
 				"hp": _health,
@@ -979,7 +1038,9 @@ func _start_dash() -> void:
 	# speed × BOOST_DASH_MULTIPLIER, duration cut to BOOST_DASH_DURATION_FRAC of
 	# normal. Net travel is still longer than a base dash but bounded so the
 	# player doesn't rocket across the map.
-	var boost: bool = Input.is_key_pressed(KEY_SHIFT)
+	# Super dash (shift-held) is disabled in multiplayer — too much travel
+	# distance for a relay-synced session, makes other players un-targetable.
+	var boost: bool = Input.is_key_pressed(KEY_SHIFT) and not Network.is_in_room()
 	_current_dash_speed = dash_speed * (BOOST_DASH_MULTIPLIER if boost else 1.0)
 	var base_duration: float = dash_duration * (BOOST_DASH_DURATION_FRAC if boost else 1.0)
 
@@ -1159,6 +1220,7 @@ func _apply_view_mode() -> void:
 	# weapon rigs, and shadow casting stay exactly as they are in third-person.
 	var first := view_mode == ViewMode.FIRST_PERSON
 	camera.position = CAM_POS_1P if first else CAM_POS_3P
+	_apply_head_visibility(first)
 
 func _is_under_weapon_socket(n: Node) -> bool:
 	var p: Node = n

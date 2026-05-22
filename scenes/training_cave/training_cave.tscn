@@ -19,6 +19,7 @@
 [ext_resource type="Script" uid="uid://mo0e0jvj4oam" path="res://entities/util/auto_trimesh_collider.gd" id="16_autocol"]
 [ext_resource type="PackedScene" uid="uid://dqc58n2up4tje" path="res://assets/models/weapons/sci-fi_gun.glb" id="17_scifigun"]
 [ext_resource type="PackedScene" uid="uid://b0kd8laciupuk" path="res://assets/models/characters/quaternius/Male_Ranger.gltf" id="18_ranger"]
+[ext_resource type="Script" path="res://entities/leviathan/ghost_leviathan.gd" id="19_ghostlevi"]
 
 [sub_resource type="PanoramaSkyMaterial" id="Sky_Mat"]
 panorama = ExtResource("12_sky")
@@ -150,6 +151,9 @@ directional_shadow_max_distance = 230.0
 
 [node name="Terrain" type="Node3D" parent="." unique_id=398306661]
 script = ExtResource("13_terrain")
+
+[node name="GhostLeviathan" type="Node3D" parent="."]
+script = ExtResource("19_ghostlevi")
 
 [node name="Player" type="CharacterBody3D" parent="." unique_id=129388562]
 transform = Transform3D(2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 2, 0)

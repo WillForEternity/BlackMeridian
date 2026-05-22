@@ -11,10 +11,10 @@ const SMOOTHING: float = 14.0
 const BODY_HEIGHT: float = 2.0
 const BODY_RADIUS: float = 0.4
 const WEAPON_NAMES := ["Sword", "Gun", "Sniper", "Light Portal", "Dark Portal"]
-const RANGER_PATH: String = "res://assets/models/characters/quaternius/Male_Ranger.gltf"
-# Alternate Quaternius ranger skin — same mesh, different texture so remote
-# players read as a visually distinct character from the local player.
-const PUPPET_ALBEDO_PATH: String = "res://assets/models/characters/quaternius/T_Ranger_3_BaseColor.png"
+# Preloaded (same import path the statues use in the .tscn via ExtResource),
+# so the puppet GLB is bundled at compile time instead of going through a
+# runtime load() that can return null.
+const RANGER_SCENE := preload("res://assets/models/characters/quaternius/Male_Ranger.gltf")
 const UALLoaderScript := preload("res://entities/util/ual_loader.gd")
 
 var _peer_id: int = 0
@@ -56,27 +56,20 @@ func _ready() -> void:
 	shape.position = Vector3(0, BODY_HEIGHT * 0.5, 0)
 	add_child(shape)
 
-	# Use the same Quaternius ranger mesh the local player uses so other
-	# players read as actual characters instead of orange capsules. The local
-	# player's Character is scaled 0.5 under a 2× player root (net 1×); here
-	# the puppet root has no scale, so instance the GLB at scale 1.
-	var packed: PackedScene = load(RANGER_PATH) as PackedScene
-	if packed != null:
-		_body = packed.instantiate() as Node3D
-	if _body != null:
-		# Ranger's pivot is at the feet; place it at puppet origin so the
-		# capsule collision (feet at y=0, head at y=BODY_HEIGHT) lines up.
-		_body.position = Vector3.ZERO
-		add_child(_body)
-		_reskin_puppet()
+	# Instance the preloaded ranger PackedScene exactly like the .tscn does
+	# for the local Character (and like the StoneLion/Lowe statues do). No
+	# runtime load, no material override — the model renders with whatever
+	# material the GLB ships with.
+	_body = RANGER_SCENE.instantiate() as Node3D
+	_body.position = Vector3.ZERO
+	add_child(_body)
 	# Same UAL clip library the local player uses, so anim names broadcast in
 	# the pose RPC ("Jog_Fwd", "Sword_Attack", etc.) resolve correctly on the
 	# puppet's skeleton.
-	if packed != null:
-		_anim_player = UALLoaderScript.install(_body)
-		if _anim_player != null and _anim_player.has_animation("Idle"):
-			_anim_player.play("Idle")
-			_current_anim = "Idle"
+	_anim_player = UALLoaderScript.install(_body)
+	if _anim_player != null and _anim_player.has_animation("Idle"):
+		_anim_player.play("Idle")
+		_current_anim = "Idle"
 
 	# Health bar: two billboarded planes. Backing reads damage taken (dark
 	# behind the green fill); fill shrinks toward the left as HP drops.
@@ -124,41 +117,26 @@ func _ready() -> void:
 	add_child(_label)
 	_refresh_label()
 
+# Sender broadcasts CharacterBody3D origin, which sits at the capsule CENTER
+# (capsule height 1.0667 × player scale 2 → ~1.07 m above feet). Our puppet's
+# pivot sits at FEET (body at y=0, capsule shifted up by BODY_HEIGHT/2), so we
+# subtract the sender's half-capsule to plant the puppet on the ground.
+const SENDER_CAPSULE_HALF: float = 1.0667
+
 func set_pose(pos: Vector3, yaw: float, slot: int) -> void:
-	_target_position = pos
+	# Sender broadcasts CharacterBody3D origin = capsule CENTER (height 1.0667
+	# × player scale 2 → ~1.07 m above feet). Puppet pivots at its feet, so
+	# subtract the sender's half-capsule to plant the puppet on the ground.
+	var grounded := Vector3(pos.x, pos.y - SENDER_CAPSULE_HALF, pos.z)
+	_target_position = grounded
 	_target_yaw = yaw
 	if not _has_first_pose:
 		_has_first_pose = true
-		global_position = pos
+		global_position = grounded
 		rotation.y = yaw
 	if slot != _current_slot:
 		_current_slot = slot
 		_refresh_label()
-
-# Swap the ranger mesh's albedo to the alternate Ranger_3 texture so this
-# puppet visually contrasts with the local player. Walks every MeshInstance3D
-# under _body and replaces each surface material with an override that copies
-# the original (preserving normal map, ORM, etc.) but points albedo_texture
-# at the alternate base color.
-func _reskin_puppet() -> void:
-	if _body == null:
-		return
-	var tex: Texture2D = load(PUPPET_ALBEDO_PATH) as Texture2D
-	if tex == null:
-		return
-	for mi in _body.find_children("*", "MeshInstance3D", true, false):
-		var mesh_inst := mi as MeshInstance3D
-		if mesh_inst == null or mesh_inst.mesh == null:
-			continue
-		for s in mesh_inst.mesh.get_surface_count():
-			var base := mesh_inst.get_active_material(s)
-			var mat: StandardMaterial3D
-			if base is StandardMaterial3D:
-				mat = (base as StandardMaterial3D).duplicate() as StandardMaterial3D
-			else:
-				mat = StandardMaterial3D.new()
-			mat.albedo_texture = tex
-			mesh_inst.set_surface_override_material(s, mat)
 
 func set_anim(anim_name: String, speed: float) -> void:
 	if _anim_player == null or anim_name == "":
@@ -166,7 +144,9 @@ func set_anim(anim_name: String, speed: float) -> void:
 	if anim_name != _current_anim and _anim_player.has_animation(anim_name):
 		_current_anim = anim_name
 		_anim_player.play(anim_name)
-	_anim_player.speed_scale = speed
+	# Double the broadcast playback speed so the puppet's locomotion reads
+	# at the same cadence the sender sees on their own character.
+	_anim_player.speed_scale = speed * 2.0
 
 func set_health(hp: float, hp_max: float) -> void:
 	if hp_max <= 0.0:
