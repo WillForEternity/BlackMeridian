@@ -19,7 +19,7 @@ func _ready() -> void:
 	super()
 
 func cooldown() -> float:
-	return data.cooldown if data else 0.165
+	return (data.cooldown if data else 0.165) * 0.5
 
 func guide_text() -> String:
 	return "PLASMA\n\nATTACK (LMB)\n  Semi-auto projectile, ~0.165s between shots. 2 dmg per hit.\n  Bullets are pooled and travel along the camera ray.\n\nSUPER (Q, when bar is full)\n  Overdrive for 6 seconds: every trigger pull fires a 3-round\n  spread (center + two shots at ~4 degree offset). Muzzle\n  tint shifts from pink to a hotter orange while active.\n\nQUIRK\n  Each projectile feeds super charge equal to its damage, so\n  the plasma gun ramps its own super faster than weapons\n  that hit less often.\n\n[G] toggles this guide."
@@ -40,7 +40,6 @@ func on_super_pressed() -> void:
 	if not consume_super():
 		return
 	_super_mode_left = SUPER_MODE_DURATION
-	Vfx.muzzle_flash(muzzle_fpv.global_position if _is_fpv else muzzle_tpv.global_position, 1.4, Color(1, 0.6, 0.2, 1))
 	player.punch_fov(8.0, 0.08, 0.3)
 
 func tick(delta: float) -> void:
@@ -73,10 +72,13 @@ func _fire() -> void:
 		_spawn_bullet(spawn_marker.global_position, _rotate_axis(fire_dir, Vector3.UP, -spread))
 	else:
 		_spawn_bullet(spawn_marker.global_position, fire_dir)
-	Vfx.muzzle_flash_cross(spawn_marker.global_position, fire_dir, 1.1 if super_mode else 0.9, tint)
-	Vfx.brass_puff(spawn_marker.global_position, fire_dir)
+	# Muzzle-flash sphere + brass-puff sphere removed — they read as floating
+	# circles on every shot. Recoil + animation kick still convey the fire.
 	_recoil(rig_fpv)
-	player.register_hit(0.28)
+	# Gun fires too fast to add camera trauma per shot — even with the
+	# diminishing-returns curve, sustained fire accumulates noticeable shake.
+	# Pass 0 so hitstop still punches but the camera doesn't ramp up.
+	player.register_hit(0.0)
 	# Drive the body's Pistol_Shoot clip so the arms kick on each shot.
 	# Locked at clip length × 0.6 so rapid-fire still gets a fresh kick.
 	if player and player.has_method("play_anim_locked"):

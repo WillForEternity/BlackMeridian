@@ -64,6 +64,21 @@ func _on_network_message(msg: Dictionary) -> void:
 	match mtype:
 		"pose":
 			_handle_pose(msg)
+		"damage":
+			_handle_damage(msg)
+
+func _handle_damage(msg: Dictionary) -> void:
+	# Target-authoritative: only the peer whose puppet was hit applies the
+	# damage to its local player. Everyone else ignores the broadcast.
+	if int(msg.get("target", 0)) != Network.my_peer_id:
+		return
+	if _player == null or not _player.has_method("take_damage"):
+		return
+	var dir_arr: Array = msg.get("dir", [])
+	var dir: Vector3 = Vector3.ZERO
+	if dir_arr.size() == 3:
+		dir = Vector3(float(dir_arr[0]), float(dir_arr[1]), float(dir_arr[2]))
+	_player.take_damage(int(msg.get("amount", 0)), dir)
 
 func _handle_pose(msg: Dictionary) -> void:
 	var sender: int = int(msg.get("from", 0))

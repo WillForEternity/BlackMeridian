@@ -1,12 +1,14 @@
-extends Node3D
+extends CharacterBody3D
 
-# Lightweight visual stand-in for another player. Built entirely in code (no
-# .tscn) so the multiplayer feature stays in a small footprint. Driven by
-# pose RPCs from the owning peer — we lerp toward the target each frame
-# so the 20 Hz network rate doesn't visibly snap.
+# Lightweight visual + hurtbox stand-in for another player. Driven by pose
+# RPCs from the owning peer — we lerp toward the target each frame so the
+# 20 Hz network rate doesn't visibly snap. Carries a CharacterBody3D capsule
+# so the local sword scan and bullet Area3D detect it; take_damage() forwards
+# the hit back to the owning peer over the relay, which applies HP on their
+# authoritative copy.
 
 const SMOOTHING: float = 14.0
-const BODY_HEIGHT: float = 1.6
+const BODY_HEIGHT: float = 2.0
 const BODY_RADIUS: float = 0.4
 const WEAPON_NAMES := ["Sword", "Gun", "Sniper", "Light Portal", "Dark Portal"]
 
@@ -23,12 +25,22 @@ func setup(peer_id: int) -> void:
 	name = "Puppet_%d" % peer_id
 
 func _ready() -> void:
+	# Hurtbox layer 1, mask 0: detectable by the local sword/bullets but
+	# doesn't push the local player around physically.
+	collision_layer = 1
+	collision_mask = 0
+	var shape := CollisionShape3D.new()
+	var cap := CapsuleShape3D.new()
+	cap.radius = BODY_RADIUS
+	cap.height = BODY_HEIGHT
+	shape.shape = cap
+	shape.position = Vector3(0, BODY_HEIGHT * 0.5, 0)
+	add_child(shape)
+
 	var capsule := CapsuleMesh.new()
 	capsule.radius = BODY_RADIUS
 	capsule.height = BODY_HEIGHT
 	var mat := StandardMaterial3D.new()
-	# A warm hue so the puppet visually contrasts with the local body's bluish
-	# stick figure. Easy to spot at a distance.
 	mat.albedo_color = Color(0.95, 0.55, 0.35)
 	mat.emission_enabled = true
 	mat.emission = Color(0.6, 0.3, 0.15)
@@ -36,10 +48,11 @@ func _ready() -> void:
 	capsule.material = mat
 	_body = MeshInstance3D.new()
 	_body.mesh = capsule
+	_body.position = Vector3(0, BODY_HEIGHT * 0.5, 0)
 	add_child(_body)
 
 	_label = Label3D.new()
-	_label.position = Vector3(0, BODY_HEIGHT * 0.65 + 0.4, 0)
+	_label.position = Vector3(0, BODY_HEIGHT + 0.4, 0)
 	_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	_label.no_depth_test = true
 	_label.font_size = 28
@@ -74,3 +87,15 @@ func _process(delta: float) -> void:
 	global_position = global_position.lerp(_target_position, t)
 	var diff: float = wrapf(_target_yaw - rotation.y, -PI, PI)
 	rotation.y += diff * t
+
+# Hit from a local weapon (sword scan / projectile). Forward to the owning
+# peer over the relay; their player.gd::take_damage applies HP + flinch
+# authoritatively on their side. We don't decrement anything locally — the
+# puppet has no HP of its own (HP lives on the owning peer's local player).
+func take_damage(amount: int, direction: Vector3) -> void:
+	Network.send_message({
+		"type": "damage",
+		"target": _peer_id,
+		"amount": amount,
+		"dir": [direction.x, direction.y, direction.z],
+	})

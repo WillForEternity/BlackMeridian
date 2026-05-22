@@ -7,12 +7,16 @@ signal weapon_changed(weapon: int)
 signal charge_changed(value: float)
 
 @export var speed: float = 13.0
-@export var jump_velocity: float = 5.5
+@export var jump_velocity: float = 6.8
 # Jump feel — coyote grace after walking off a ledge, falling-gravity boost
 # for a less floaty arc, and an early-release cut so tapping jump produces a
 # shorter hop than holding it.
 const COYOTE_TIME: float = 0.12
-const FALL_GRAVITY_MULT: float = 1.65
+const FALL_GRAVITY_MULT: float = 2.1
+# Multiplier applied on top of the project's default gravity for the player
+# only. Bumping this above 1.0 makes the jump arc snappier and the character
+# feel heavier without affecting enemies or projectiles.
+const PLAYER_GRAVITY_MULT: float = 1.6
 const JUMP_CUT_FACTOR: float = 0.45
 # Horizontal movement accel/decel (m/s²). Velocity isn't set instantly from
 # input; it interpolates toward the input-derived target speed. Air values are
@@ -91,8 +95,8 @@ var _hand_r_socket: BoneAttachment3D
 # Sword grip-in-hand pose, baked from a previous F2 calibration session.
 # Applied to the reparented SwordRig (whose origin is the rotation pivot)
 # and to the sword model *within* SwordRig so the grip sits on that pivot.
-var _sword_calib_pos: Vector3 = Vector3(0.0, 0.07, 0.0)
-var _sword_calib_rot: Vector3 = Vector3(deg_to_rad(153.0), 0.0, 0.0)
+var _sword_calib_pos: Vector3 = Vector3(0.0, 0.09, 0.0)
+var _sword_calib_rot: Vector3 = Vector3(deg_to_rad(125.0), 0.0, 0.0)
 # Accumulated yaw offset on CameraPitchPivot used only while the calibration
 # panel is open — rotates the camera around the frozen player instead of
 # spinning the player body when the user holds RMB to look.
@@ -220,6 +224,10 @@ func _import_ual_animations() -> void:
 		_anim_player.remove_animation_library("")
 	_anim_player.add_animation_library("", lib)
 	_anim_player.active = true
+	# Crossfade between any two clips so transitions (Sword_Attack → Idle,
+	# Jog → Idle, etc.) blend instead of snapping. Without this, every
+	# play() call pops to the new clip's pose on a single frame.
+	_anim_player.playback_default_blend_time = 0.15
 	if not _anim_player.animation_finished.is_connected(_on_anim_finished):
 		_anim_player.animation_finished.connect(_on_anim_finished)
 	play_anim(ANIM_IDLE)
@@ -381,6 +389,22 @@ func _ready() -> void:
 		_prompt_label.offset_bottom = -90
 		_prompt_label.visible = false
 		ui.add_child(_prompt_label)
+		# Health bar: top-center, beneath the screen edge. Drains on take_damage
+		# and refills 10 HP/s after REGEN_DELAY of not being hit.
+		_health_bar = ProgressBar.new()
+		_health_bar.name = "HealthBar"
+		_health_bar.min_value = 0.0
+		_health_bar.max_value = MAX_HEALTH
+		_health_bar.value = _health
+		_health_bar.show_percentage = false
+		_health_bar.custom_minimum_size = Vector2(280, 18)
+		_health_bar.anchor_left = 0.5
+		_health_bar.anchor_right = 0.5
+		_health_bar.offset_left = -140
+		_health_bar.offset_right = 140
+		_health_bar.offset_top = 24
+		_health_bar.offset_bottom = 42
+		ui.add_child(_health_bar)
 	# Generous so the player can walk up rocky ridge slopes. The cylinder
 	# side-drag bug that previously needed a 30° cap is now handled by the
 	# manual platform-velocity system below (which only fires on true floor
@@ -692,6 +716,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _process(delta: float) -> void:
 	dash_cd_left = maxf(dash_cd_left - delta, 0.0)
+	_tick_health(delta)
 	_update_wood_pickup_prompt()
 
 	# Build mode reuses 1/2 for log/plank selection, so we suppress the weapon-
@@ -728,6 +753,7 @@ func _process(delta: float) -> void:
 			_consume_next_click = false
 		else:
 			current_weapon_node.on_attack_pressed()
+			_aim_face_left = AIM_FACE_DURATION
 	if Input.is_action_just_released("attack"):
 		current_weapon_node.on_attack_released()
 	if Input.is_action_just_pressed("super"):
@@ -751,7 +777,7 @@ func _physics_process(delta: float) -> void:
 		# Heavier gravity on the way down — keeps the jump arc snappy rather
 		# than floaty without hurting the rising height.
 		var g_mult: float = FALL_GRAVITY_MULT if velocity.y < 0.0 else 1.0
-		velocity.y -= gravity * g_mult * delta
+		velocity.y -= gravity * PLAYER_GRAVITY_MULT * g_mult * delta
 
 	var movement_locked: bool = current_weapon_node != null \
 		and current_weapon_node.has_method("locks_movement") \
@@ -772,11 +798,13 @@ func _physics_process(delta: float) -> void:
 			_air_carry_velocity = Vector3(_floor_platform_velocity.x, 0.0, _floor_platform_velocity.z)
 			velocity.y = jump_velocity
 			_coyote_left = 0.0
+			_jump_anim_active = true
 		elif _air_jumps_used < _max_air_jumps():
 			# Reset rather than add so the second/third jump feels equally
 			# strong even if the disc was already falling.
 			velocity.y = jump_velocity
 			_air_jumps_used += 1
+			_jump_anim_active = true
 			# Replay a takeoff animation for each multi-jump so it reads as a
 			# distinct action mid-air. Alternate Jump_Start and Roll for variety
 			# — Roll looks like a flip on the even-numbered air jumps. Cap the
@@ -872,6 +900,7 @@ func _physics_process(delta: float) -> void:
 	move_and_slide()
 
 	_update_character_animation()
+	_update_character_facing(delta)
 
 	# Re-read the floor velocity from this frame's collisions for the next tick.
 	_floor_platform_velocity = _detect_floor_platform_velocity()
@@ -1122,28 +1151,10 @@ func _toggle_view() -> void:
 	_apply_view_mode()
 
 func _apply_view_mode() -> void:
+	# FPV now is purely a camera relocation to the head — TPV character mesh,
+	# weapon rigs, and shadow casting stay exactly as they are in third-person.
 	var first := view_mode == ViewMode.FIRST_PERSON
 	camera.position = CAM_POS_1P if first else CAM_POS_3P
-	# Shadows-only the character body in FPV so the player still casts a
-	# shadow but the head/torso don't fill the screen. Skip anything tagged
-	# `weapon_attached` (e.g. the TPV SwordRig that lives under the hand
-	# bone) — those follow the TPV/FPV visibility logic below.
-	if _character != null:
-		var mode_cast: int = (
-			GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY if first
-			else GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		)
-		for n in _character.find_children("*", "MeshInstance3D", true, false):
-			if _is_under_weapon_socket(n):
-				continue
-			(n as MeshInstance3D).cast_shadow = mode_cast
-	weapon_pivot.visible = not first
-	# The TPV sword now lives outside WeaponPivot (under the hand bone), so
-	# WeaponPivot.visible no longer reaches it — toggle it explicitly.
-	if _hand_r_socket != null:
-		_hand_r_socket.visible = not first
-	fpv_pivot.visible = first
-	EventBus.player_view_mode_changed.emit(int(view_mode))
 
 func _is_under_weapon_socket(n: Node) -> bool:
 	var p: Node = n
@@ -1206,11 +1217,33 @@ func register_hit_heavy() -> void:
 # the world-space ray of the hit, used to lightly tilt the recoil camera so
 # the flinch reads as a direction (later when we have HP, the `amount` field
 # can decrement it).
-func take_damage(_amount: int, _direction: Vector3) -> void:
+const MAX_HEALTH: float = 100.0
+const REGEN_DELAY: float = 5.0
+const REGEN_PER_SEC: float = 10.0
+var _health: float = MAX_HEALTH
+var _regen_cooldown: float = 0.0
+var _health_bar: ProgressBar
+
+func take_damage(amount: int, _direction: Vector3) -> void:
+	_health = maxf(_health - float(amount), 0.0)
+	_regen_cooldown = REGEN_DELAY
+	_refresh_health_bar()
 	if _anim_player != null and _anim_player.has_animation("Hit_Chest"):
 		var hl: float = _anim_player.get_animation("Hit_Chest").length
 		play_anim_locked("Hit_Chest", minf(hl, 0.35), 1.3)
 	_apply_hitstop(0.45, 0.08, 0.05)
+
+func _tick_health(delta: float) -> void:
+	if _regen_cooldown > 0.0:
+		_regen_cooldown = maxf(_regen_cooldown - delta, 0.0)
+		return
+	if _health < MAX_HEALTH:
+		_health = minf(_health + REGEN_PER_SEC * delta, MAX_HEALTH)
+		_refresh_health_bar()
+
+func _refresh_health_bar() -> void:
+	if _health_bar != null:
+		_health_bar.value = _health
 
 # Use a SceneTreeTimer callback (real-time, ignore_time_scale) so the restore
 # fires even if the caller frees mid-await. No try/finally in GDScript.
@@ -1259,6 +1292,10 @@ const SPRINT_THRESHOLD: float = 11.0
 # tick. play_anim_locked(name, dur) sets this; locomotion respects it.
 var _anim_lock_left: float = 0.0
 var _was_grounded: bool = true
+# True only between a deliberate jump key press and the next landing. The
+# jump-anim state machine (Start → Loop → Land) keys off this so walking off
+# a ledge, dashing, or super-lifting doesn't trigger the jump clip.
+var _jump_anim_active: bool = false
 
 func play_anim_locked(name: String, lock_duration: float, custom_speed: float = 1.0) -> void:
 	_anim_lock_left = lock_duration
@@ -1271,6 +1308,40 @@ func play_anim_locked(name: String, lock_duration: float, custom_speed: float = 
 var _anim_debug_accum: float = 0.0
 const MOVE_THRESHOLD: float = 0.35   # horiz m/s above which we play the jog loop
 
+# How fast the character model rotates to face its movement direction. The
+# player body's yaw stays locked to mouse-look (so the camera + aim stay put),
+# but the visual mesh spins so pressing S makes the character physically turn
+# around and run that way instead of moonwalking backward.
+const CHARACTER_TURN_RATE: float = 18.0
+
+# How long after a ranged shot the character keeps facing the aim direction.
+# The mesh snaps to face camera-forward on fire, holds for this many seconds,
+# then the same CHARACTER_TURN_RATE lerp blends it back to whatever direction
+# the locomotion picker wants (movement input, or stays put if idle).
+const AIM_FACE_DURATION: float = 0.35
+var _aim_face_left: float = 0.0
+
+func _update_character_facing(delta: float) -> void:
+	if _character == null:
+		return
+	_aim_face_left = maxf(_aim_face_left - delta, 0.0)
+	var lerp_weight: float = clampf(CHARACTER_TURN_RATE * delta, 0.0, 1.0)
+	if _aim_face_left > 0.0:
+		# During an attack the character is hard-locked facing camera-forward —
+		# no blend in, no per-frame turning from movement input. The blend
+		# (lerp_angle elsewhere in this function) only applies on the way back
+		# to neutral once _aim_face_left expires.
+		_character.rotation.y = PI
+		return
+	var input_dir := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+	if input_dir.length() < 0.2:
+		return
+	# The Quaternius character mesh's default facing is +Z (rig-forward), not
+	# the player body's -Z. atan2(x, y) yields the yaw that points +Z toward
+	# the input direction in player-local space.
+	var target_yaw: float = atan2(input_dir.x, input_dir.y)
+	_character.rotation.y = lerp_angle(_character.rotation.y, target_yaw, lerp_weight)
+
 func _update_character_animation() -> void:
 	if _anim_player == null:
 		return
@@ -1279,9 +1350,11 @@ func _update_character_animation() -> void:
 	# Jump phase transitions: edge-detect grounded↔airborne so Jump_Start fires
 	# exactly once on takeoff and Jump_Land fires exactly once on landing. Both
 	# are one-shots locked for their clip length; the airborne Jump loop in the
-	# picker below fills the gap between them.
+	# picker below fills the gap between them. The whole state machine is gated
+	# on _jump_anim_active so walking off a ledge / dashing / super-lifting
+	# never plays the jump clips — only an intentional jump key press does.
 	var grounded_now: bool = is_on_floor()
-	if _was_grounded and not grounded_now:
+	if _jump_anim_active and _was_grounded and not grounded_now:
 		if _anim_player.has_animation(ANIM_JUMP_START):
 			var sl: float = _anim_player.get_animation(ANIM_JUMP_START).length
 			play_anim_locked(ANIM_JUMP_START, sl, 1.0)
@@ -1298,6 +1371,7 @@ func _update_character_animation() -> void:
 			play_anim_locked(ANIM_JUMP_LAND, ll, 1.0)
 		else:
 			_anim_lock_left = 0.0
+		_jump_anim_active = false
 	_was_grounded = grounded_now
 	if _anim_lock_left > 0.0:
 		return
@@ -1305,12 +1379,19 @@ func _update_character_animation() -> void:
 	if dash_time_left > 0.0 and _dash_is_roll:
 		picked = ANIM_ROLL
 		play_anim(picked)
-	elif not grounded_now:
+	elif not grounded_now and _jump_anim_active:
 		picked = ANIM_JUMP_LOOP
 		play_anim(picked)
 	else:
+		# Pick by input intent, not velocity. Velocity decays/builds gradually
+		# via the accel/decel curve, so keying off `velocity.length()` made the
+		# jog clip linger after the player let go of the key (and delay-start
+		# after pressing it). Reading the input vector directly snaps the loop
+		# to the frame the player commands it.
+		var move_input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+		var input_active: bool = move_input.length() > 0.2
 		var horiz_speed: float = Vector2(velocity.x, velocity.z).length()
-		if horiz_speed < MOVE_THRESHOLD:
+		if not input_active:
 			# Pick a weapon-aware idle so the rest stance matches what's in hand:
 			# Sword_Idle when the katana is drawn, Pistol_Idle when the gun is
 			# equipped, otherwise the default Idle.
