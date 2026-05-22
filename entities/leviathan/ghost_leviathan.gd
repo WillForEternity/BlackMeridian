@@ -70,7 +70,7 @@ func _ready() -> void:
 	print("[GhostLeviathan] _ready start")
 	# Hurtbox layer 1 so player bullets/sword hit it. Mask 0 so we never
 	# touch terrain or other physics — we manually fly via _process.
-	collision_layer = 1
+	collision_layer = 1 | 4
 	collision_mask = 0
 	# Wrap-around collision capsule sized to the leviathan's visual.
 	var shape := CollisionShape3D.new()
