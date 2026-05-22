@@ -11,7 +11,13 @@ extends CharacterBody3D
 # A polished MP version would centralize this on the host.
 
 const BeamScene := preload("res://entities/leviathan/leviathan_beam.gd")
+const LongBeamScene := preload("res://entities/leviathan/leviathan_long_beam.gd")
 const MODEL_PATH := "res://assets/models/ghost_leviathan.glb"
+
+# Health bar (billboarded above the boss, like the remote-puppet bars).
+const HP_BAR_WIDTH: float = 4.0
+const HP_BAR_HEIGHT: float = 0.45
+const HP_BAR_Y_OFFSET: float = 18.0
 const SWIM_ANIM_SUBSTRING := "swimF"
 
 const ALTITUDE_OVER_TARGET: float = 18.0
@@ -25,8 +31,8 @@ var _health: float = MAX_HEALTH
 
 # Attack timing.
 const LONG_BEAM_INTERVAL: float = 9.0       # seconds between long-beam casts
-const VOLLEY_INTERVAL: float = 6.0          # seconds between volley salvos
-const VOLLEY_DURATION: float = 2.0          # total length of a volley salvo
+const VOLLEY_INTERVAL: float = 3.0          # seconds between volley salvos (2× as frequent)
+const VOLLEY_DURATION: float = 6.0          # total length of a volley salvo
 const VOLLEY_SHOT_MIN_GAP: float = 0.04     # minimum gap between successive volley shots
 const VOLLEY_SHOT_MAX_GAP: float = 0.18     # maximum gap — randomized so it reads as sporadic
 const VOLLEY_SPRAY_RADIUS: float = 1.0      # 1 m spread radius at target distance
@@ -34,13 +40,34 @@ const VOLLEY_SPRAY_RADIUS: float = 1.0      # 1 m spread radius at target distan
 var _anim_player: AnimationPlayer
 var _model: Node3D
 var _last_facing: Vector3 = Vector3.FORWARD
-var _long_beam_cd: float = 3.0
-var _volley_cd: float = 5.0
+# Initial cooldowns delay the boss's first attack by 10 s so the player has
+# time to orient / fight other enemies before the leviathan opens fire.
+var _long_beam_cd: float = 10.0
+var _volley_cd: float = 10.0
 var _volley_remaining: float = 0.0
 var _volley_shot_cd: float = 0.0
 var _target: Node3D
+var _hp_root: Node3D
+var _hp_bg: MeshInstance3D
+var _hp_fill: MeshInstance3D
+var _hp_fill_mat: StandardMaterial3D
+var _hp_ratio: float = 1.0
+# Persistent invisible pursuer used as the long beam's endpoint. Updated
+# every frame (in _process) toward the current target at PLAYER_BASE_SPEED ×
+# CHASE_SPEED_MULT so its position is meaningful at the instant a long beam
+# is cast — no "starting from origin" jolt. Frozen while the target is
+# mid-dash so a well-timed dash leaves it behind.
+const PLAYER_BASE_SPEED: float = 13.0
+const CHASE_SPEED_MULT: float = 1.5
+const CHASE_SPEED: float = PLAYER_BASE_SPEED * CHASE_SPEED_MULT
+var _chaser_pos: Vector3 = Vector3.ZERO
+var _chaser_seeded: bool = false
+
+func chaser_position() -> Vector3:
+	return _chaser_pos
 
 func _ready() -> void:
+	print("[GhostLeviathan] _ready start")
 	# Hurtbox layer 1 so player bullets/sword hit it. Mask 0 so we never
 	# touch terrain or other physics — we manually fly via _process.
 	collision_layer = 1
@@ -74,7 +101,79 @@ func _ready() -> void:
 			anim.loop_mode = Animation.LOOP_LINEAR
 			_anim_player.play(pick)
 			_anim_player.speed_scale = 0.25
-	global_position = Vector3(0.0, 60.0, 60.0)
+	_build_hp_bar()
+	# Spawn directly in front of the player so they see it immediately on
+	# game start. Player faces -Z, so -Z is "forward"; +Y is up.
+	var local_player: Node3D = get_tree().current_scene.get_node_or_null("Player") as Node3D
+	if local_player != null:
+		var fwd: Vector3 = -local_player.global_transform.basis.z
+		global_position = local_player.global_position + fwd * 35.0 + Vector3(0.0, 20.0, 0.0)
+	else:
+		global_position = Vector3(0.0, 20.0, -35.0)
+	print("[GhostLeviathan] spawned at %s, model present=%s, anim_player=%s" % [global_position, _model != null, _anim_player != null])
+
+func _build_hp_bar() -> void:
+	# top_level so the bar's transform is independent of the leviathan's
+	# look_at rotation — the bar always floats world-up over the boss and
+	# both layers are camera-billboarded so they read from any angle.
+	_hp_root = Node3D.new()
+	_hp_root.top_level = true
+	add_child(_hp_root)
+
+	var bg_mat := StandardMaterial3D.new()
+	bg_mat.albedo_color = Color(0.05, 0.05, 0.06, 0.85)
+	bg_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bg_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	bg_mat.billboard_keep_scale = true
+	bg_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bg_mat.no_depth_test = true
+	var bg_mesh := PlaneMesh.new()
+	bg_mesh.size = Vector2(HP_BAR_WIDTH, HP_BAR_HEIGHT)
+	bg_mesh.orientation = PlaneMesh.FACE_Z
+	bg_mesh.material = bg_mat
+	_hp_bg = MeshInstance3D.new()
+	_hp_bg.mesh = bg_mesh
+	_hp_bg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_hp_root.add_child(_hp_bg)
+
+	_hp_fill_mat = StandardMaterial3D.new()
+	_hp_fill_mat.albedo_color = Color(0.95, 0.35, 0.95, 1.0)
+	_hp_fill_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_hp_fill_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	_hp_fill_mat.billboard_keep_scale = true
+	_hp_fill_mat.no_depth_test = true
+	var fill_mesh := PlaneMesh.new()
+	fill_mesh.size = Vector2(HP_BAR_WIDTH - 0.12, HP_BAR_HEIGHT - 0.08)
+	fill_mesh.orientation = PlaneMesh.FACE_Z
+	fill_mesh.material = _hp_fill_mat
+	_hp_fill = MeshInstance3D.new()
+	_hp_fill.mesh = fill_mesh
+	_hp_fill.position = Vector3(0, 0, 0.001)
+	_hp_fill.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_hp_root.add_child(_hp_fill)
+
+func _update_hp_bar() -> void:
+	if _hp_root == null:
+		return
+	_hp_root.global_position = global_position + Vector3(0, HP_BAR_Y_OFFSET, 0)
+	var new_ratio: float = clampf(_health / MAX_HEALTH, 0.0, 1.0)
+	if absf(new_ratio - _hp_ratio) < 0.001:
+		return
+	_hp_ratio = new_ratio
+	if _hp_fill != null:
+		var max_w: float = HP_BAR_WIDTH - 0.12
+		_hp_fill.scale = Vector3(maxf(_hp_ratio, 0.0001), 1.0, 1.0)
+		# Anchor the fill to the left edge so it shrinks toward the right
+		# as HP drops, instead of shrinking from both ends.
+		_hp_fill.position.x = -(1.0 - _hp_ratio) * max_w * 0.5
+	if _hp_fill_mat != null:
+		var c := Color(0.95, 0.35, 0.95, 1.0)
+		if _hp_ratio < 0.6:
+			c = Color(0.95, 0.85, 0.25, 1.0)
+		if _hp_ratio < 0.3:
+			c = Color(0.95, 0.25, 0.25, 1.0)
+		_hp_fill_mat.albedo_color = c
+	print("[GhostLeviathan] spawned at ", global_position, ", model=", _model, ", anim_player=", _anim_player)
 
 func _find_anim_containing(ap: AnimationPlayer, needle: String) -> String:
 	for n in ap.get_animation_list():
@@ -147,7 +246,31 @@ func _process(delta: float) -> void:
 			head_dir = head_dir.normalized()
 			# Model's head is +Z; look_at aims local -Z. Negate so head leads.
 			look_at(global_position - head_dir, Vector3.UP)
+	_tick_chaser(delta)
 	_tick_attacks(delta)
+	_update_hp_bar()
+
+func _tick_chaser(delta: float) -> void:
+	if _target == null:
+		return
+	var t_pos: Vector3 = _target.global_position
+	if not _chaser_seeded:
+		# First sighting: snap the chaser onto the target so the very first
+		# long beam doesn't have to traverse a stale origin position.
+		_chaser_pos = t_pos
+		_chaser_seeded = true
+		return
+	# Freeze while the target dashes — the dash window IS the player's escape
+	# tool against the long beam, by design.
+	var dashing: bool = "dash_time_left" in _target and float(_target.dash_time_left) > 0.0
+	if dashing:
+		return
+	var diff: Vector3 = t_pos - _chaser_pos
+	var step: float = CHASE_SPEED * delta
+	if diff.length() > step:
+		_chaser_pos += diff.normalized() * step
+	else:
+		_chaser_pos = t_pos
 
 func _find_closest_player() -> Node3D:
 	var scene: Node = get_tree().current_scene
@@ -188,27 +311,37 @@ func _tick_attacks(delta: float) -> void:
 			_fire_volley_shot()
 			_volley_shot_cd = randf_range(VOLLEY_SHOT_MIN_GAP, VOLLEY_SHOT_MAX_GAP)
 
+# Spawn origin for beams. The user preferred the chest-origin look (raw
+# global_position) over the snout-tip, so HEAD_OFFSET is 0. Kept as a named
+# helper so the long-beam script and volley both pull from the same place
+# if we want to retune it later.
+const HEAD_OFFSET: float = 0.0
+
+func _head_position() -> Vector3:
+	return global_position + global_transform.basis.z * HEAD_OFFSET
+
 func _fire_long_beam() -> void:
-	var dir: Vector3 = (_target.global_position - global_position).normalized()
-	_spawn_beam(global_position + dir * 3.0, dir, "long")
+	# Continuous tracking beam anchored at the leviathan's HEAD (so it visibly
+	# emanates from its mouth, not its belly). See leviathan_long_beam.gd.
+	var beam = LongBeamScene.new()
+	get_tree().current_scene.add_child(beam)
+	beam.setup(self, _target)
 
 func _fire_volley_shot() -> void:
-	# Spray around the target with a 1 m radius spread at the target's
-	# distance — pick a random offset in a sphere and aim through it.
-	var to_target: Vector3 = _target.global_position - global_position
-	var dist: float = maxf(to_target.length(), 1.0)
+	# Spray around the target with a 1 m radius spread; spawn at the head so
+	# the volley beam clears the leviathan's own hurtbox (otherwise the beam
+	# would spawn inside the body capsule, detect the leviathan on layer 1,
+	# and despawn instantly — which is why volley shots were invisible).
+	var head: Vector3 = _head_position()
 	var aim_point: Vector3 = _target.global_position + Vector3(
 		randf_range(-VOLLEY_SPRAY_RADIUS, VOLLEY_SPRAY_RADIUS),
 		randf_range(-VOLLEY_SPRAY_RADIUS, VOLLEY_SPRAY_RADIUS) * 0.5,
 		randf_range(-VOLLEY_SPRAY_RADIUS, VOLLEY_SPRAY_RADIUS)
 	)
-	var dir: Vector3 = (aim_point - global_position).normalized()
-	_spawn_beam(global_position + dir * 3.0, dir, "volley")
-
-func _spawn_beam(at: Vector3, dir: Vector3, mode: String) -> void:
+	var dir: Vector3 = (aim_point - head).normalized()
 	var beam = BeamScene.new()
 	get_tree().current_scene.add_child(beam)
-	beam.setup(at, dir, mode)
+	beam.setup(head, dir, self, _target)
 
 func take_damage(amount: int, _direction: Vector3) -> void:
 	_health = maxf(_health - float(amount), 0.0)

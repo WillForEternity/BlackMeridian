@@ -152,7 +152,7 @@ directional_shadow_max_distance = 230.0
 [node name="Terrain" type="Node3D" parent="." unique_id=398306661]
 script = ExtResource("13_terrain")
 
-[node name="GhostLeviathan" type="Node3D" parent="."]
+[node name="GhostLeviathan" type="CharacterBody3D" parent="."]
 script = ExtResource("19_ghostlevi")
 
 [node name="Player" type="CharacterBody3D" parent="." unique_id=129388562]

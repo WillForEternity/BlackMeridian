@@ -648,28 +648,6 @@ func _toggle_sniper_calib_panel() -> void:
 		_calib_yaw_offset = 0.0
 		pitch_pivot.rotation = Vector3(camera_pitch, 0.0, 0.0)
 
-func _toggle_sword_calib_panel() -> void:
-	if _calib_panel == null:
-		return
-	_calib_panel.visible = not _calib_panel.visible
-	# Release mouse capture while the panel is open so sliders can be dragged.
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if _calib_panel.visible else Input.MOUSE_MODE_CAPTURED
-	# Equip the sword and pin it drawn so the calibrated grip pose is visible
-	# the entire time the panel is open — no auto-sheathe, no waiting on a
-	# quick-draw tween.
-	if _calib_panel.visible:
-		if current_slot != WeaponSlot.SWORD:
-			_equip(WeaponSlot.SWORD)
-		if _sword != null and _sword.has_method("set_force_drawn"):
-			_sword.call("set_force_drawn", true)
-	else:
-		if _sword != null and _sword.has_method("set_force_drawn"):
-			_sword.call("set_force_drawn", false)
-		# Snap the camera pivot back so the next mouse-look call doesn't start
-		# from a 270° yaw offset accumulated during inspection.
-		_calib_yaw_offset = 0.0
-		pitch_pivot.rotation = Vector3(camera_pitch, 0.0, 0.0)
-
 var _head_bone_idx: int = -1
 var _skel: Skeleton3D
 # Tiny but non-zero so skinning weights that touch the head bone don't blow
