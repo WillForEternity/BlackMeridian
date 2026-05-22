@@ -46,17 +46,24 @@ var _health: float = MAX_HEALTH
 # chaotic / unfair.
 const LONG_BEAM_DURATION: float = 5.0       # matches LIFETIME in leviathan_long_beam.gd
 const VOLLEY_DURATION: float = 6.0          # total length of a volley salvo
-const ATTACK_BREAK: float = 10.0            # quiet pause between consecutive attacks — sized to roughly double the cycle vs the original 2.5 s, so attacks land at half the prior frequency
+const ATTACK_BREAK: float = 8.0             # quiet pause between consecutive attacks — combined with the ~6–7 s attack durations this gives a cycle of roughly 15 s per scripted attack (missile salvo / fish-projectile / long beam)
 
 # Passive background fire: independent of the attack-state cycle, the boss
-# spits PASSIVE_FIRE_COUNT volley beams at the target every
+# spits PASSIVE_MISSILE_COUNT gem missiles at the target every
 # PASSIVE_FIRE_INTERVAL seconds. Runs in parallel with whatever discrete
 # attack state is currently active (long beam, missile salvo, fish, idle),
 # so the player never gets a fully quiet window between scripted attacks.
-# Each shot reuses _fire_volley_shot's spray so the pair looks like two
-# loose tracers rather than a perfectly mirrored pair.
+# Each missile is a normal homing crystal — same script as the salvo, just
+# spawned in pairs at a slow cadence instead of as a 12+ ring volley.
 const PASSIVE_FIRE_INTERVAL: float = 2.0
-const PASSIVE_FIRE_COUNT: int = 2
+const PASSIVE_MISSILE_COUNT: int = 2
+# Launch direction biases for passive missiles. Less UP than the main volley
+# fountain (we don't need a tall VLS arc for a constant drip), more FORWARD
+# so the pair lances straight toward the player and starts homing quickly.
+const PASSIVE_MISSILE_UP_BIAS: float = 0.55
+const PASSIVE_MISSILE_RADIAL_BIAS: float = 0.35
+const PASSIVE_MISSILE_FORWARD_BIAS: float = 0.95
+const PASSIVE_MISSILE_RING_RADIUS: float = 1.5
 const VOLLEY_SHOT_MIN_GAP: float = 0.04     # minimum gap between successive volley shots
 const VOLLEY_SHOT_MAX_GAP: float = 0.18     # maximum gap — randomized so it reads as sporadic
 const VOLLEY_SPRAY_RADIUS: float = 1.0      # 1 m spread radius at target distance
@@ -429,8 +436,37 @@ func _tick_passive_fire(delta: float) -> void:
 	if _passive_fire_cd > 0.0:
 		return
 	_passive_fire_cd = PASSIVE_FIRE_INTERVAL
-	for i in range(PASSIVE_FIRE_COUNT):
-		_fire_volley_shot()
+	_fire_passive_missile_pair()
+
+
+# Spawn PASSIVE_MISSILE_COUNT homing crystal missiles in a tight fan around
+# the boss head — same MissileScene the main salvo uses, just with a much
+# smaller ring and forward-leaning launch bias so the pair lances toward the
+# player instead of climbing into a VLS arc first. Crystal type is randomized
+# per missile so consecutive pairs aren't always the same color.
+func _fire_passive_missile_pair() -> void:
+	var spawn_pos: Vector3 = _head_position()
+	var to_target: Vector3 = _target.global_position - spawn_pos
+	if to_target.length_squared() < 1e-4:
+		return
+	var forward: Vector3 = to_target.normalized()
+	var up_ref: Vector3 = Vector3.UP
+	if absf(forward.dot(Vector3.UP)) > 0.95:
+		up_ref = Vector3.FORWARD
+	var right: Vector3 = forward.cross(up_ref).normalized()
+	var up: Vector3 = right.cross(forward).normalized()
+	for i in range(PASSIVE_MISSILE_COUNT):
+		# Pair sits at opposing radial angles (0, π) → a left/right split.
+		var ring_angle: float = TAU * float(i) / float(PASSIVE_MISSILE_COUNT)
+		var radial: Vector3 = right * cos(ring_angle) + up * sin(ring_angle)
+		var dir: Vector3 = (Vector3.UP * PASSIVE_MISSILE_UP_BIAS + radial * PASSIVE_MISSILE_RADIAL_BIAS + forward * PASSIVE_MISSILE_FORWARD_BIAS).normalized()
+		var at: Vector3 = spawn_pos + radial * PASSIVE_MISSILE_RING_RADIUS
+		var phase: float = ring_angle
+		var spin: float = 1.0 if (i % 2 == 0) else -1.0
+		var ctype: int = randi() % 3
+		var m = MissileScene.new()
+		get_tree().current_scene.add_child(m)
+		m.setup(at, dir, self, _target, phase, spin, ctype)
 
 func _find_closest_player() -> Node3D:
 	var scene: Node = get_tree().current_scene
