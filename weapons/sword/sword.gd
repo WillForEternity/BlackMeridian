@@ -86,6 +86,40 @@ var _idle_t: float = 0.0
 # Default state at spawn: sword is in the saya. The player has to swing (or
 # trigger a super) to draw it out.
 var _sheathed: bool = true
+# Set true while the F2 grip-calibration panel is open: forces the blade to
+# stay drawn so the user can see/tweak its hand pose continuously.
+var _force_drawn: bool = false
+# Set by player.gd after the TPV SwordRig is reparented onto the hand bone.
+# When the body's Sword_Attack clip drives the hand (and thus the sword),
+# the legacy rig_tpv keyframe tween — authored for a hip-mounted rig —
+# stacks on top and causes wild flailing. Skip it for the TPV when set.
+var _tpv_rig_follows_bone: bool = false
+
+# Public: true when the blade is out of its saya, false when stowed. Used by
+# the player's animation picker to swap Idle → Sword_Idle while drawn.
+func is_drawn() -> bool:
+	return not _sheathed
+
+# Called by player.gd when the F2 sword-calibration panel is toggled. Forces
+# the blade out of the saya (skipping the quick-draw tween) and disables the
+# idle-sheathe timer while engaged.
+func set_force_drawn(force: bool) -> void:
+	_force_drawn = force
+	if force and _sheathed:
+		_draw_immediate()
+	_idle_t = 0.0
+
+# No-tween draw — snap the rig from saya to ready pose. Used by calibration
+# mode so the blade is visible the instant the panel opens.
+func _draw_immediate() -> void:
+	_sheathed = false
+	_kill_sheathe_tween()
+	rig_tpv.visible = true
+	rig_fpv.visible = true
+	rig_tpv.position = _rest_pos_tpv
+	rig_tpv.rotation = _rest_rot_tpv
+	rig_fpv.position = _rest_pos_fpv
+	rig_fpv.rotation = _rest_rot_fpv
 var _sheathe_tween: Tween
 var _scabbard: Node3D
 
@@ -113,10 +147,45 @@ func _ready() -> void:
 	# trail sampling don't change.
 	_install_katana_visuals(rig_tpv, false)
 	_install_katana_visuals(rig_fpv, true)
+	# TPV sword model is instanced in the scene under WeaponPivot/SwordRig.
+	# FPV SwordRig had no real model attached, so the FPV view showed nothing
+	# even after a draw. Instance the same GLB under rig_fpv at runtime.
+	_install_fpv_sword_model()
 	# Reposition the TipMarker children to the actual blade tip of the
 	# editor-instanced GLB so the trail tracks where the blade really is.
 	_position_tip_marker(rig_tpv, tip_tpv)
 	_position_tip_marker(rig_fpv, tip_fpv)
+
+# Mirror of the scene-defined Sketchfab_Scene transform used by the TPV rig,
+# so the FPV sword has the same orientation / scale relative to its rig as
+# the TPV one (the sword model is at huge native dimensions and needs the
+# basis to scale it down to roughly human-sword length).
+const _SKETCHFAB_SCENE_TRANSFORM := Transform3D(
+	Vector3(-0.006068659, -0.00042185374, -0.074752845),
+	Vector3(0.056880873, -0.048689853, -0.004342993),
+	Vector3(-0.048504993, -0.057044864, 0.0042597107),
+	Vector3(0.03624758, 0.66256917, 0.16979527)
+)
+
+func _install_fpv_sword_model() -> void:
+	if rig_fpv == null:
+		return
+	if rig_fpv.has_node("Sketchfab_Scene"):
+		return
+	var packed: PackedScene = load(AMARYLLIS_MODEL_PATH) as PackedScene
+	if packed == null:
+		push_warning("[Sword] FPV katana model failed to load at %s" % AMARYLLIS_MODEL_PATH)
+		return
+	var inst: Node3D = packed.instantiate() as Node3D
+	if inst == null:
+		return
+	inst.name = "Sketchfab_Scene"
+	inst.transform = _SKETCHFAB_SCENE_TRANSFORM
+	rig_fpv.add_child(inst)
+	# FPV weapons shouldn't cast shadows — the body that would shadow them is
+	# hidden anyway, and the close-up cast looks broken from the camera.
+	for n in inst.find_children("*", "GeometryInstance3D", true, false):
+		(n as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 # Override setup() so the scabbard can be parented to the player as soon as
 # the player ref is known (the base setup just stores `player`).
@@ -435,7 +504,11 @@ func tick(delta: float) -> void:
 	# hasn't swung for IDLE_SHEATHE_TIME seconds.
 	_idle_t += delta
 	var busy: bool = _super_active or (_active_swing_tween != null and _active_swing_tween.is_valid())
-	if not _sheathed and not busy and _idle_t >= IDLE_SHEATHE_TIME:
+	# Calibration mode pins the blade in the open hand so the user can tweak
+	# its grip transform without it stashing itself onto the hip every 5 s.
+	if _force_drawn:
+		_idle_t = 0.0
+	elif not _sheathed and not busy and _idle_t >= IDLE_SHEATHE_TIME:
 		_sheathe()
 	if not _trail_active:
 		return
@@ -503,10 +576,12 @@ func _swing() -> void:
 		for kf in data.keyframes:
 			total += float(kf.dur)
 		player.play_anim_locked("Sword_Attack", total * 0.85, 1.1)
-	# Both rigs run the full position+rotation animation so the swing reads
-	# the same in third- and first-person. FPVPivot is already scaled down in
-	# the scene, so the offsets shrink appropriately for the closer camera.
-	_tween_keyframes(rig_tpv, data.keyframes, _rest_rot_tpv, _rest_pos_tpv, true)
+	# FPV rig keeps the keyframe tween (it lives off the camera, not a bone).
+	# TPV rig is bone-attached — the body's Sword_Attack clip already swings
+	# the hand, so adding the keyframe tween on top double-animates and
+	# flails. Skip it when bone-attached.
+	if not _tpv_rig_follows_bone:
+		_tween_keyframes(rig_tpv, data.keyframes, _rest_rot_tpv, _rest_pos_tpv, true)
 	_tween_keyframes(rig_fpv, data.keyframes, _rest_rot_fpv, _rest_pos_fpv, true)
 
 	var marker: Marker3D = tip_fpv if is_fpv() else tip_tpv

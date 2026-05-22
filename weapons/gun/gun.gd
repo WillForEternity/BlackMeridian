@@ -46,15 +46,13 @@ func on_super_pressed() -> void:
 func tick(delta: float) -> void:
 	if _super_mode_left > 0.0:
 		_super_mode_left = maxf(_super_mode_left - delta, 0.0)
-	# Only the third-person rig needs continuous aim-tracking; cached _is_fpv
-	# is updated by the EventBus signal in the base class — no per-frame poll.
-	if _is_fpv:
-		return
-	var aim: Vector3 = player.get_aim_point()
-	var to_aim := aim - rig_tpv.global_position
-	if to_aim.length_squared() <= 0.04:
-		return
-	rig_tpv.look_at(aim, Vfx.safe_up(to_aim.normalized()))
+	# The TPV rig used to look_at(aim_point) every tick so the muzzle visually
+	# tracked the crosshair, but with the rig now bone-attached to hand_r that
+	# fought the body animation (gun rotation snapped to camera while the
+	# hand swung naturally) and the calibration panel couldn't show a stable
+	# pose. Bullets still fire toward the crosshair via player.get_aim_point()
+	# in _fire(), so visually the muzzle leads from wherever the hand points
+	# while the projectile lands where the camera is pointed.
 
 func on_attack_pressed() -> void:
 	if attack_cd > 0.0:
@@ -79,6 +77,10 @@ func _fire() -> void:
 	Vfx.brass_puff(spawn_marker.global_position, fire_dir)
 	_recoil(rig_fpv)
 	player.register_hit(0.28)
+	# Drive the body's Pistol_Shoot clip so the arms kick on each shot.
+	# Locked at clip length × 0.6 so rapid-fire still gets a fresh kick.
+	if player and player.has_method("play_anim_locked"):
+		player.play_anim_locked("Pistol_Shoot", cooldown() * 0.9, 1.4)
 
 func _spawn_bullet(at: Vector3, dir: Vector3) -> void:
 	var bullet: Node = ProjectilePool.acquire(get_tree().current_scene)

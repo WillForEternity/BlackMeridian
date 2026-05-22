@@ -418,36 +418,67 @@ var _occ_mask_tex: ImageTexture
 var _occ_last_center: Vector2 = Vector2(INF, INF)
 
 func _ready() -> void:
-	_heights = _generate_heights()
-	if flatten_origin:
-		var center_h: float = _heights[(GRID / 2) * GRID + (GRID / 2)]
-		for i in _heights.size():
-			_heights[i] -= center_h
-	# Shallower valleys: anything below the spawn plane is compressed by half.
-	for i in _heights.size():
-		if _heights[i] < 0.0:
-			_heights[i] *= 0.5
-	_init_stream_noise()
-	_carve_stream(_heights)
+	# Startup timing instrumentation. _ready blocks the menu→world transition,
+	# so anything slow here shows up as the "select solo and wait" delay. Each
+	# tagged block prints its cost so the bottleneck is obvious next launch.
+	var _t0: int = Time.get_ticks_msec()
+	var _tt: int = _t0
+	# Heightmap generation + carving costs ~1 s. Cache the final post-carve
+	# heights to disk so subsequent launches load in tens of ms. Pass
+	# --bake-heights to force regeneration (after changing noise_seed,
+	# noise constants, or flatten_origin).
+	var heights_cached: bool = _ensure_heights_bake()
+	print("[startup] heights (cached=%s): %d ms" % [heights_cached, Time.get_ticks_msec() - _tt]); _tt = Time.get_ticks_msec()
 	_compute_river_flow()
+	print("[startup] compute_river_flow: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
 	_extract_river_network()
 	_smooth_and_resample_polylines()
-	_draw_river_debug()
+	print("[startup] river network+smooth: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
+	# Particle-descent water simulation, baked once to res://baked/water.bin
+	# and loaded on subsequent launches. Decoding the bake takes ~7 s because
+	# the file holds three 4097² float arrays (≈200 MB), so skip the load
+	# entirely on casual launches — the only consumers are the mesh build
+	# (gated below) and the user-alg viz, neither of which run without
+	# --bake-water. Pass --bake-water to load + render water.
+	if OS.get_cmdline_args().has("--bake-water"):
+		_ensure_water_bake()
+	print("[startup] ensure_water_bake: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
 	_ground_material = _build_ground_material()
+	print("[startup] ground_material: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
 	_build_far_terrain()
+	print("[startup] far_terrain: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
 	_attach_collision(_heights)
+	print("[startup] attach_collision: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
 	_build_height_texture()
+	print("[startup] build_height_texture: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
 	_init_foliage_resources()
+	print("[startup] init_foliage: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
 	if not GRASS_DISABLED:
 		_build_grass_patch()
+	print("[startup] build_grass_patch: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
 	_init_tree_placement_noise()
 	_init_stone_resources()
 	_init_flower_resources()
 	_init_occluder_mask()
+	print("[startup] init_tree/stone/flower/occluder: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
 	if STREAM_ENABLED:
 		_water_material = _build_water_material()
 		_sand_material = _build_sand_material()
 		_build_lake()
+	print("[startup] water_material+lake: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
+	# Water mesh + grass cull mask are built from the bake (loaded or just
+	# computed by _ensure_water_bake). The sparse mesh build still allocates
+	# multi-MB index/byte arrays from a 4097² sim grid — heavy enough that
+	# fast iteration is painful when you're not actually testing water. Gate
+	# the whole pipeline on the same --bake-water flag the bake itself uses,
+	# so casual launches skip both the sim and the mesh upload entirely.
+	if OS.get_cmdline_args().has("--bake-water"):
+		_build_baked_water()
+		_build_water_grass_cull_mask_from_bake()
+	else:
+		print("[Bake] --bake-water not set; skipping water mesh + cull mask")
+	print("[startup] water_mesh: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
+	print("[startup] TOTAL _ready: %d ms" % (Time.get_ticks_msec() - _t0))
 	var parent := get_parent()
 	if parent:
 		_sun_light = parent.get_node_or_null("DirectionalLight3D") as DirectionalLight3D
@@ -706,7 +737,12 @@ func _process(_dt: float) -> void:
 	_update_loading_screen(_dt)
 	if not _user_alg_autostart_done and USER_ALG_AUTOSTART != Vector2.INF and not _heights.is_empty():
 		_user_alg_autostart_done = true
-		_start_user_alg_at(USER_ALG_AUTOSTART.x, USER_ALG_AUTOSTART.y)
+		# The user-algorithm autostart is a debug viz for the lake/river bake
+		# pipeline — only relevant when iterating water with --bake-water.
+		# Without that flag we skip both the bake load and the viz; press P
+		# at runtime to trigger the visualisation manually.
+		if OS.get_cmdline_args().has("--bake-water") and not _wsim_baked:
+			_start_user_alg_at(USER_ALG_AUTOSTART.x, USER_ALG_AUTOSTART.y)
 	if _user_alg_active and not _user_alg_done:
 		_user_alg_cooldown -= _dt
 		while _user_alg_cooldown <= 0.0 and not _user_alg_done:
@@ -722,6 +758,16 @@ func _process(_dt: float) -> void:
 				_user_alg_river.size(), lake_n,
 				"[DONE]" if _user_alg_done else ("[LAKE]" if _user_alg_mode == 1 else "[DESCENT]"),
 			]
+	# Algorithm just finished — tear down the debug viz. The actual water
+	# mesh comes from the BAKED particle sim, not the per-trace algorithm.
+	if _user_alg_done and not _user_alg_water_built:
+		_user_alg_water_built = true
+		if _user_alg_river_mi:
+			_user_alg_river_mi.queue_free(); _user_alg_river_mi = null
+		if _user_alg_lake_mi:
+			_user_alg_lake_mi.queue_free(); _user_alg_lake_mi = null
+		if _user_alg_origin_mi:
+			_user_alg_origin_mi.queue_free(); _user_alg_origin_mi = null
 	if _fps_label:
 		_fps_label.text = "%d fps" % Engine.get_frames_per_second()
 	if _coord_label:
@@ -2739,6 +2785,9 @@ uniform float hemi_tilt = 0.55;
 uniform vec2  tile_cull_center = vec2(0.0);
 uniform float tile_fade_in_inner = 0.0;
 uniform float tile_fade_in_outer = 0.0;
+uniform sampler2D water_mask_tex : filter_linear, repeat_disable;
+uniform float water_mask_active = 0.0;
+uniform float terrain_size_tile = 1024.0;
 // Direction TOWARD the sun in world space, set per-frame from the
 // DirectionalLight3D. Default = straight up so first frame isn't black.
 uniform vec3  sun_dir_world = vec3(0.0, 1.0, 0.0);
@@ -2822,6 +2871,16 @@ void fragment() {
 		float surv = fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 		if (surv > keep_p) discard;
 	}
+	// Water mask: drop blades whose world XZ falls inside a river/lake cell.
+	// Per-blade dither threshold (deterministic from world XZ) so the cull
+	// edge is dithered across a few cells instead of a hard grid line.
+	if (water_mask_active > 0.5) {
+		vec2 wu = (v_world_pos.xz + vec2(terrain_size_tile * 0.5)) / terrain_size_tile;
+		float in_water = texture(water_mask_tex, wu).r;
+		vec2 p = floor(v_world_pos.xz * 7.13);
+		float threshold = fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453) * 0.5 + 0.25;
+		if (in_water > threshold) discard;
+	}
 	float bend = COLOR.r;
 	float dry  = COLOR.g;
 	float hue  = COLOR.b;
@@ -2890,6 +2949,8 @@ render_mode cull_disabled, diffuse_burley, specular_disabled, world_vertex_coord
 uniform sampler2D heightmap : filter_linear, repeat_disable;
 uniform sampler2D centerline_z_tex : filter_linear, repeat_disable;
 uniform sampler2D occluder_mask : filter_nearest, repeat_disable;
+uniform sampler2D water_mask_tex : filter_linear, repeat_disable;
+uniform float water_mask_active = 0.0;
 uniform float occluder_extent = 220.0;  // world extent (m) covered by the mask
 uniform float terrain_size = 1024.0;
 uniform float terrain_cell = 1.0;
@@ -3068,6 +3129,14 @@ void vertex() {
 		float dz_riv = abs(anchored.y - cz_at);
 		keep *= step(bank_exclusion, dz_riv);
 	}
+	// Water mask: blades inside / near a river or lake cell get culled.
+	// Bilinear sample + smoothstep gives a soft boundary instead of a
+	// rectilinear 1 m grid edge.
+	if (water_mask_active > 0.5) {
+		vec2 wu = (anchored + vec2(terrain_size * 0.5)) / terrain_size;
+		float in_water = texture(water_mask_tex, wu).r;
+		keep *= 1.0 - smoothstep(0.25, 0.75, in_water);
+	}
 	// Occluder mask: stumps, fallen logs, placed wood. Anywhere the mask is
 	// non-zero, this blade is inside an object — drop it (the trailing VERTEX
 	// collapse below maps it to a degenerate triangle).
@@ -3186,6 +3255,14 @@ uniform vec3 dirt_light  : source_color = vec3(0.42, 0.30, 0.18);
 uniform vec3 rock_dark   : source_color = vec3(0.22, 0.21, 0.20);
 uniform vec3 rock_light  : source_color = vec3(0.55, 0.52, 0.48);
 uniform vec3 snow_color  : source_color = vec3(0.93, 0.95, 0.97);
+// Riverbed / lakebed palette — shallow shoreline reads as wet sand, deep
+// reads as muddy silt. The blend uses the same water mask as the grass cull
+// (filter_linear) so the boundary anti-aliases naturally.
+uniform vec3 bed_sand    : source_color = vec3(0.55, 0.46, 0.30);
+uniform vec3 bed_silt    : source_color = vec3(0.22, 0.18, 0.13);
+uniform sampler2D water_mask_tex : filter_linear, repeat_disable;
+uniform float water_mask_active = 0.0;
+uniform float terrain_size_ground = 1024.0;
 uniform float snowline       = 65.0;
 uniform float snowline_fade  = 10.0;
 uniform float grass_normal_y = 0.78;     // above this = considered "flat enough" for grass
@@ -3266,6 +3343,22 @@ void fragment() {
 	snow_mask *= mix(0.85, 1.0, fbm(wp.xz * 0.6));
 	ground = mix(ground, snow_color, snow_mask);
 
+	// Riverbed / lakebed: replace surface materials with a sand→silt blend
+	// where the water mask says we're under water. The water mask is the
+	// same texture the grass shader uses (filter_linear so the bed→bank
+	// transition anti-aliases). Sand on the rim, silt at the centre.
+	if (water_mask_active > 0.5) {
+		vec2 wu = (wp.xz + vec2(terrain_size_ground * 0.5)) / terrain_size_ground;
+		float in_water = texture(water_mask_tex, wu).r;
+		// Bed only paints STRICTLY inside the water mask — earlier 0.15
+		// threshold leaked an orange halo 1 cell (~1 m) outside the actual
+		// water shape. Pushing to 0.7 keeps the bed under the water plane.
+		float bed_t = smoothstep(0.7, 0.95, in_water);
+		vec3 bed = mix(bed_sand, bed_silt, smoothstep(0.8, 0.98, in_water));
+		bed *= mix(0.85, 1.1, fbm(wp.xz * 0.7));
+		ground = mix(ground, bed, bed_t);
+	}
+
 	ALBEDO = ground;
 	ROUGHNESS = mix(0.95, mix(0.7, 0.5, rock_mask), max(rock_mask, snow_mask * 0.4));
 	SPECULAR = mix(0.05, 0.35, snow_mask);
@@ -3293,6 +3386,11 @@ func _discover_tree_paths() -> Array:
 		paths = TREE_FALLBACK_PATHS.duplicate()
 	return paths
 
+# Polyhaven assets whose names look like trees but ship a horizontal-log mesh
+# (e.g. fallen_log_5m_PROXY) instead of a standing trunk. They break the
+# upright/fall math when treated as trees, so skip the whole folder.
+const _TREE_DIR_SKIPLIST := ["dead_tree_trunk_02"]
+
 func _scan_tree_dir(path: String, out: Array, depth_left: int) -> void:
 	var dir := DirAccess.open(path)
 	if dir == null:
@@ -3305,7 +3403,7 @@ func _scan_tree_dir(path: String, out: Array, depth_left: int) -> void:
 			continue
 		var full: String = path + fname
 		if dir.current_is_dir():
-			if depth_left > 0:
+			if depth_left > 0 and not _TREE_DIR_SKIPLIST.has(fname):
 				_scan_tree_dir(full + "/", out, depth_left - 1)
 		elif fname.ends_with(".glb") or fname.ends_with(".gltf"):
 			out.append(full)
@@ -3405,6 +3503,7 @@ const USER_ALG_AUTOSTART: Vector2 = Vector2(294.4, 426.4)
 # that gets bridged; anything deeper is the "final" lake.
 const USER_ALG_LAKE_DEPTH_TERMINATE: float = 5.0
 var _user_alg_autostart_done: bool = false
+var _user_alg_water_built: bool = false   # set once we replace debug viz with real water
 var _user_alg_active: bool = false
 var _user_alg_done: bool = false
 var _user_alg_origin_world: Vector3 = Vector3.ZERO
@@ -3437,6 +3536,12 @@ var _river_mouth_lake: Dictionary = {}     # {center: Vector2, water_y: float, c
 # flood-fill from the lake seed, is underwater.
 const RIVER_LAKE_WATER_Y: float = -50.0
 const RIVER_LAKE_SEED_WORLD: Vector2 = Vector2(-296.0, 426.0)
+# River surface mesh.
+const RIVER_MAX_WIDTH: float = 5.0
+const RIVER_MIN_WIDTH: float = 1.2
+const RIVER_WATER_LIFT: float = 0.08            # surface sits this far above filled-h
+var _river_water_mi: MeshInstance3D
+var _river_water_material: ShaderMaterial
 
 func _compute_river_flow() -> void:
 	var t_start: int = Time.get_ticks_msec()
@@ -4310,6 +4415,1142 @@ func _add_debug_ring(im: ImmediateMesh, center: Vector2, y: float, radius: float
 		var p1 := Vector3(center.x + cos(a1) * radius, y, center.y + sin(a1) * radius)
 		im.surface_add_vertex(p0)
 		im.surface_add_vertex(p1)
+
+# --- Actual river water mesh + shader -----------------------------------------
+# Builds a single ArrayMesh containing:
+#   surface 0: the river — a triangle strip along the smoothed centerline, with
+#              per-vertex flow tangent in COLOR.rg (encoded 0..1) and width
+#              scaled by sqrt(accumulation/max_accumulation).
+#   surface 1: the lake — one quad per flood-filled lake cell at the lake's
+#              water_y. Lake has no flow direction (COLOR.rg = 0.5, 0.5).
+# Both surfaces share a Godot 4 spatial shader adapted from Arnklit/Waterways:
+# depth-based Beer-Lambert color, refraction via screen_texture, shoreline
+# foam from depth_texture, edge-fade alpha so the water dissolves cleanly
+# into wet ground rather than punching a hard outline.
+func _build_river_water() -> void:
+	print("[River] _build_river_water: trunk=%d smoothed polylines, lake=%s" % [
+		_river_polylines_smoothed.size(),
+		"yes" if not _river_mouth_lake.is_empty() else "no"])
+	if _river_polylines_smoothed.is_empty() and _river_mouth_lake.is_empty():
+		print("[River] no data; skipping water build")
+		return
+	_river_water_material = _build_river_water_material()
+	var arr_mesh := ArrayMesh.new()
+	_build_river_strip_surface(arr_mesh)
+	_build_river_lake_surface(arr_mesh)
+	print("[River] water mesh: %d surfaces" % arr_mesh.get_surface_count())
+	if arr_mesh.get_surface_count() == 0:
+		return
+	_river_water_mi = MeshInstance3D.new()
+	_river_water_mi.mesh = arr_mesh
+	_river_water_mi.material_override = _river_water_material
+	_river_water_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# Loose AABB covering most of the map — the water sits across a big region
+	# and we'd rather avoid frustum culling false-negatives.
+	_river_water_mi.custom_aabb = AABB(Vector3(-SIZE * 0.5, -200.0, -SIZE * 0.5), Vector3(SIZE, 400.0, SIZE))
+	add_child(_river_water_mi)
+
+func _build_river_strip_surface(arr_mesh: ArrayMesh) -> void:
+	if _river_polylines_smoothed.is_empty():
+		return
+	var poly: Array = _river_polylines_smoothed[0] as Array
+	if poly.size() < 2:
+		return
+	var max_acc: float = 1.0
+	for p in poly:
+		var pa: float = p.acc as float
+		if pa > max_acc:
+			max_acc = pa
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	for i in poly.size():
+		var p = poly[i]
+		var here: Vector2 = p.wpos as Vector2
+		var tangent: Vector2
+		if i == 0:
+			tangent = ((poly[1].wpos as Vector2) - here)
+		elif i == poly.size() - 1:
+			tangent = (here - (poly[i - 1].wpos as Vector2))
+		else:
+			tangent = ((poly[i + 1].wpos as Vector2) - (poly[i - 1].wpos as Vector2))
+		if tangent.length_squared() < 1e-6:
+			tangent = Vector2(1, 0)
+		tangent = tangent.normalized()
+		var perp := Vector2(-tangent.y, tangent.x)
+		var width: float = lerpf(RIVER_MIN_WIDTH, RIVER_MAX_WIDTH, sqrt((p.acc as float) / max_acc))
+		var half_w: float = width * 0.5
+		var left: Vector2 = here - perp * half_w
+		var right: Vector2 = here + perp * half_w
+		var y: float = (p.h as float) + RIVER_WATER_LIFT
+		verts.append(Vector3(left.x, y, left.y))
+		verts.append(Vector3(right.x, y, right.y))
+		# UV: V along stream, U across (0 left, 1 right). Used by future
+		# normal-map sampling; depth-based color doesn't need it.
+		var v_along: float = float(i) * 0.5
+		uvs.append(Vector2(0.0, v_along))
+		uvs.append(Vector2(1.0, v_along))
+		# COLOR.rg encodes flow tangent in XZ (mapped to 0..1).
+		var flow_r: float = tangent.x * 0.5 + 0.5
+		var flow_g: float = tangent.y * 0.5 + 0.5
+		colors.append(Color(flow_r, flow_g, 1.0, 1.0))  # B=1 marks "river" (vs lake)
+		colors.append(Color(flow_r, flow_g, 1.0, 1.0))
+		if i > 0:
+			var b: int = (i - 1) * 2
+			indices.append_array([b, b + 1, b + 2, b + 1, b + 3, b + 2])
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_COLOR] = colors
+	arr[Mesh.ARRAY_INDEX] = indices
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	arr_mesh.surface_set_name(arr_mesh.get_surface_count() - 1, "river_strip")
+
+func _build_river_lake_surface(arr_mesh: ArrayMesh) -> void:
+	if _river_mouth_lake.is_empty():
+		return
+	var cells: PackedInt32Array = _river_mouth_lake.cells as PackedInt32Array
+	if cells.is_empty():
+		return
+	var water_y: float = (_river_mouth_lake.water_y as float) + RIVER_WATER_LIFT
+	var half: float = SIZE * 0.5
+	var s: float = CELL * 0.5
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	for c in cells:
+		var gx: int = c % GRID
+		var gz: int = c / GRID
+		var wx: float = float(gx) * CELL - half
+		var wz: float = float(gz) * CELL - half
+		var base: int = verts.size()
+		verts.append(Vector3(wx - s, water_y, wz - s))
+		verts.append(Vector3(wx + s, water_y, wz - s))
+		verts.append(Vector3(wx - s, water_y, wz + s))
+		verts.append(Vector3(wx + s, water_y, wz + s))
+		for _i in 4:
+			# Lake uses flow=(0,0) → encoded (0.5,0.5), B=0 marks "lake".
+			colors.append(Color(0.5, 0.5, 0.0, 1.0))
+			uvs.append(Vector2(0.0, 0.0))
+		indices.append_array([base, base + 1, base + 3, base, base + 3, base + 2])
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_COLOR] = colors
+	arr[Mesh.ARRAY_INDEX] = indices
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	arr_mesh.surface_set_name(arr_mesh.get_surface_count() - 1, "river_lake")
+
+func _build_river_water_material() -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+render_mode cull_disabled, unshaded;
+
+void fragment() {
+	// COLOR.a is 1 only on cells where water_above_terrain > 0; discard
+	// fragments whose interpolated alpha is below 0.5 so the mesh paints
+	// only on actual water cells, not the dead vertices that sit on the
+	// terrain to keep the grid contiguous.
+	if (COLOR.a < 0.5) discard;
+	// River (COLOR.b == 1) = magenta. Lake (COLOR.b == 0) = cyan.
+	if (COLOR.b > 0.5) {
+		ALBEDO = vec3(1.0, 0.0, 0.9);
+	} else {
+		ALBEDO = vec3(0.0, 0.8, 1.0);
+	}
+	ALPHA = 1.0;
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = sh
+	return mat
+
+# Stub of the real shader, kept for when we re-enable the depth/foam/refraction
+# look. For now we only use the debug material above.
+func _build_river_water_material_real() -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+render_mode cull_disabled, specular_schlick_ggx, depth_draw_always, blend_mix;
+
+uniform sampler2D depth_texture : hint_depth_texture, filter_nearest, repeat_disable;
+uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap, repeat_disable;
+
+uniform vec3 shallow_color : source_color = vec3(0.36, 0.62, 0.55);
+uniform vec3 deep_color    : source_color = vec3(0.02, 0.10, 0.13);
+uniform vec4 foam_color    : source_color = vec4(0.96, 0.98, 1.00, 1.0);
+uniform float depth_absorption = 5.0;   // Beer-Lambert distance for color
+uniform float refraction = 0.04;
+uniform float foam_distance = 0.5;
+uniform float edge_fade = 0.35;
+uniform float roughness_val = 0.06;
+uniform float specular_val = 0.50;
+
+void fragment() {
+	// Depth of the geometry BEHIND the water at this fragment, linearised
+	// to view-space Z (positive away from camera) via the projection matrix.
+	float bg_depth_raw = textureLod(depth_texture, SCREEN_UV, 0.0).r;
+	float z_ndc = bg_depth_raw * 2.0 - 1.0;
+	float bg_lin = -PROJECTION_MATRIX[3][2] / (z_ndc + PROJECTION_MATRIX[2][2]);
+	// View-space depth of the water surface itself.
+	float surf_lin = -VERTEX.z;
+	// Thickness of water between camera-ray's water hit and the bed.
+	float water_depth = max(0.0, bg_lin - surf_lin);
+
+	// COLOR.b discriminates river (1) from lake (0). The river's ~8 cm
+	// depth is too shallow for Beer-Lambert / depth-based foam to look
+	// right — force a constant tint contribution and tight foam there.
+	float is_river = step(0.5, COLOR.b);
+
+	// Beer-Lambert color mix for lakes; constant 0.6 for river.
+	float depth_t = 1.0 - exp(-water_depth / depth_absorption);
+	depth_t = mix(depth_t, 0.6, is_river);
+
+	// Refraction
+	vec2 flow_xz = COLOR.rg * 2.0 - 1.0;
+	vec2 refr_uv = SCREEN_UV + flow_xz * refraction * (1.0 - depth_t);
+	refr_uv = clamp(refr_uv, vec2(0.001), vec2(0.999));
+	vec3 behind = textureLod(screen_texture, refr_uv, 0.0).rgb;
+
+	vec3 col = mix(shallow_color, deep_color, depth_t);
+	col = mix(behind, col, depth_t);
+
+	// Foam: lakes can foam where bed approaches surface; rivers only at the
+	// very edge so the shallow centre doesn't go solid white.
+	float foam_d_local = mix(foam_distance, 0.04, is_river);
+	float foam_mask = smoothstep(foam_d_local, 0.0, water_depth);
+	col = mix(col, foam_color.rgb, foam_mask * foam_color.a);
+
+	ALBEDO = col;
+	ROUGHNESS = roughness_val;
+	SPECULAR = specular_val;
+	METALLIC = 0.0;
+	// Alpha — for the river (is_river already computed above), use the
+	// shallow-water floor of 0.55 so it stays visible. Lakes use pure
+	// depth-based fade so the bed slope alpha-ramps to zero at the shore.
+	float a = clamp(water_depth / edge_fade, 0.0, 1.0);
+	ALPHA = mix(a, max(a, 0.55), is_river);
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = sh
+	return mat
+
+# Called once the user-algorithm finishes. Removes the debug yellow lines,
+# cyan lake quads, and pink origin marker, then builds the actual water
+# meshes from _user_alg_river (strip) and _user_alg_lakes (one quad per cell
+# at that lake's max_h water level).
+const RIVER_STRIP_WIDTH: float = 10.0
+const LAKE_PLANE_MARGIN: float = 6.0
+# How deep we carve the river centerline below the original terrain so the
+# water surface (left at original level) gets real visible depth. Direct
+# neighbours of each centerline cell carve a softer half-depth so the
+# channel reads as a U-shape rather than a stepped trench.
+const RIVER_CARVE_DEPTH: float = 0.35
+# --- Baked water simulation ----------------------------------------------
+# A particle-descent water sim (Nick McDonald / SimpleHydrology style) runs
+# once on the dev machine, dumps two full-res Float32 arrays — discharge
+# (per-cell volume that flowed through) and pool depth (per-cell water
+# height above terrain in detected lakes) — to res://baked/water.bin.
+# Subsequent launches load that file and skip the sim entirely.
+const WATER_BAKE_PATH := "res://baked/water.bin"
+const WATER_BAKE_VERSION := 3   # v3: SUB=4 (0.25m sim grid), longer particle age
+# Particle sim tuning. More particles + larger per-particle volume gives
+# fuller lakes (each particle can raise a basin by more before it runs out
+# and dies). flood_max_pops is the per-stagnation safety cap on the local
+# priority-flood; the largest natural basin is ~2k cells but the flood can
+# explore much more terrain before locating its spillover.
+const WSIM_PARTICLE_COUNT: int = 20000
+# Step size in the particle sim is half a sim cell (= 0.5 / SUB metres). To
+# traverse the full ~1.5 km river at SUB=4 (0.125 m per step) a particle
+# needs ~12 k steps; safety = MAX_AGE × 4 gives the headroom.
+const WSIM_MAX_AGE: int = 4000
+const WSIM_GRAVITY: float = 1.4
+const WSIM_DAMP: float = 0.85
+const WSIM_EVAP_RATE: float = 0.0015
+const WSIM_MIN_VOLUME: float = 0.01
+const WSIM_PARTICLE_VOLUME: float = 3.0   # initial volume each particle carries
+# Sim grid is finer than the heightmap. At SUB=4 the sim runs on 0.25 m
+# cells (4097² for GRID=1025), so the discharge/pool fields have quarter-
+# meter resolution. Heights for the sim are bilinear-interpolated from the
+# heightmap.
+const WATER_SIM_SUBDIV: int = 4
+var _wsim_grid: int = 0                  # runtime: (GRID-1)*SUB + 1
+var _wsim_cell: float = 0.0              # runtime: CELL / SUB
+var _wsim_heights: PackedFloat32Array    # heights resampled to sim grid
+var _wsim_discharge: PackedFloat32Array
+var _wsim_pool_depth: PackedFloat32Array
+var _wsim_baked: bool = false
+# Lakes with fewer than this many cells are treated as bumps in the river
+# rather than real lakes — they don't get rendered as lakes AND the river
+# strip extends THROUGH them (instead of breaking at their cells).
+const MIN_LAKE_CELLS_FOR_RENDER: int = 10
+# Saved original heights at river cells. Water surface mesh uses these (the
+# carve happens AFTER the mesh is built so the mesh stays at ground-level).
+var _river_cell_surface_h: Dictionary = {}     # cell idx -> original h
+# Cells claimed by lakes BIG ENOUGH to render. River strip breaks at these
+# cells; smaller lakes get skipped and the river flows through.
+var _user_alg_big_lake_cells: Dictionary = {}
+
+# --- Baked heightmap -----------------------------------------------------
+
+const HEIGHTS_BAKE_PATH := "res://baked/heights.bin"
+# Bumped when the on-disk format changes incompatibly so stale caches are
+# rejected rather than silently producing a broken terrain.
+const HEIGHTS_BAKE_VERSION: int = 1
+
+# Returns true if the post-carve heightmap was loaded from cache (fast path),
+# false if it had to be regenerated. Pass --bake-heights to force regen.
+func _ensure_heights_bake() -> bool:
+	var force: bool = OS.get_cmdline_args().has("--bake-heights")
+	if not force and FileAccess.file_exists(HEIGHTS_BAKE_PATH):
+		if _load_heights_bake():
+			return true
+		push_warning("[Heights] cache load failed; regenerating")
+	_heights = _generate_heights()
+	if flatten_origin:
+		var center_h: float = _heights[(GRID / 2) * GRID + (GRID / 2)]
+		for i in _heights.size():
+			_heights[i] -= center_h
+	for i in _heights.size():
+		if _heights[i] < 0.0:
+			_heights[i] *= 0.5
+	_init_stream_noise()
+	_carve_stream(_heights)
+	_save_heights_bake()
+	return false
+
+# Cache layout (little-endian):
+#   u32 version
+#   u32 grid (must equal GRID)
+#   i32 noise_seed (sanity check — mismatched seed implies stale cache)
+#   u8  flatten_origin (0 / 1)
+#   pad to 16 bytes
+#   GRID*GRID float32s — post-flatten, post-valley-halve, post-carve heights
+func _load_heights_bake() -> bool:
+	var f := FileAccess.open(HEIGHTS_BAKE_PATH, FileAccess.READ)
+	if f == null:
+		return false
+	var ver: int = f.get_32()
+	var grid: int = f.get_32()
+	var seed: int = f.get_32()
+	var flat: int = f.get_8()
+	# Skip padding to 16-byte header.
+	f.get_8(); f.get_8(); f.get_8()
+	if ver != HEIGHTS_BAKE_VERSION or grid != GRID or seed != noise_seed or flat != int(flatten_origin):
+		f.close()
+		push_warning("[Heights] cache header mismatch (ver=%d grid=%d seed=%d flat=%d); rebake with --bake-heights" % [ver, grid, seed, flat])
+		return false
+	var n_bytes: int = GRID * GRID * 4
+	var data := f.get_buffer(n_bytes)
+	f.close()
+	if data.size() != n_bytes:
+		push_warning("[Heights] cache short read (got %d, want %d)" % [data.size(), n_bytes])
+		return false
+	_heights = data.to_float32_array()
+	# Stream noise still has to be initialised — _carve_stream isn't being
+	# re-run but downstream code (e.g. _heights_at, lake placement) uses the
+	# same noise field.
+	_init_stream_noise()
+	print("[Heights] loaded cache from %s" % HEIGHTS_BAKE_PATH)
+	return true
+
+func _save_heights_bake() -> void:
+	var dir := DirAccess.open("res://")
+	if dir != null and not dir.dir_exists("baked"):
+		dir.make_dir("baked")
+	var f := FileAccess.open(HEIGHTS_BAKE_PATH, FileAccess.WRITE)
+	if f == null:
+		push_warning("[Heights] failed to open %s for write" % HEIGHTS_BAKE_PATH)
+		return
+	f.store_32(HEIGHTS_BAKE_VERSION)
+	f.store_32(GRID)
+	f.store_32(noise_seed)
+	f.store_8(int(flatten_origin))
+	# Padding to 16-byte header.
+	f.store_8(0); f.store_8(0); f.store_8(0)
+	f.store_buffer(_heights.to_byte_array())
+	f.close()
+	print("[Heights] saved cache to %s (%d floats)" % [HEIGHTS_BAKE_PATH, _heights.size()])
+
+# --- Baked water sim implementation --------------------------------------
+
+# At startup: if res://baked/water.bin exists, load. Otherwise, run the sim
+# synchronously (slow, ~10–30 s on first launch) and save the result.
+func _ensure_water_bake() -> void:
+	if FileAccess.file_exists(WATER_BAKE_PATH):
+		if _load_water_bake():
+			_wsim_baked = true
+			print("[Bake] loaded water sim from %s" % WATER_BAKE_PATH)
+			return
+		push_warning("[Bake] failed to load %s" % WATER_BAKE_PATH)
+	# No valid bake. Running the sim costs minutes — only do it when explicitly
+	# asked via the --bake-water CLI flag. Otherwise just leave water off so
+	# casual game launches stay fast.
+	if not OS.get_cmdline_args().has("--bake-water"):
+		push_warning("[Bake] no bake found and --bake-water not passed; skipping sim. Water will not render. Run `godot --path . -- --bake-water` to bake.")
+		return
+	print("[Bake] water bake missing — running sim (--bake-water set)...")
+	var t0: int = Time.get_ticks_msec()
+	_run_water_sim()
+	_save_water_bake()
+	_wsim_baked = true
+	print("[Bake] done in %d ms, saved to %s" % [Time.get_ticks_msec() - t0, WATER_BAKE_PATH])
+
+# Runs the full simulation. Drives the user-algorithm synchronously first to
+# get source + sink-lake cells, then spawns WSIM_PARTICLE_COUNT particles at
+# the source and lets them descend on the full-res _heights, terminating
+# when they enter the sink lake / leave the map / age out / dry up.
+func _run_water_sim() -> void:
+	# 1) User-algorithm synchronously, no animation, just to identify
+	# source + lake cells. Suppress its debug viz creation.
+	_start_user_alg_at(USER_ALG_AUTOSTART.x, USER_ALG_AUTOSTART.y)
+	var safety: int = 200000
+	while not _user_alg_done and safety > 0:
+		_user_alg_done = _user_alg_step()
+		safety -= 1
+	# Tear down any debug MIs the algorithm created — they're not part of
+	# the bake output.
+	if _user_alg_river_mi:
+		_user_alg_river_mi.queue_free(); _user_alg_river_mi = null
+	if _user_alg_lake_mi:
+		_user_alg_lake_mi.queue_free(); _user_alg_lake_mi = null
+	if _user_alg_origin_mi:
+		_user_alg_origin_mi.queue_free(); _user_alg_origin_mi = null
+	# 2) Build source + sink-cell set.
+	var source_idx: int = -1
+	if not _user_alg_river.is_empty():
+		source_idx = _user_alg_river[0]
+	if source_idx < 0:
+		push_warning("[Bake] user_alg gave no river — can't bake")
+		return
+	var sink_cells := {}
+	if not _user_alg_river.is_empty():
+		var last_river_cell: int = _user_alg_river[_user_alg_river.size() - 1]
+		if _user_alg_cell_to_lake.has(last_river_cell):
+			var lake_idx: int = _user_alg_cell_to_lake[last_river_cell]
+			if lake_idx < _user_alg_lakes.size():
+				var L = _user_alg_lakes[lake_idx]
+				if L != null:
+					for c in (L.cells as Dictionary):
+						sink_cells[c] = true
+	# 3) Build the finer sim grid: heights, allocate output arrays.
+	_wsim_grid = (GRID - 1) * WATER_SIM_SUBDIV + 1
+	_wsim_cell = CELL / float(WATER_SIM_SUBDIV)
+	_wsim_build_heights()
+	var SG: int = _wsim_grid
+	var N: int = SG * SG
+	_wsim_discharge = PackedFloat32Array()
+	_wsim_discharge.resize(N)
+	_wsim_pool_depth = PackedFloat32Array()
+	_wsim_pool_depth.resize(N)
+	# Convert source + sinks from GRID coords to sim-grid coords. Each
+	# heightmap cell maps to SUB² sim cells; we anchor sources at the
+	# top-left sub-cell, and stamp all SUB² sub-cells as sinks.
+	var src_gx_h: int = source_idx % GRID
+	var src_gz_h: int = source_idx / GRID
+	var src_sx: int = src_gx_h * WATER_SIM_SUBDIV
+	var src_sz: int = src_gz_h * WATER_SIM_SUBDIV
+	var sim_sink_cells: Dictionary = {}
+	for c in sink_cells:
+		var hgx: int = c % GRID
+		var hgz: int = c / GRID
+		for sz in WATER_SIM_SUBDIV:
+			for sx in WATER_SIM_SUBDIV:
+				var sx_idx: int = (hgz * WATER_SIM_SUBDIV + sz) * SG + (hgx * WATER_SIM_SUBDIV + sx)
+				sim_sink_cells[sx_idx] = true
+	# 4) Particle sim: spawn at source, descend on _wsim_heights. When a
+	# particle stagnates, _wsim_local_flood raises the local water level
+	# until the particle's remaining volume is consumed OR a spillover is
+	# found. Discharge accumulates along descent; pool_depth accumulates in
+	# basins. Sinks (terminal lake cells) absorb particles immediately.
+	print("[Bake] sim source=(%d,%d) on %d² grid, %d sink cells, %d particles…" % [
+		src_sx, src_sz, SG, sim_sink_cells.size(), WSIM_PARTICLE_COUNT])
+	var t_sim: int = Time.get_ticks_msec()
+	for p in WSIM_PARTICLE_COUNT:
+		if (p % 1000) == 0:
+			print("[Bake]   particle %d / %d  (%d ms)" % [p, WSIM_PARTICLE_COUNT, Time.get_ticks_msec() - t_sim])
+		_wsim_simulate_one_particle(src_sx, src_sz, sim_sink_cells)
+	# Stats so we know the sim worked.
+	var max_d: float = 0.0
+	var nonzero_d: int = 0
+	var max_p: float = 0.0
+	var nonzero_p: int = 0
+	for i in N:
+		if _wsim_discharge[i] > max_d: max_d = _wsim_discharge[i]
+		if _wsim_discharge[i] > 0.0: nonzero_d += 1
+		if _wsim_pool_depth[i] > max_p: max_p = _wsim_pool_depth[i]
+		if _wsim_pool_depth[i] > 0.05: nonzero_p += 1
+	print("[Bake] sim_grid=%d  discharge cells=%d max=%.2f  pool cells=%d max_depth=%.2f m" % [
+		_wsim_grid, nonzero_d, max_d, nonzero_p, max_p])
+
+# Bilinear-resample _heights (GRID×GRID at 1 m) to _wsim_heights
+# (_wsim_grid² at _wsim_cell metres). This is what the particle sim and the
+# local flood walk on.
+func _wsim_build_heights() -> void:
+	var SG: int = _wsim_grid
+	_wsim_heights = PackedFloat32Array()
+	_wsim_heights.resize(SG * SG)
+	var SUB: int = WATER_SIM_SUBDIV
+	var inv_sub: float = 1.0 / float(SUB)
+	for sz in SG:
+		for sx in SG:
+			var fx: float = float(sx) * inv_sub
+			var fz: float = float(sz) * inv_sub
+			var gx0: int = int(fx)
+			var gz0: int = int(fz)
+			var gx1: int = mini(gx0 + 1, GRID - 1)
+			var gz1: int = mini(gz0 + 1, GRID - 1)
+			var tx: float = fx - float(gx0)
+			var tz: float = fz - float(gz0)
+			var h00: float = _heights[gz0 * GRID + gx0]
+			var h10: float = _heights[gz0 * GRID + gx1]
+			var h01: float = _heights[gz1 * GRID + gx0]
+			var h11: float = _heights[gz1 * GRID + gx1]
+			_wsim_heights[sz * SG + sx] = lerp(lerp(h00, h10, tx), lerp(h01, h11, tx), tz)
+
+# One particle: spawn at (start_gx, start_gz), descend on the heightmap with
+# gravity-along-gradient + damping + evaporation. When it stagnates inside a
+# basin, run a LOCAL priority-flood from that cell to either (a) consume the
+# particle's remaining volume by raising the basin's water level, or (b)
+# discover a spillover and teleport the particle to the drain cell to
+# continue descent. This is the Nick-McDonald-style flood-on-stagnation; it
+# ensures lakes form only where particles actually pool, not at every
+# noise-induced depression in the heightmap.
+const WSIM_STAGNANT_SPEED: float = 0.05
+const WSIM_FLOOD_MAX_POPS: int = 2000000   # safety cap on the per-stagnation flood
+
+func _wsim_simulate_one_particle(start_gx: int, start_gz: int, sink_cells: Dictionary) -> void:
+	var SG: int = _wsim_grid
+	var pos := Vector2(float(start_gx) + 0.5, float(start_gz) + 0.5)
+	var speed := Vector2.ZERO
+	var volume: float = WSIM_PARTICLE_VOLUME
+	var safety: int = WSIM_MAX_AGE * 4
+	# Heightmap gradient is computed in WORLD units; on a finer grid we
+	# divide by _wsim_cell so the gradient magnitude (m of rise per m of
+	# horizontal distance) stays scale-invariant.
+	var inv_2cell: float = 0.5 / _wsim_cell
+	while volume >= WSIM_MIN_VOLUME and safety > 0:
+		safety -= 1
+		var gx: int = int(pos.x)
+		var gz: int = int(pos.y)
+		if gx < 1 or gz < 1 or gx >= SG - 1 or gz >= SG - 1:
+			return
+		var cell_idx: int = gz * SG + gx
+		_wsim_discharge[cell_idx] += volume
+		if sink_cells.has(cell_idx):
+			return
+		var h_l: float = _wsim_heights[cell_idx - 1]
+		var h_r: float = _wsim_heights[cell_idx + 1]
+		var h_u: float = _wsim_heights[cell_idx - SG]
+		var h_d: float = _wsim_heights[cell_idx + SG]
+		var grad := Vector2((h_r - h_l) * inv_2cell, (h_d - h_u) * inv_2cell)
+		speed += -grad * WSIM_GRAVITY / maxf(volume, 0.05)
+		speed *= WSIM_DAMP
+		var s_len: float = speed.length()
+		if s_len < WSIM_STAGNANT_SPEED:
+			# Stagnant — run local flood from the current cell.
+			var result := _wsim_local_flood(cell_idx, volume)
+			if not result.get("spilled", false):
+				return
+			var drain: int = result["drain_cell"]
+			pos = Vector2(float(drain % SG) + 0.5, float(drain / SG) + 0.5)
+			speed = Vector2.ZERO
+			volume = result["remaining_volume"]
+			continue
+		# Step in sim-cell units (a half cell per iter) so particles deposit
+		# discharge on every sim cell they cross.
+		pos += speed.normalized() * 0.5
+		volume *= (1.0 - WSIM_EVAP_RATE)
+
+# Local priority-flood from a stagnated particle. Pops cells in height order;
+# as the popped height rises above the current water_level, particle volume
+# is consumed at a rate of (cell_count) m³ per m of level rise (because each
+# of those basin cells gains 1 m of water). Returns:
+#   { spilled: bool, drain_cell: int, remaining_volume: float }
+# spilled=true means we found a lower outside neighbour; the particle should
+# teleport to drain_cell and continue with remaining_volume.
+func _wsim_local_flood(seed: int, particle_volume: float) -> Dictionary:
+	var SG: int = _wsim_grid
+	var heap := _MinHeap.new()
+	heap.push(seed, _wsim_heights[seed])
+	var visited: Dictionary = {seed: true}
+	var basin: PackedInt32Array = PackedInt32Array([seed])
+	var water_level: float = _wsim_heights[seed]
+	var remaining: float = particle_volume
+	var pops: int = 0
+	while not heap.is_empty() and pops < WSIM_FLOOD_MAX_POPS:
+		pops += 1
+		var c: int = heap.pop()
+		var h_c: float = _wsim_heights[c]
+		# Rising water past this cell costs volume proportional to the basin
+		# area times the rise. Stop if the particle can't afford it.
+		if h_c > water_level:
+			var rise: float = h_c - water_level
+			var cost: float = rise * float(basin.size())
+			if remaining < cost:
+				# Out of volume mid-rise; raise level by whatever volume can
+				# fund, deposit, and end the particle. (Death = pool persists)
+				var partial: float = remaining / float(basin.size())
+				water_level += partial
+				_wsim_deposit_basin(basin, water_level)
+				return {"spilled": false, "drain_cell": -1, "remaining_volume": 0.0}
+			remaining -= cost
+			water_level = h_c
+		# Look at c's neighbours for a spillover or to enqueue.
+		var cgx: int = c % SG
+		var cgz: int = c / SG
+		for d in 8:
+			var off: Vector2i = _FLOW_NEIGHBORS[d]
+			var ngx: int = cgx + off.x
+			var ngz: int = cgz + off.y
+			if ngx < 0 or ngz < 0 or ngx >= SG or ngz >= SG:
+				continue
+			var n_idx: int = ngz * SG + ngx
+			if visited.has(n_idx):
+				continue
+			var h_n: float = _wsim_heights[n_idx]
+			if h_n < h_c:
+				# Lower outside neighbour — water spills here. NO deposit on
+				# spillover: the water flowed through, it didn't pool.
+				return {"spilled": true, "drain_cell": n_idx, "remaining_volume": remaining}
+			visited[n_idx] = true
+			basin.append(n_idx)
+			heap.push(n_idx, h_n)
+	# Heap exhausted or pop cap — deposit what we have and finish.
+	_wsim_deposit_basin(basin, water_level)
+	return {"spilled": false, "drain_cell": -1, "remaining_volume": 0.0}
+
+func _wsim_deposit_basin(basin: PackedInt32Array, water_level: float) -> void:
+	for c in basin:
+		var d: float = water_level - _wsim_heights[c]
+		if d > _wsim_pool_depth[c]:
+			_wsim_pool_depth[c] = d
+
+func _save_water_bake() -> void:
+	DirAccess.make_dir_recursive_absolute(WATER_BAKE_PATH.get_base_dir())
+	var f := FileAccess.open(WATER_BAKE_PATH, FileAccess.WRITE)
+	if f == null:
+		push_warning("[Bake] can't open %s for write — bake NOT saved" % WATER_BAKE_PATH)
+		return
+	f.store_32(WATER_BAKE_VERSION)
+	f.store_32(GRID)
+	f.store_32(_wsim_grid)
+	f.store_buffer(_wsim_discharge.to_byte_array())
+	f.store_buffer(_wsim_pool_depth.to_byte_array())
+	f.close()
+
+func _load_water_bake() -> bool:
+	var f := FileAccess.open(WATER_BAKE_PATH, FileAccess.READ)
+	if f == null:
+		return false
+	var version: int = f.get_32()
+	var grid: int = f.get_32()
+	var sg: int = f.get_32()
+	var expected_sg: int = (GRID - 1) * WATER_SIM_SUBDIV + 1
+	if version != WATER_BAKE_VERSION or grid != GRID or sg != expected_sg:
+		f.close()
+		return false
+	var n: int = sg * sg
+	var bytes_per_arr: int = n * 4
+	var d_bytes := f.get_buffer(bytes_per_arr)
+	var p_bytes := f.get_buffer(bytes_per_arr)
+	f.close()
+	if d_bytes.size() != bytes_per_arr or p_bytes.size() != bytes_per_arr:
+		return false
+	_wsim_grid = sg
+	_wsim_cell = CELL / float(WATER_SIM_SUBDIV)
+	_wsim_build_heights()
+	_wsim_discharge = d_bytes.to_float32_array()
+	_wsim_pool_depth = p_bytes.to_float32_array()
+	return true
+
+# Thresholds applied to the baked arrays when generating the visible mesh
+# and the grass-cull mask. Pool depths from priority flood include tons of
+# noise sub-meter "depressions" we don't want to render.
+const WATER_POOL_MIN_DEPTH: float = 0.05      # any non-trivial depth from a real lake renders
+const WATER_STREAM_MIN_DISCHARGE: float = 1.0 # cells with at least this much flow are stream
+const WATER_STREAM_DEPTH: float = 0.45        # visible water thickness over a stream cell
+# Only render user-algorithm lakes with at least this many cells. The
+# algorithm already filters by depth (>5 m to commit) so this just kills
+# tiny bridged intermediate basins.
+const REAL_LAKE_MIN_CELLS: int = 100
+
+# Build the visible water as a single full-res (1025²) grid mesh with
+# vertex y = terrain + max(stream_thickness, pool_depth). The water shader's
+# depth-alpha hides cells where water ≈ terrain so the visible silhouette
+# emerges naturally from the bake without any per-cell quad work.
+func _build_baked_water() -> void:
+	if _wsim_discharge.is_empty() or _wsim_pool_depth.is_empty():
+		return
+	if _river_water_material == null:
+		_river_water_material = _build_river_water_material()
+	# Mesh resolution = sim grid. Vertex spacing = _wsim_cell metres.
+	# Build sparse: only allocate vertices the triangle list actually
+	# references. The previous dense build emitted SG×SG verts (4097² ≈ 17 M)
+	# even when ~3.6 k triangles covered the wet area — that vertex upload
+	# was the bulk of the startup wait.
+	var SG: int = _wsim_grid
+	var n_cells: int = SG * SG
+	var half: float = SIZE * 0.5
+	var inv_sg: float = 1.0 / float(SG - 1)
+	# Pass 1: wet[] flag per cell.
+	var wet := PackedByteArray()
+	wet.resize(n_cells)
+	for idx in n_cells:
+		var pool: float = _wsim_pool_depth[idx]
+		if pool < WATER_POOL_MIN_DEPTH:
+			pool = 0.0
+		var disch: float = _wsim_discharge[idx]
+		var stream: float = WATER_STREAM_DEPTH if disch > WATER_STREAM_MIN_DISCHARGE else 0.0
+		wet[idx] = 1 if maxf(pool, stream) > 0.01 else 0
+	# Pass 2: dilate wet by 1 cell so the "any of 4 corners has a wet neighbour"
+	# quad-emit test becomes a single O(1) array lookup per corner instead of
+	# a 4×4 inner loop.
+	var dilated := PackedByteArray()
+	dilated.resize(n_cells)
+	for sz in SG:
+		var row_base: int = sz * SG
+		for sx in SG:
+			var idx: int = row_base + sx
+			if wet[idx] != 0:
+				dilated[idx] = 1
+				continue
+			var any_wet: bool = false
+			for dz in [-1, 0, 1]:
+				if any_wet:
+					break
+				var zz: int = sz + dz
+				if zz < 0 or zz >= SG:
+					continue
+				for dx in [-1, 0, 1]:
+					if dz == 0 and dx == 0:
+						continue
+					var xx: int = sx + dx
+					if xx < 0 or xx >= SG:
+						continue
+					if wet[zz * SG + xx] != 0:
+						any_wet = true
+						break
+			dilated[idx] = 1 if any_wet else 0
+	# Pass 3: emit quads where any of their 4 corners' dilated mask is set,
+	# allocating vertices on first reference via a sparse index map.
+	var vert_index := PackedInt32Array()
+	vert_index.resize(n_cells)
+	for i in n_cells:
+		vert_index[i] = -1
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	for sz in SG - 1:
+		var row_base_a: int = sz * SG
+		var row_base_b: int = row_base_a + SG
+		for sx in SG - 1:
+			var c00: int = row_base_a + sx
+			var c10: int = c00 + 1
+			var c01: int = row_base_b + sx
+			var c11: int = c01 + 1
+			if dilated[c00] == 0 and dilated[c10] == 0 and dilated[c01] == 0 and dilated[c11] == 0:
+				continue
+			var v00: int = _emit_water_vert(c00, sx, sz, SG, half, inv_sg, vert_index, verts, uvs, colors)
+			var v10: int = _emit_water_vert(c10, sx + 1, sz, SG, half, inv_sg, vert_index, verts, uvs, colors)
+			var v01: int = _emit_water_vert(c01, sx, sz + 1, SG, half, inv_sg, vert_index, verts, uvs, colors)
+			var v11: int = _emit_water_vert(c11, sx + 1, sz + 1, SG, half, inv_sg, vert_index, verts, uvs, colors)
+			indices.append_array([v00, v01, v10, v01, v11, v10])
+	var arr_mesh := ArrayMesh.new()
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_COLOR] = colors
+	arr[Mesh.ARRAY_INDEX] = indices
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	if _river_water_mi:
+		_river_water_mi.queue_free()
+	_river_water_mi = MeshInstance3D.new()
+	_river_water_mi.mesh = arr_mesh
+	_river_water_mi.material_override = _river_water_material
+	_river_water_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_river_water_mi.custom_aabb = AABB(Vector3(-half, -200.0, -half), Vector3(SIZE, 400.0, SIZE))
+	add_child(_river_water_mi)
+	print("[Water] baked-water mesh: %d verts, %d tris" % [verts.size(), indices.size() / 3])
+
+# Helper: returns the sparse vertex index for sim cell `idx`, allocating + filling
+# the vertex/uv/color arrays on first reference. -1 sentinel in vert_index means
+# "not yet emitted." See _build_baked_water for context.
+func _emit_water_vert(idx: int, sx: int, sz: int, SG: int, half: float, inv_sg: float,
+	vert_index: PackedInt32Array, verts: PackedVector3Array,
+	uvs: PackedVector2Array, colors: PackedColorArray) -> int:
+	var existing: int = vert_index[idx]
+	if existing >= 0:
+		return existing
+	var pool: float = _wsim_pool_depth[idx]
+	if pool < WATER_POOL_MIN_DEPTH:
+		pool = 0.0
+	var disch: float = _wsim_discharge[idx]
+	var stream: float = WATER_STREAM_DEPTH if disch > WATER_STREAM_MIN_DISCHARGE else 0.0
+	var water_above: float = maxf(pool, stream)
+	var h: float = _wsim_heights[idx]
+	var wx: float = float(sx) * _wsim_cell - half
+	var wz: float = float(sz) * _wsim_cell - half
+	var v_idx: int = verts.size()
+	verts.append(Vector3(wx, h + water_above, wz))
+	uvs.append(Vector2(float(sx) * inv_sg, float(sz) * inv_sg))
+	var is_river_cell: bool = stream > 0.0 and pool <= 0.1
+	var a: float = 1.0 if water_above > 0.01 else 0.0
+	colors.append(Color(0.5, 0.5, 1.0 if is_river_cell else 0.0, a))
+	vert_index[idx] = v_idx
+	return v_idx
+
+# Build the grass cull mask from baked data (replaces the user-algorithm-
+# based version). Cells that are river OR lake (same thresholds as the mesh)
+# get marked; grass shaders sample bilinearly + smoothstep so the boundary
+# anti-aliases.
+func _build_water_grass_cull_mask_from_bake() -> void:
+	if _wsim_discharge.is_empty():
+		return
+	# Mask is at heightmap resolution; mark any GRID cell whose corresponding
+	# SUB² sim sub-cells contain water.
+	var SG: int = _wsim_grid
+	var SUB: int = WATER_SIM_SUBDIV
+	var img := Image.create(GRID, GRID, false, Image.FORMAT_R8)
+	img.fill(Color(0, 0, 0))
+	for gz in GRID:
+		for gx in GRID:
+			var hit: bool = false
+			var sz0: int = mini(gz * SUB, SG - 1)
+			var sx0: int = mini(gx * SUB, SG - 1)
+			for dz in SUB:
+				if hit:
+					break
+				for dx in SUB:
+					var s_idx: int = mini(sz0 + dz, SG - 1) * SG + mini(sx0 + dx, SG - 1)
+					if _wsim_pool_depth[s_idx] >= WATER_POOL_MIN_DEPTH \
+							or _wsim_discharge[s_idx] >= WATER_STREAM_MIN_DISCHARGE:
+						hit = true
+						break
+			if hit:
+				img.set_pixel(gx, gz, Color(1, 0, 0))
+	var tex := ImageTexture.create_from_image(img)
+	var mats: Array = [
+		_grass_material_short, _grass_material_tall,
+		_grass_material_patch_short, _grass_material_patch_tall,
+		_grass_material_patch_core, _grass_material_patch_super_core,
+		_ground_material,
+	]
+	for mat in mats:
+		if mat != null:
+			mat.set_shader_parameter("water_mask_tex", tex)
+			mat.set_shader_parameter("water_mask_active", 1.0)
+			mat.set_shader_parameter("terrain_size_tile", SIZE)
+			mat.set_shader_parameter("terrain_size_ground", SIZE)
+
+func _finalize_user_alg_water() -> void:
+	# Tear down the algorithm's debug visualization.
+	if _user_alg_river_mi:
+		_user_alg_river_mi.queue_free()
+		_user_alg_river_mi = null
+	if _user_alg_lake_mi:
+		_user_alg_lake_mi.queue_free()
+		_user_alg_lake_mi = null
+	if _user_alg_origin_mi:
+		_user_alg_origin_mi.queue_free()
+		_user_alg_origin_mi = null
+	# Build real water from the algorithm output.
+	if _river_water_material == null:
+		_river_water_material = _build_river_water_material()
+	# Pre-collect cells claimed by RENDERABLE lakes (>= MIN cells). Tiny
+	# lakes are ignored so the river flows through them.
+	_user_alg_big_lake_cells = {}
+	for L in _user_alg_lakes:
+		if L == null:
+			continue
+		var cd: Dictionary = L.cells as Dictionary
+		if cd.size() < MIN_LAKE_CELLS_FOR_RENDER:
+			continue
+		for c in cd:
+			_user_alg_big_lake_cells[c] = true
+	var arr_mesh := ArrayMesh.new()
+	_build_user_alg_river_strip(arr_mesh)
+	_build_user_alg_lakes_surface(arr_mesh)
+	if arr_mesh.get_surface_count() == 0:
+		return
+	if _river_water_mi:
+		_river_water_mi.queue_free()
+	_river_water_mi = MeshInstance3D.new()
+	_river_water_mi.mesh = arr_mesh
+	_river_water_mi.material_override = _river_water_material
+	_river_water_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_river_water_mi.custom_aabb = AABB(Vector3(-SIZE * 0.5, -200.0, -SIZE * 0.5), Vector3(SIZE, 400.0, SIZE))
+	add_child(_river_water_mi)
+	print("[Water] built from user_alg: river %d cells, lakes %d cells" % [
+		_user_alg_river.size(), _user_alg_total_lake_cells()])
+	_build_water_grass_cull_mask()
+	_carve_river_channel_into_heights()
+
+# Lower _heights along the river so the water surface (already built at
+# pre-carve heights in the mesh) gets a real visible depth. Centerline cells
+# get the full RIVER_CARVE_DEPTH; their 8 neighbours get half. Then we
+# rebuild the bits that bake heightmap state — collision, height texture,
+# and the existing chunk meshes (cleared so the streamer recreates them).
+func _carve_river_channel_into_heights() -> void:
+	if _user_alg_river.is_empty():
+		return
+	# 1) full-depth carve at centerline cells.
+	for c in _user_alg_river:
+		_heights[c] = _heights[c] - RIVER_CARVE_DEPTH
+	# 2) half-depth carve at 8-neighbours (skip cells already carved at
+	#    full depth — we don't double-stamp).
+	var carved: Dictionary = {}
+	for c in _user_alg_river:
+		carved[c] = true
+	for c in _user_alg_river:
+		var gx: int = c % GRID
+		var gz: int = c / GRID
+		for dz in range(-1, 2):
+			for dx in range(-1, 2):
+				if dx == 0 and dz == 0:
+					continue
+				var nx: int = gx + dx
+				var nz: int = gz + dz
+				if nx < 0 or nz < 0 or nx >= GRID or nz >= GRID:
+					continue
+				var n_idx: int = nz * GRID + nx
+				if carved.has(n_idx):
+					continue
+				_heights[n_idx] = _heights[n_idx] - RIVER_CARVE_DEPTH * 0.5
+				carved[n_idx] = true
+	# Rebuild the cached state derived from _heights.
+	_attach_collision(_heights)
+	_build_height_texture()
+	# Force visible chunks to rebuild. _chunk_tiles maps key→MeshInstance3D;
+	# queue_free + clear, and _stream_chunks rebuilds the visible ones next
+	# frame using the carved heights.
+	for key in _chunk_tiles.keys():
+		var mi: MeshInstance3D = _chunk_tiles[key]
+		if is_instance_valid(mi):
+			mi.queue_free()
+	_chunk_tiles.clear()
+	_last_chunk_stream_pos = Vector3.INF  # forces _stream_chunks to re-survey
+	print("[Water] carved river channel: %d full + %d half-depth cells" % [
+		_user_alg_river.size(), carved.size() - _user_alg_river.size()])
+
+# Bake a GRID×GRID R8 mask marking every cell within 1 m of a river or lake
+# cell. The grass shaders sample this at the blade's world position and
+# discard inside the mask. 3×3 stamp per cell so "within 1 m" includes
+# orthogonal neighbours; diagonals are also covered.
+func _build_water_grass_cull_mask() -> void:
+	var img := Image.create(GRID, GRID, false, Image.FORMAT_R8)
+	img.fill(Color(0, 0, 0))
+	var stamp := func(c: int) -> void:
+		var gx: int = c % GRID
+		var gz: int = c / GRID
+		for dz in range(-1, 2):
+			for dx in range(-1, 2):
+				var nx: int = gx + dx
+				var ny: int = gz + dz
+				if nx >= 0 and ny >= 0 and nx < GRID and ny < GRID:
+					img.set_pixel(nx, ny, Color(1, 0, 0))
+	for c in _user_alg_river:
+		stamp.call(c)
+	for L in _user_alg_lakes:
+		if L == null:
+			continue
+		for c in (L.cells as Dictionary):
+			stamp.call(c)
+	var tex := ImageTexture.create_from_image(img)
+	var mats: Array = [
+		_grass_material_short, _grass_material_tall,
+		_grass_material_patch_short, _grass_material_patch_tall,
+		_grass_material_patch_core, _grass_material_patch_super_core,
+		_ground_material,
+	]
+	for mat in mats:
+		if mat != null:
+			mat.set_shader_parameter("water_mask_tex", tex)
+			mat.set_shader_parameter("water_mask_active", 1.0)
+			# Each shader has its own world-size uniform name (distinct
+			# names avoid collisions across shaders that share a material
+			# pool). Extra params on the wrong shader are harmless.
+			mat.set_shader_parameter("terrain_size_tile", SIZE)
+			mat.set_shader_parameter("terrain_size_ground", SIZE)
+
+func _build_user_alg_river_strip(arr_mesh: ArrayMesh) -> void:
+	var cells: PackedInt32Array = _user_alg_river
+	if cells.size() < 2:
+		return
+	var half: float = SIZE * 0.5
+	var half_w: float = RIVER_STRIP_WIDTH * 0.5
+	# Pre-build smoothed centerline positions + heights. The raw cell list
+	# can jump tangent direction sharply when the algorithm hooks around a
+	# small obstacle, which produces a self-overlapping ribbon. Multi-pass
+	# box-blur on both positions and heights gives a clean, smooth surface.
+	var pts: Array = []
+	var hs: Array = []
+	for ci in cells.size():
+		var c0: int = cells[ci]
+		pts.append(Vector2(float(c0 % GRID) * CELL - half, float(c0 / GRID) * CELL - half))
+		hs.append(_heights[c0])
+	for _pass in 6:
+		var snap_p: Array = pts.duplicate()
+		var snap_h: Array = hs.duplicate()
+		for i in range(1, pts.size() - 1):
+			pts[i] = (snap_p[i - 1] as Vector2) * 0.25 + (snap_p[i] as Vector2) * 0.5 + (snap_p[i + 1] as Vector2) * 0.25
+			hs[i] = snap_h[i - 1] * 0.25 + snap_h[i] * 0.5 + snap_h[i + 1] * 0.25
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	# Track each cell's vertex base index (or -1 if the cell was skipped
+	# because it's inside a lake). Triangles only connect cells whose
+	# IMMEDIATE neighbour is also non-lake — when the river crosses through
+	# a lake, the strip breaks at the lake boundary and resumes after.
+	var cell_base: Array = []  # parallel to cells; int or -1
+	for i in cells.size():
+		var c: int = cells[i]
+		_river_cell_surface_h[c] = _heights[c]
+		# Only break the strip at cells claimed by a renderable (big) lake.
+		# Cells in tiny "almost a lake" segments stay on the river path.
+		if _user_alg_big_lake_cells.has(c):
+			cell_base.append(-1)
+			continue
+		var here: Vector2 = pts[i]
+		var tangent: Vector2
+		if i == 0:
+			tangent = (pts[1] as Vector2) - here
+		elif i == cells.size() - 1:
+			tangent = here - (pts[i - 1] as Vector2)
+		else:
+			tangent = (pts[i + 1] as Vector2) - (pts[i - 1] as Vector2)
+		if tangent.length_squared() < 1e-6:
+			tangent = Vector2(1, 0)
+		tangent = tangent.normalized()
+		var perp := Vector2(-tangent.y, tangent.x)
+		var left: Vector2 = here - perp * half_w
+		var right: Vector2 = here + perp * half_w
+		var y: float = hs[i] + RIVER_WATER_LIFT
+		var by: float = y - 0.5
+		var base: int = verts.size()
+		cell_base.append(base)
+		verts.append(Vector3(left.x, y, left.y))
+		verts.append(Vector3(right.x, y, right.y))
+		verts.append(Vector3(left.x, by, left.y))
+		verts.append(Vector3(right.x, by, right.y))
+		uvs.append(Vector2(0.0, float(i) * 0.5))
+		uvs.append(Vector2(1.0, float(i) * 0.5))
+		uvs.append(Vector2(0.0, float(i) * 0.5))
+		uvs.append(Vector2(1.0, float(i) * 0.5))
+		var flow_r: float = tangent.x * 0.5 + 0.5
+		var flow_g: float = tangent.y * 0.5 + 0.5
+		var col := Color(flow_r, flow_g, 1.0, 1.0)
+		colors.append(col); colors.append(col); colors.append(col); colors.append(col)
+		# Connect only when the previous cell ALSO emitted vertices (i.e.
+		# wasn't a lake cell). Otherwise the strip breaks here.
+		if i > 0 and (cell_base[i - 1] as int) >= 0:
+			var p: int = cell_base[i - 1]
+			var b: int = base
+			# Layout: p+0..3 = prev TL,TR,BL,BR  /  b+0..3 = curr TL,TR,BL,BR
+			indices.append_array([p, p + 1, b, p + 1, b + 1, b])           # top
+			indices.append_array([p + 2, b + 2, p + 3, p + 3, b + 2, b + 3]) # bottom
+			indices.append_array([p, b, p + 2, p + 2, b, b + 2])           # left wall
+			indices.append_array([p + 1, p + 3, b + 1, p + 3, b + 3, b + 1]) # right wall
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_COLOR] = colors
+	arr[Mesh.ARRAY_INDEX] = indices
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+
+func _build_user_alg_lakes_surface(arr_mesh: ArrayMesh) -> void:
+	# One BIG flat quad per lake, sized to the cells' bounding box + a margin.
+	# The water shader's depth-based alpha hides pixels where the bed is
+	# above the surface, so the visible water naturally extends until it
+	# "hits land" rather than tracing the rectilinear 1 m cell outline.
+	var any_lake: bool = false
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	var half: float = SIZE * 0.5
+	var lake_idx: int = -1
+	for L in _user_alg_lakes:
+		lake_idx += 1
+		if L == null:
+			continue
+		var cells_dict: Dictionary = L.cells as Dictionary
+		if cells_dict.size() < MIN_LAKE_CELLS_FOR_RENDER:
+			# Tiny "lakes" — bumps in the river — don't render. The river
+			# strip flows through them.
+			continue
+		any_lake = true
+		var min_gx: int = GRID
+		var max_gx: int = -1
+		var min_gz: int = GRID
+		var max_gz: int = -1
+		for c in cells_dict:
+			var ci: int = c
+			var gx: int = ci % GRID
+			var gz: int = ci / GRID
+			min_gx = mini(min_gx, gx); max_gx = maxi(max_gx, gx)
+			min_gz = mini(min_gz, gz); max_gz = maxi(max_gz, gz)
+		var x0: float = float(min_gx) * CELL - half - LAKE_PLANE_MARGIN
+		var x1: float = float(max_gx) * CELL - half + LAKE_PLANE_MARGIN
+		var z0: float = float(min_gz) * CELL - half - LAKE_PLANE_MARGIN
+		var z1: float = float(max_gz) * CELL - half + LAKE_PLANE_MARGIN
+		var water_y: float = (L.max_h as float) + RIVER_WATER_LIFT
+		print("[Lake %d] %d cells, x(%.0f..%.0f) z(%.0f..%.0f) water_y=%.1f min_h=%.1f max_h=%.1f" % [
+			lake_idx, cells_dict.size(), x0, x1, z0, z1, water_y,
+			L.min_h as float, L.max_h as float])
+		# Extruded box: 4 top vertices at water_y + 4 bottom at water_y - 0.5
+		# to give the lake VISIBLE THICKNESS so the user can see the volume
+		# from any angle, not just a flat plane.
+		var thickness: float = 0.5
+		var by: float = water_y - thickness
+		var base: int = verts.size()
+		# Top quad (base + 0..3)
+		verts.append(Vector3(x0, water_y, z0))
+		verts.append(Vector3(x1, water_y, z0))
+		verts.append(Vector3(x0, water_y, z1))
+		verts.append(Vector3(x1, water_y, z1))
+		# Bottom quad (base + 4..7)
+		verts.append(Vector3(x0, by, z0))
+		verts.append(Vector3(x1, by, z0))
+		verts.append(Vector3(x0, by, z1))
+		verts.append(Vector3(x1, by, z1))
+		for _i in 8:
+			colors.append(Color(0.5, 0.5, 0.0, 1.0))
+			uvs.append(Vector2(0.0, 0.0))
+		# Top (normal +Y)
+		indices.append_array([base, base + 3, base + 1, base, base + 2, base + 3])
+		# Bottom (normal -Y) — reverse winding so it faces down
+		indices.append_array([base + 4, base + 5, base + 7, base + 4, base + 7, base + 6])
+		# Side walls (cull_disabled means winding here only matters for
+		# lighting which is unshaded — pick consistent CCW).
+		# -Z wall (front): base, base+1, base+5, base+4
+		indices.append_array([base, base + 1, base + 5, base, base + 5, base + 4])
+		# +Z wall (back): base+2, base+6, base+7, base+3
+		indices.append_array([base + 2, base + 7, base + 6, base + 2, base + 3, base + 7])
+		# -X wall (left): base, base+4, base+6, base+2
+		indices.append_array([base, base + 6, base + 4, base, base + 2, base + 6])
+		# +X wall (right): base+1, base+3, base+7, base+5
+		indices.append_array([base + 1, base + 7, base + 3, base + 1, base + 5, base + 7])
+	if not any_lake:
+		return
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_COLOR] = colors
+	arr[Mesh.ARRAY_INDEX] = indices
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+
 # Modulate leaf material albedo toward a healthy green AND kill the spec/metal
 # response. Polyhaven leaf/petal materials ship with low roughness + glossy
 # speculars that, combined with mipmap shrinkage of the alpha cutout, make

@@ -80,8 +80,46 @@ var _consume_next_click: bool = false
 const POSE_SEND_HZ: float = 20.0
 var _pose_send_accum: float = 0.0
 
-const CAM_POS_3P := Vector3(0.5, 0.4, 4.5)
-const CAM_POS_1P := Vector3(0.0, 0.0, 0.0)
+const CAM_POS_3P := Vector3(0.2, 0.15, 1.5)
+# CAM_POS_1P starts at 0 and is overwritten in _ready once the Head bone's
+# rest position relative to CameraPitchPivot is known, so first-person sits
+# at eye level regardless of how the rig is scaled.
+var CAM_POS_1P: Vector3 = Vector3(0.0, 0.5, -0.05)
+# Filled in _ready: BoneAttachment3D on hand_r that the TPV SwordRig is moved
+# under so the katana tracks the right hand across all animations.
+var _hand_r_socket: BoneAttachment3D
+# F2 calibration panel — lets the user drag the sword's grip-in-hand pose
+# in real time. The position/rotation drive the reparented SwordRig (whose
+# origin is the rotation pivot), and the model-offset drives the sword
+# model *within* SwordRig so the user can park the grip onto that pivot.
+var _calib_panel: Control
+var _sword_calib_pos: Vector3 = Vector3(0.0, 0.07, 0.0)
+var _sword_calib_rot: Vector3 = Vector3(deg_to_rad(153.0), 0.0, 0.0)
+# Accumulated yaw offset on CameraPitchPivot used only while the calibration
+# panel is open — rotates the camera around the frozen player instead of
+# spinning the player body when the user holds RMB to look.
+var _calib_yaw_offset: float = 0.0
+# Default offset matches the scene-tuned Sketchfab_Scene origin from the
+# .tscn so we don't immediately move the sword from where the user has been
+# seeing it; they can drag the grip toward (0,0,0) to bring the rotation
+# center onto the hand.
+var _sword_model_offset: Vector3 = Vector3(0.0, 0.0, 0.05)
+# Reference to the visible sword model node under the TPV SwordRig.
+var _sword_model_node: Node3D
+# F3 calibration panel — same idea as the sword's, but drives the gun's
+# Model node (the sci-fi gun GLB instance) under GunRig. The rig itself is
+# overwritten by gun.gd's look_at() every tick, so the Model child is the
+# only stable handle for translate/rotate/scale tweaks.
+var _gun_calib_panel: Control
+var _gun_calib_pos: Vector3 = Vector3(-0.02, 0.215, -0.01)
+var _gun_calib_rot: Vector3 = Vector3(deg_to_rad(9.0), deg_to_rad(93.0), deg_to_rad(76.0))
+var _gun_calib_scale: float = 0.052
+# Muzzle position in MODEL-local space. Reparented under Model so this
+# offset rides whatever rotation/scale the gun model has — the barrel-tip
+# stays at the barrel-tip even when the user retunes the rig pose.
+var _gun_muzzle_offset: Vector3 = Vector3(7.0, 0.0, 0.0)
+var _gun_model_node: Node3D
+var _gun_muzzle_node: Marker3D
 
 @onready var body_mesh: MeshInstance3D = get_node_or_null("Body") as MeshInstance3D
 var _body_base_scale: Vector3 = Vector3.ONE
@@ -164,6 +202,13 @@ func _import_ual_animations() -> void:
 					elif node_part == "Skeleton3D" or node_part == "Armature":
 						anim.track_set_path(ti, NodePath(String(dst_skel_path) + sub))
 			lib.add_animation(anim_name, anim)
+	# A handful of UAL clips aren't named with a "_Loop" suffix even though
+	# they're conceptually looping (e.g. Sword_Idle). Force the loop mode so
+	# they don't end on their last frame when we want a continuous pose.
+	for force_loop_name in ["Sword_Idle"]:
+		if lib.has_animation(force_loop_name):
+			var fa: Animation = lib.get_animation(force_loop_name)
+			fa.loop_mode = Animation.LOOP_LINEAR
 	# Replace any existing default library so we don't double-add.
 	if _anim_player.has_animation_library(""):
 		_anim_player.remove_animation_library("")
@@ -348,8 +393,343 @@ func _ready() -> void:
 		# Base Weapon declares charge_changed, so this connection is always safe.
 		w.charge_changed.connect(_on_weapon_charge_changed)
 	current_weapon_node = _weapons[int(current_slot)]
+	_attach_sword_to_hand()
+	_calibrate_fpv_eye_height()
 	_apply_view_mode()
 	_apply_weapon_visibility()
+	_build_sword_calib_panel()
+	_build_gun_calib_panel()
+
+# Move the TPV SwordRig from WeaponPivot to a BoneAttachment3D on the
+# right-hand bone so the katana stays in the hand during run/jump/swing.
+# Weapons cache their rig pointers via @onready before this runs, so the
+# pointer remains valid after the reparent — no NodePath fixups needed.
+func _attach_sword_to_hand() -> void:
+	if _character == null:
+		return
+	var skel: Skeleton3D = _find_skeleton(_character)
+	if skel == null:
+		return
+	var hand_idx: int = skel.find_bone("hand_r")
+	if hand_idx < 0:
+		return
+	var attach := BoneAttachment3D.new()
+	attach.name = "HandRSocket"
+	attach.bone_idx = hand_idx
+	attach.bone_name = "hand_r"
+	skel.add_child(attach)
+	attach.add_to_group("weapon_attached")
+	_hand_r_socket = attach
+	var sword_rig: Node3D = weapon_pivot.get_node_or_null("SwordRig") as Node3D
+	if sword_rig == null:
+		return
+	weapon_pivot.remove_child(sword_rig)
+	attach.add_child(sword_rig)
+	sword_rig.add_to_group("weapon_attached")
+	# Quaternius UAL convention: hand_r's local +Y points down the bone (toward
+	# fingertips). Start from a sensible default (90° X to map blade's -Z onto
+	# the bone's +Y, with a small offset down the bone) and let the F2
+	# calibration panel dial it in from there.
+	sword_rig.transform = Transform3D.IDENTITY
+	_sword_model_node = sword_rig.get_node_or_null("Sketchfab_Scene") as Node3D
+	_apply_sword_calib_to(sword_rig)
+	# Tell sword.gd to skip its rig_tpv keyframe tween — the body's Sword_Attack
+	# clip drives the bone (and thus the sword) during swings now, and stacking
+	# the legacy tween on top of that double-animates the rig.
+	if _sword != null:
+		_sword.set("_tpv_rig_follows_bone", true)
+	# Move the gun rig onto the same hand socket. Pistol_Idle raises the right
+	# arm to an aiming pose, so leaving the gun at the hip read as "huge gun
+	# floating where the empty hand used to be." Reparent + reset transform —
+	# gun.gd's per-tick look_at() will keep the muzzle on the crosshair.
+	# The sci-fi gun GLB has a 100× scale on its internal GunMerged node and
+	# the scene Model node compensated with scale 0.5; with Player.scale=2
+	# the result was a ~10 m gun. Shrink the Model so it reads handheld.
+	var gun_rig: Node3D = weapon_pivot.get_node_or_null("GunRig") as Node3D
+	if gun_rig != null:
+		weapon_pivot.remove_child(gun_rig)
+		attach.add_child(gun_rig)
+		gun_rig.add_to_group("weapon_attached")
+		gun_rig.transform = Transform3D.IDENTITY
+		_gun_model_node = gun_rig.get_node_or_null("Model") as Node3D
+		# Reparent the muzzle marker under Model so its position is expressed
+		# in model-local coords. Previously it sat at GunRig-local z=-0.72
+		# which, with the rig now on the hand bone, pointed toward the floor
+		# (hand-local -Z is roughly downward in Pistol_Idle), so bullets
+		# spawned at the feet.
+		var muzzle: Marker3D = gun_rig.get_node_or_null("Muzzle") as Marker3D
+		if muzzle != null and _gun_model_node != null:
+			gun_rig.remove_child(muzzle)
+			_gun_model_node.add_child(muzzle)
+			_gun_muzzle_node = muzzle
+		_apply_gun_calib()
+
+# Mirror _sword_calib_pos/_rot onto the reparented SwordRig and push the same
+# values into sword.gd's rest-pose cache so equip() can't snap them back.
+# Also reapply the model offset (Sketchfab_Scene local position) so the grip
+# stays where the user parked it.
+func _apply_sword_calib_to(sword_rig: Node3D) -> void:
+	if sword_rig == null:
+		return
+	sword_rig.position = _sword_calib_pos
+	sword_rig.rotation = _sword_calib_rot
+	if _sword != null:
+		_sword.set("_rest_pos_tpv", _sword_calib_pos)
+		_sword.set("_rest_rot_tpv", _sword_calib_rot)
+	if _sword_model_node != null and is_instance_valid(_sword_model_node):
+		_sword_model_node.position = _sword_model_offset
+
+func _build_sword_calib_panel() -> void:
+	var ui: CanvasLayer = get_tree().current_scene.get_node_or_null("UI") as CanvasLayer
+	if ui == null:
+		return
+	var panel := PanelContainer.new()
+	panel.name = "SwordCalibPanel"
+	panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	panel.position = Vector2(20, 60)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 4)
+	panel.add_child(vb)
+	var title := Label.new()
+	title.text = "Sword calibration  (F2 to toggle)"
+	vb.add_child(title)
+	# Each tuple: label, min, max, step, initial, idx
+	var defs: Array = [
+		["rig pos x", -2.0, 2.0, 0.005, _sword_calib_pos.x, 0],
+		["rig pos y", -2.0, 2.0, 0.005, _sword_calib_pos.y, 1],
+		["rig pos z", -2.0, 2.0, 0.005, _sword_calib_pos.z, 2],
+		["rot x (deg)", -180.0, 180.0, 1.0, rad_to_deg(_sword_calib_rot.x), 3],
+		["rot y (deg)", -180.0, 180.0, 1.0, rad_to_deg(_sword_calib_rot.y), 4],
+		["rot z (deg)", -180.0, 180.0, 1.0, rad_to_deg(_sword_calib_rot.z), 5],
+		# Move the visible sword model within SwordRig so the grip lands at the
+		# rig origin (= rotation pivot). Once the grip is at (0,0,0), rotations
+		# pivot around the hand instead of orbiting the sword around it.
+		["model dx", -5.0, 5.0, 0.01, _sword_model_offset.x, 6],
+		["model dy", -5.0, 5.0, 0.01, _sword_model_offset.y, 7],
+		["model dz", -5.0, 5.0, 0.01, _sword_model_offset.z, 8],
+	]
+	for d in defs:
+		_add_calib_row(vb, d)
+	var swing_btn := Button.new()
+	swing_btn.text = "Test swing"
+	swing_btn.pressed.connect(_test_swing)
+	vb.add_child(swing_btn)
+	var btn := Button.new()
+	btn.text = "Print to console"
+	btn.pressed.connect(_print_sword_calib)
+	vb.add_child(btn)
+	ui.add_child(panel)
+	panel.visible = false
+	_calib_panel = panel
+
+func _add_calib_row(vb: VBoxContainer, d: Array) -> void:
+	var row := HBoxContainer.new()
+	vb.add_child(row)
+	var lbl := Label.new()
+	lbl.text = String(d[0])
+	lbl.custom_minimum_size = Vector2(86, 0)
+	row.add_child(lbl)
+	var slider := HSlider.new()
+	slider.min_value = float(d[1])
+	slider.max_value = float(d[2])
+	slider.step = float(d[3])
+	slider.value = float(d[4])
+	slider.custom_minimum_size = Vector2(220, 0)
+	row.add_child(slider)
+	var vlbl := Label.new()
+	vlbl.text = "%.3f" % float(d[4])
+	vlbl.custom_minimum_size = Vector2(60, 0)
+	row.add_child(vlbl)
+	var idx: int = int(d[5])
+	slider.value_changed.connect(func(v: float) -> void:
+		vlbl.text = "%.3f" % v
+		_on_calib_changed(idx, v)
+	)
+
+func _on_calib_changed(idx: int, v: float) -> void:
+	match idx:
+		0: _sword_calib_pos.x = v
+		1: _sword_calib_pos.y = v
+		2: _sword_calib_pos.z = v
+		3: _sword_calib_rot.x = deg_to_rad(v)
+		4: _sword_calib_rot.y = deg_to_rad(v)
+		5: _sword_calib_rot.z = deg_to_rad(v)
+		6: _sword_model_offset.x = v
+		7: _sword_model_offset.y = v
+		8: _sword_model_offset.z = v
+	if _hand_r_socket != null:
+		_apply_sword_calib_to(_hand_r_socket.get_node_or_null("SwordRig") as Node3D)
+
+func _test_swing() -> void:
+	if _sword == null:
+		return
+	# Bypass cooldown so the button can be spammed for back-to-back tests.
+	_sword.set("attack_cd", 0.0)
+	_sword.call("on_attack_pressed")
+
+func _print_sword_calib() -> void:
+	print("[Sword calib] sword_rig.position = ", _sword_calib_pos)
+	print("[Sword calib] sword_rig.rotation_deg = (",
+		rad_to_deg(_sword_calib_rot.x), ", ",
+		rad_to_deg(_sword_calib_rot.y), ", ",
+		rad_to_deg(_sword_calib_rot.z), ")")
+	print("[Sword calib] sword_model_node.position = ", _sword_model_offset)
+
+# True when either the sword or gun calibration panel is currently open. Used
+# to gate input handling that needs to differ in inspection mode (mouse
+# recapture, freeze, etc.).
+func _is_calibrating() -> bool:
+	if _calib_panel != null and _calib_panel.visible:
+		return true
+	if _gun_calib_panel != null and _gun_calib_panel.visible:
+		return true
+	return false
+
+# Apply _gun_calib_pos/_rot/_scale to the GunRig's Model child. Safe to call
+# before the rig is wired — it no-ops when the cached node ref is null.
+func _apply_gun_calib() -> void:
+	if _gun_model_node != null and is_instance_valid(_gun_model_node):
+		_gun_model_node.position = _gun_calib_pos
+		_gun_model_node.rotation = _gun_calib_rot
+		_gun_model_node.scale = Vector3.ONE * _gun_calib_scale
+	if _gun_muzzle_node != null and is_instance_valid(_gun_muzzle_node):
+		_gun_muzzle_node.position = _gun_muzzle_offset
+
+func _build_gun_calib_panel() -> void:
+	var ui: CanvasLayer = get_tree().current_scene.get_node_or_null("UI") as CanvasLayer
+	if ui == null:
+		return
+	var panel := PanelContainer.new()
+	panel.name = "GunCalibPanel"
+	panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	panel.position = Vector2(20, 60)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 4)
+	panel.add_child(vb)
+	var title := Label.new()
+	title.text = "Gun calibration  (F3 to toggle)"
+	vb.add_child(title)
+	var defs: Array = [
+		["pos x", -1.0, 1.0, 0.005, _gun_calib_pos.x, 0],
+		["pos y", -1.0, 1.0, 0.005, _gun_calib_pos.y, 1],
+		["pos z", -1.0, 1.0, 0.005, _gun_calib_pos.z, 2],
+		["rot x (deg)", -180.0, 180.0, 1.0, rad_to_deg(_gun_calib_rot.x), 3],
+		["rot y (deg)", -180.0, 180.0, 1.0, rad_to_deg(_gun_calib_rot.y), 4],
+		["rot z (deg)", -180.0, 180.0, 1.0, rad_to_deg(_gun_calib_rot.z), 5],
+		["scale", 0.001, 0.2, 0.001, _gun_calib_scale, 6],
+		# Muzzle in MODEL-local space — values in the bbox range (x: -7..7).
+		["muzzle x", -10.0, 10.0, 0.05, _gun_muzzle_offset.x, 7],
+		["muzzle y", -10.0, 10.0, 0.05, _gun_muzzle_offset.y, 8],
+		["muzzle z", -10.0, 10.0, 0.05, _gun_muzzle_offset.z, 9],
+	]
+	for d in defs:
+		_add_gun_calib_row(vb, d)
+	var print_btn := Button.new()
+	print_btn.text = "Print to console"
+	print_btn.pressed.connect(_print_gun_calib)
+	vb.add_child(print_btn)
+	ui.add_child(panel)
+	panel.visible = false
+	_gun_calib_panel = panel
+
+func _add_gun_calib_row(vb: VBoxContainer, d: Array) -> void:
+	var row := HBoxContainer.new()
+	vb.add_child(row)
+	var lbl := Label.new()
+	lbl.text = String(d[0])
+	lbl.custom_minimum_size = Vector2(86, 0)
+	row.add_child(lbl)
+	var slider := HSlider.new()
+	slider.min_value = float(d[1])
+	slider.max_value = float(d[2])
+	slider.step = float(d[3])
+	slider.value = float(d[4])
+	slider.custom_minimum_size = Vector2(220, 0)
+	row.add_child(slider)
+	var vlbl := Label.new()
+	vlbl.text = "%.4f" % float(d[4])
+	vlbl.custom_minimum_size = Vector2(60, 0)
+	row.add_child(vlbl)
+	var idx: int = int(d[5])
+	slider.value_changed.connect(func(v: float) -> void:
+		vlbl.text = "%.4f" % v
+		_on_gun_calib_changed(idx, v)
+	)
+
+func _on_gun_calib_changed(idx: int, v: float) -> void:
+	match idx:
+		0: _gun_calib_pos.x = v
+		1: _gun_calib_pos.y = v
+		2: _gun_calib_pos.z = v
+		3: _gun_calib_rot.x = deg_to_rad(v)
+		4: _gun_calib_rot.y = deg_to_rad(v)
+		5: _gun_calib_rot.z = deg_to_rad(v)
+		6: _gun_calib_scale = v
+		7: _gun_muzzle_offset.x = v
+		8: _gun_muzzle_offset.y = v
+		9: _gun_muzzle_offset.z = v
+	_apply_gun_calib()
+
+func _print_gun_calib() -> void:
+	print("[Gun calib] model.position = ", _gun_calib_pos)
+	print("[Gun calib] model.rotation_deg = (",
+		rad_to_deg(_gun_calib_rot.x), ", ",
+		rad_to_deg(_gun_calib_rot.y), ", ",
+		rad_to_deg(_gun_calib_rot.z), ")")
+	print("[Gun calib] model.scale = ", _gun_calib_scale)
+	print("[Gun calib] muzzle.position = ", _gun_muzzle_offset)
+
+func _toggle_gun_calib_panel() -> void:
+	if _gun_calib_panel == null:
+		return
+	_gun_calib_panel.visible = not _gun_calib_panel.visible
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if _gun_calib_panel.visible else Input.MOUSE_MODE_CAPTURED
+	if _gun_calib_panel.visible:
+		# Equip the gun so the calibrated weapon is the visible one.
+		if current_slot != WeaponSlot.GUN:
+			_equip(WeaponSlot.GUN)
+	else:
+		_calib_yaw_offset = 0.0
+		pitch_pivot.rotation = Vector3(camera_pitch, 0.0, 0.0)
+
+func _toggle_sword_calib_panel() -> void:
+	if _calib_panel == null:
+		return
+	_calib_panel.visible = not _calib_panel.visible
+	# Release mouse capture while the panel is open so sliders can be dragged.
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if _calib_panel.visible else Input.MOUSE_MODE_CAPTURED
+	# Equip the sword and pin it drawn so the calibrated grip pose is visible
+	# the entire time the panel is open — no auto-sheathe, no waiting on a
+	# quick-draw tween.
+	if _calib_panel.visible:
+		if current_slot != WeaponSlot.SWORD:
+			_equip(WeaponSlot.SWORD)
+		if _sword != null and _sword.has_method("set_force_drawn"):
+			_sword.call("set_force_drawn", true)
+	else:
+		if _sword != null and _sword.has_method("set_force_drawn"):
+			_sword.call("set_force_drawn", false)
+		# Snap the camera pivot back so the next mouse-look call doesn't start
+		# from a 270° yaw offset accumulated during inspection.
+		_calib_yaw_offset = 0.0
+		pitch_pivot.rotation = Vector3(camera_pitch, 0.0, 0.0)
+
+# Measure the Head bone's local-Y offset from CameraPitchPivot in the rest
+# pose and use that as CAM_POS_1P.y so the FPV camera sits at eye level
+# regardless of how the character mesh is scaled.
+func _calibrate_fpv_eye_height() -> void:
+	if _character == null:
+		return
+	var skel: Skeleton3D = _find_skeleton(_character)
+	if skel == null:
+		return
+	var head_idx: int = skel.find_bone("Head")
+	if head_idx < 0:
+		return
+	var head_global: Transform3D = skel.global_transform * skel.get_bone_global_pose(head_idx)
+	var local_offset: Vector3 = pitch_pivot.global_transform.affine_inverse() * head_global.origin
+	# Slight forward bias so the camera sits at the eyes, not the back of the head.
+	CAM_POS_1P = Vector3(0.0, local_offset.y, -0.08)
 
 func _on_weapon_charge_changed(v: float) -> void:
 	charge_changed.emit(v)
@@ -365,23 +745,49 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		if ek.keycode == KEY_P:
 			if _nearest_pickup != null and is_instance_valid(_nearest_pickup):
+				# Play the bend-down Interact clip so the pickup reads as a
+				# physical action instead of the log teleporting to inventory.
+				if _anim_player != null and _anim_player.has_animation("Interact"):
+					var ilen: float = _anim_player.get_animation("Interact").length
+					play_anim_locked("Interact", minf(ilen, 0.6), 1.2)
 				_nearest_pickup.call("pick_up_by", self)
 				_nearest_pickup = null
 				if _prompt_label != null:
 					_prompt_label.visible = false
 			return
+		if ek.keycode == KEY_F2:
+			_toggle_sword_calib_panel()
+			return
+		if ek.keycode == KEY_F3:
+			_toggle_gun_calib_panel()
+			return
 	if event.is_action_pressed("ui_cancel"):
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		return
 	if event is InputEventMouseButton and event.pressed and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+		# Don't snap back to captured mouse while a calibration panel is open;
+		# the user is dragging sliders.
+		if _is_calibrating():
+			return
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		_consume_next_click = true
 		return
-	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+	if event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
-		rotate_y(-mm.relative.x * mouse_sensitivity)
-		camera_pitch = clampf(camera_pitch - mm.relative.y * mouse_sensitivity, deg_to_rad(pitch_min_deg), deg_to_rad(pitch_max_deg))
-		pitch_pivot.rotation.x = camera_pitch
+		var calib_look: bool = _is_calibrating() \
+			and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
+		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+			# Normal play: spin the player body for yaw, tilt the pivot for pitch.
+			rotate_y(-mm.relative.x * mouse_sensitivity)
+			camera_pitch = clampf(camera_pitch - mm.relative.y * mouse_sensitivity, deg_to_rad(pitch_min_deg), deg_to_rad(pitch_max_deg))
+			pitch_pivot.rotation.x = camera_pitch
+		elif calib_look:
+			# Inspection mode: orbit the *camera pivot* around the frozen player
+			# instead of rotating the body — the user wants the character to
+			# stay put so the calibration grip pose isn't a moving target.
+			_calib_yaw_offset -= mm.relative.x * mouse_sensitivity
+			camera_pitch = clampf(camera_pitch - mm.relative.y * mouse_sensitivity, deg_to_rad(pitch_min_deg), deg_to_rad(pitch_max_deg))
+			pitch_pivot.rotation = Vector3(camera_pitch, _calib_yaw_offset, 0.0)
 
 func _process(delta: float) -> void:
 	dash_cd_left = maxf(dash_cd_left - delta, 0.0)
@@ -427,6 +833,16 @@ func _process(delta: float) -> void:
 		current_weapon_node.on_super_pressed()
 
 func _physics_process(delta: float) -> void:
+	# Calibration mode pins the player in place so the user can study the
+	# sword/gun pose from any angle without drifting around. Kill velocity,
+	# skip gravity, and bail before any input is read. AnimationPlayer keeps
+	# running so the user can see the rig move through the locomotion +
+	# attack clips while tweaking.
+	if _is_calibrating():
+		velocity = Vector3.ZERO
+		_controlled_velocity = Vector3.ZERO
+		return
+
 	if lift_time_left > 0.0:
 		lift_time_left -= delta
 		velocity.y = lift_velocity_y
@@ -460,6 +876,15 @@ func _physics_process(delta: float) -> void:
 			# strong even if the disc was already falling.
 			velocity.y = jump_velocity
 			_air_jumps_used += 1
+			# Replay a takeoff animation for each multi-jump so it reads as a
+			# distinct action mid-air. Alternate Jump_Start and Roll for variety
+			# — Roll looks like a flip on the even-numbered air jumps. Cap the
+			# lock so a long clip doesn't pin the pose past landing.
+			if _anim_player != null:
+				var ajump_anim: String = ANIM_ROLL if (_air_jumps_used % 2 == 0) else ANIM_JUMP_START
+				if _anim_player.has_animation(ajump_anim):
+					var ajump_dur: float = _anim_player.get_animation(ajump_anim).length
+					play_anim_locked(ajump_anim, minf(ajump_dur, 0.5), 1.2)
 
 	# Variable jump height: releasing jump early cuts upward momentum. Skip
 	# while a super is forcing a lift so the cut doesn't fight it.
@@ -798,18 +1223,34 @@ func _toggle_view() -> void:
 func _apply_view_mode() -> void:
 	var first := view_mode == ViewMode.FIRST_PERSON
 	camera.position = CAM_POS_1P if first else CAM_POS_3P
-	# In first person we still want the body to throw a shadow on the ground —
-	# SHADOWS_ONLY keeps the mesh invisible to the camera but lets the directional
-	# light treat it as a normal occluder.
-	if body_mesh != null:
-		body_mesh.visible = true
-		body_mesh.cast_shadow = (
+	# Shadows-only the character body in FPV so the player still casts a
+	# shadow but the head/torso don't fill the screen. Skip anything tagged
+	# `weapon_attached` (e.g. the TPV SwordRig that lives under the hand
+	# bone) — those follow the TPV/FPV visibility logic below.
+	if _character != null:
+		var mode_cast: int = (
 			GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY if first
 			else GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 		)
+		for n in _character.find_children("*", "MeshInstance3D", true, false):
+			if _is_under_weapon_socket(n):
+				continue
+			(n as MeshInstance3D).cast_shadow = mode_cast
 	weapon_pivot.visible = not first
+	# The TPV sword now lives outside WeaponPivot (under the hand bone), so
+	# WeaponPivot.visible no longer reaches it — toggle it explicitly.
+	if _hand_r_socket != null:
+		_hand_r_socket.visible = not first
 	fpv_pivot.visible = first
 	EventBus.player_view_mode_changed.emit(int(view_mode))
+
+func _is_under_weapon_socket(n: Node) -> bool:
+	var p: Node = n
+	while p != null and p != _character:
+		if p.is_in_group("weapon_attached"):
+			return true
+		p = p.get_parent()
+	return false
 
 func _equip(s: WeaponSlot) -> void:
 	if s == current_slot:
@@ -857,6 +1298,18 @@ func register_hit(shake: float) -> void:
 
 func register_hit_heavy() -> void:
 	_apply_hitstop(1.2, 0.05, 0.13)
+
+# Called by enemy projectiles (sniper / shooter_enemy / gun) via the shared
+# take_damage(amount, direction) contract. No HP system yet — we just play a
+# flinch clip and shake the camera so incoming fire registers. `direction` is
+# the world-space ray of the hit, used to lightly tilt the recoil camera so
+# the flinch reads as a direction (later when we have HP, the `amount` field
+# can decrement it).
+func take_damage(_amount: int, _direction: Vector3) -> void:
+	if _anim_player != null and _anim_player.has_animation("Hit_Chest"):
+		var hl: float = _anim_player.get_animation("Hit_Chest").length
+		play_anim_locked("Hit_Chest", minf(hl, 0.35), 1.3)
+	_apply_hitstop(0.45, 0.08, 0.05)
 
 # Use a SceneTreeTimer callback (real-time, ignore_time_scale) so the restore
 # fires even if the caller frees mid-await. No try/finally in GDScript.
@@ -932,9 +1385,18 @@ func _update_character_animation() -> void:
 			var sl: float = _anim_player.get_animation(ANIM_JUMP_START).length
 			play_anim_locked(ANIM_JUMP_START, sl, 1.0)
 	elif not _was_grounded and grounded_now:
-		if _anim_player.has_animation(ANIM_JUMP_LAND):
+		# Skip Jump_Land entirely when landing with horizontal momentum — locking
+		# the full clip while velocity carries the player forward reads as a skid.
+		# Idle landings still play the clip so the recovery isn't lost.
+		# A lingering Jump_Start lock (set on takeoff for the full clip length)
+		# would otherwise hold the airborne pose past touchdown, so always
+		# release it here — the locomotion picker should take over immediately.
+		var landing_horiz: float = Vector2(velocity.x, velocity.z).length()
+		if landing_horiz < MOVE_THRESHOLD and _anim_player.has_animation(ANIM_JUMP_LAND):
 			var ll: float = _anim_player.get_animation(ANIM_JUMP_LAND).length
 			play_anim_locked(ANIM_JUMP_LAND, ll, 1.0)
+		else:
+			_anim_lock_left = 0.0
 	_was_grounded = grounded_now
 	if _anim_lock_left > 0.0:
 		return
@@ -948,8 +1410,29 @@ func _update_character_animation() -> void:
 	else:
 		var horiz_speed: float = Vector2(velocity.x, velocity.z).length()
 		if horiz_speed < MOVE_THRESHOLD:
-			picked = ANIM_IDLE
+			# Pick a weapon-aware idle so the rest stance matches what's in hand:
+			# Sword_Idle when the katana is drawn, Pistol_Idle when the gun is
+			# equipped, otherwise the default Idle.
+			var sword_drawn: bool = current_slot == WeaponSlot.SWORD \
+				and _sword != null \
+				and _sword.has_method("is_drawn") \
+				and bool(_sword.call("is_drawn")) \
+				and _anim_player.has_animation("Sword_Idle")
+			var pistol_idle: bool = current_slot == WeaponSlot.GUN \
+				and _anim_player.has_animation("Pistol_Idle")
+			if sword_drawn:
+				picked = "Sword_Idle"
+			elif pistol_idle:
+				picked = "Pistol_Idle"
+			else:
+				picked = ANIM_IDLE
 			play_anim(picked)
+		elif horiz_speed >= SPRINT_THRESHOLD and _anim_player.has_animation(ANIM_SPRINT):
+			picked = ANIM_SPRINT
+			# Speed-scale ramps from 1.0 at the threshold up to ~1.4 at full tilt
+			# so the legs still keep visual pace with the world without looking
+			# strobed.
+			play_anim(picked, clampf(horiz_speed / 13.0, 0.95, 1.4))
 		else:
 			picked = ANIM_JOG
 			play_anim(picked, clampf(horiz_speed / 7.0, 0.8, 1.3))

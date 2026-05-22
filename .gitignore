@@ -3,6 +3,11 @@ docs/
 # Godot 4 generated cache — regenerated on first project open.
 .godot/
 
+# Baked simulations (heightmap, water sim). Heights regenerate in <1s; water
+# is ~130 MB and only needed when iterating on water. Keep .gitkeep so the
+# directory exists on fresh clones.
+baked/*.bin
+
 # Relay dev venv — recreated with `pip install -r relay/requirements.txt`.
 relay/.venv/
 

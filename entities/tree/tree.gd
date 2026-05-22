@@ -125,24 +125,105 @@ func pick_up_by(player: Node) -> void:
 func _despawn() -> void:
 	queue_free()
 
+# Polyhaven bark scan — matches the rest of the foliage style. The ARM map
+# packs ambient occlusion (R), roughness (G), and metallic (B) into one image.
+const _BARK_DIFF := preload("res://assets/polyhaven/textures/bark_brown_02/bark_brown_02_diff_1k.jpg")
+const _BARK_NOR := preload("res://assets/polyhaven/textures/bark_brown_02/bark_brown_02_nor_gl_1k.jpg")
+const _BARK_ARM := preload("res://assets/polyhaven/textures/bark_brown_02/bark_brown_02_arm_1k.jpg")
+
+# Concentric-ring shader for the stump top — model-space radial distance feeds
+# a noisy sinusoid so each stump shows wood-grain rings rather than a flat
+# disc. Compiled once and reused across all stump instances.
+static var _stump_top_shader_cache: Shader
+
+static func _stump_top_shader() -> Shader:
+	if _stump_top_shader_cache != null:
+		return _stump_top_shader_cache
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+render_mode cull_back, diffuse_burley, specular_schlick_ggx;
+
+uniform float seed = 0.0;
+varying vec3 model_pos;
+
+void vertex() {
+	model_pos = VERTEX;
+}
+
+void fragment() {
+	// Distance from the cylinder's Y axis = ring radius.
+	float r = length(vec2(model_pos.x, model_pos.z));
+	// Low-freq warp so the rings aren't perfect circles.
+	float warp = sin(model_pos.x * 8.0 + seed) * 0.02 + cos(model_pos.z * 8.0 - seed * 0.7) * 0.02;
+	float rings = sin((r + warp) * 80.0 + sin((r + warp) * 16.0) * 2.5);
+	float ring_band = smoothstep(-0.3, 0.5, rings);
+	vec3 dark = vec3(0.50, 0.36, 0.20);
+	vec3 light = vec3(0.78, 0.61, 0.39);
+	vec3 col = mix(dark, light, ring_band);
+	// Heartwood darkens slightly toward the center.
+	float heart = smoothstep(0.0, 0.10, r);
+	col = mix(col * 0.78, col, heart);
+	// Fine grain noise.
+	float grain = sin(model_pos.x * 73.0 + model_pos.z * 53.0 + seed * 12.0);
+	col += vec3(grain * 0.03);
+	ALBEDO = col;
+	ROUGHNESS = 0.78;
+	METALLIC = 0.0;
+}
+"""
+	_stump_top_shader_cache = sh
+	return sh
+
 func _spawn_stump() -> void:
 	var stump_radius: float = maxf(_height * 0.05, 0.32)
 	var stump_height: float = 0.55
 	var stump_body := StaticBody3D.new()
 	stump_body.collision_layer = 1
 	stump_body.collision_mask = 0
-	var cm := CylinderMesh.new()
-	cm.top_radius = stump_radius * 0.9
-	cm.bottom_radius = stump_radius
-	cm.height = stump_height
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.32, 0.22, 0.12)
-	mat.roughness = 0.95
-	cm.material = mat
-	var mi := MeshInstance3D.new()
-	mi.mesh = cm
-	mi.position = Vector3(0, stump_height * 0.5, 0)
-	stump_body.add_child(mi)
+	# Bark-textured trunk side with a slight root flare at the base.
+	var side_mesh := CylinderMesh.new()
+	side_mesh.top_radius = stump_radius * 0.88
+	side_mesh.bottom_radius = stump_radius * 1.12
+	side_mesh.height = stump_height
+	side_mesh.radial_segments = 18
+	side_mesh.rings = 1
+	side_mesh.cap_top = false
+	side_mesh.cap_bottom = false
+	var side_mat := StandardMaterial3D.new()
+	side_mat.albedo_texture = _BARK_DIFF
+	side_mat.normal_enabled = true
+	side_mat.normal_texture = _BARK_NOR
+	side_mat.ao_enabled = true
+	side_mat.ao_texture = _BARK_ARM
+	side_mat.ao_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
+	side_mat.roughness_texture = _BARK_ARM
+	side_mat.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_GREEN
+	side_mat.metallic_texture = _BARK_ARM
+	side_mat.metallic_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_BLUE
+	side_mat.uv1_scale = Vector3(2.0, 1.0, 1.0)
+	side_mesh.material = side_mat
+	var side_mi := MeshInstance3D.new()
+	side_mi.mesh = side_mesh
+	side_mi.position = Vector3(0, stump_height * 0.5, 0)
+	stump_body.add_child(side_mi)
+	# Cut top: thin lighter-wood disc with a procedural concentric-ring shader.
+	# The rings are warped by low-freq noise so they don't read as a perfect
+	# bullseye; a per-stump seed shifts the pattern between instances.
+	var top_mesh := CylinderMesh.new()
+	top_mesh.top_radius = stump_radius * 0.86
+	top_mesh.bottom_radius = stump_radius * 0.86
+	top_mesh.height = 0.04
+	top_mesh.radial_segments = 24
+	top_mesh.rings = 1
+	var top_mat := ShaderMaterial.new()
+	top_mat.shader = _stump_top_shader()
+	top_mat.set_shader_parameter("seed", randf() * 100.0)
+	top_mesh.material = top_mat
+	var top_mi := MeshInstance3D.new()
+	top_mi.mesh = top_mesh
+	top_mi.position = Vector3(0, stump_height + 0.005, 0)
+	stump_body.add_child(top_mi)
 	var stump_col := CollisionShape3D.new()
 	var stump_shape := CylinderShape3D.new()
 	stump_shape.radius = stump_radius
@@ -150,5 +231,7 @@ func _spawn_stump() -> void:
 	stump_col.shape = stump_shape
 	stump_col.position = Vector3(0, stump_height * 0.5, 0)
 	stump_body.add_child(stump_col)
+	# Random yaw so the bark texture seam doesn't always face the same way.
+	var rot := Basis(Vector3.UP, randf() * TAU)
 	get_parent().add_child.call_deferred(stump_body)
-	stump_body.set_deferred("global_transform", Transform3D(Basis.IDENTITY, global_position))
+	stump_body.set_deferred("global_transform", Transform3D(rot, global_position))

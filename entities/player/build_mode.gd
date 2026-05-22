@@ -95,21 +95,38 @@ func _resolve_placement() -> Dictionary:
 		q.exclude = [(player as CollisionObject3D).get_rid()]
 	var hit: Dictionary = space.intersect_ray(q)
 	var anchor: Vector3
+	var hit_normal: Vector3 = Vector3.UP
 	if hit.is_empty():
 		anchor = to
 	else:
 		anchor = hit.position
+		hit_normal = (hit.get("normal", Vector3.UP) as Vector3).normalized()
 	# Try to snap to a nearby placed log's anchors.
 	var snap: Dictionary = _find_snap(anchor)
 	if not snap.is_empty():
 		return {"xform": snap.xform as Transform3D, "snapped": true}
-	# Fallback: free placement at the hit point, current ghost yaw.
-	var basis := Basis(Vector3.UP, yaw)
-	# For logs the cylinder lies on local X — lift by RADIUS so it doesn't
-	# sink into the surface. Planks rest flat by half-thickness.
-	var lift: float = LOG_SCRIPT.RADIUS if kind == Kind.LOG else PLANK_SCRIPT.THICKNESS * 0.5
+	# Free placement: align the log to the slope so its full length contacts
+	# the ground (a flat-Y basis on a hillside leaves one end hovering). Yaw
+	# still controls the heading around the surface normal.
+	var yaw_dir: Vector3 = Vector3(cos(yaw), 0.0, sin(yaw))
+	# Reject yaw_dir's component along the normal so the log's length axis
+	# lies in the local tangent plane; degenerate fallback for vertical walls.
+	var tangent_x: Vector3 = yaw_dir - hit_normal * yaw_dir.dot(hit_normal)
+	if tangent_x.length() < 0.01:
+		tangent_x = Vector3.RIGHT
+	tangent_x = tangent_x.normalized()
+	var tangent_z: Vector3 = hit_normal.cross(tangent_x).normalized()
+	var basis := Basis(tangent_x, hit_normal, tangent_z)
+	# Lift along the surface normal so the bias is "into the ground" on slopes,
+	# not into the +Y axis. RADIUS*0.35 keeps the underside settled against the
+	# surface without floating above it.
+	var lift_mag: float
+	if kind == Kind.LOG:
+		lift_mag = LOG_SCRIPT.RADIUS * 0.35
+	else:
+		lift_mag = PLANK_SCRIPT.THICKNESS * 0.5
 	return {
-		"xform": Transform3D(basis, anchor + Vector3(0, lift, 0)),
+		"xform": Transform3D(basis, anchor + hit_normal * lift_mag),
 		"snapped": false
 	}
 
