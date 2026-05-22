@@ -5,7 +5,7 @@ extends "res://weapons/weapon.gd"
 @export var hit_area_path: NodePath
 @export var tip_marker_tpv_path: NodePath
 @export var tip_marker_fpv_path: NodePath
-@export var damage: int = 2
+@export var damage: int = 5
 
 @onready var rig_tpv: Node3D = get_node(rig_tpv_path)
 @onready var rig_fpv: Node3D = get_node(rig_fpv_path)
