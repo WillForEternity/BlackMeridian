@@ -15,6 +15,9 @@ var _rig_fpv: Node3D
 func cooldown() -> float:
 	return data.cooldown if data else 1.7
 
+func speed_multiplier() -> float:
+	return 1.25
+
 # Number of extra mid-air jumps this weapon grants — Light Portal allows
 # triple jump (one ground jump + two air jumps).
 func extra_air_jumps() -> int:
