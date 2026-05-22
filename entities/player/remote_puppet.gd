@@ -12,6 +12,10 @@ const BODY_HEIGHT: float = 2.0
 const BODY_RADIUS: float = 0.4
 const WEAPON_NAMES := ["Sword", "Gun", "Sniper", "Light Portal", "Dark Portal"]
 const RANGER_PATH: String = "res://assets/models/characters/quaternius/Male_Ranger.gltf"
+# Alternate Quaternius ranger skin — same mesh, different texture so remote
+# players read as a visually distinct character from the local player.
+const PUPPET_ALBEDO_PATH: String = "res://assets/models/characters/quaternius/T_Ranger_3_BaseColor.png"
+const UALLoaderScript := preload("res://entities/util/ual_loader.gd")
 
 var _peer_id: int = 0
 var _body: Node3D
@@ -74,11 +78,12 @@ func _ready() -> void:
 		# capsule collision (feet at y=0, head at y=BODY_HEIGHT) lines up.
 		_body.position = Vector3.ZERO
 	add_child(_body)
+	_reskin_puppet()
 	# Same UAL clip library the local player uses, so anim names broadcast in
 	# the pose RPC ("Jog_Fwd", "Sword_Attack", etc.) resolve correctly on the
 	# puppet's skeleton.
 	if packed != null:
-		_anim_player = UALLoader.install(_body)
+		_anim_player = UALLoaderScript.install(_body)
 		if _anim_player != null and _anim_player.has_animation("Idle"):
 			_anim_player.play("Idle")
 			_current_anim = "Idle"
@@ -139,6 +144,31 @@ func set_pose(pos: Vector3, yaw: float, slot: int) -> void:
 	if slot != _current_slot:
 		_current_slot = slot
 		_refresh_label()
+
+# Swap the ranger mesh's albedo to the alternate Ranger_3 texture so this
+# puppet visually contrasts with the local player. Walks every MeshInstance3D
+# under _body and replaces each surface material with an override that copies
+# the original (preserving normal map, ORM, etc.) but points albedo_texture
+# at the alternate base color.
+func _reskin_puppet() -> void:
+	if _body == null:
+		return
+	var tex: Texture2D = load(PUPPET_ALBEDO_PATH) as Texture2D
+	if tex == null:
+		return
+	for mi in _body.find_children("*", "MeshInstance3D", true, false):
+		var mesh_inst := mi as MeshInstance3D
+		if mesh_inst == null or mesh_inst.mesh == null:
+			continue
+		for s in mesh_inst.mesh.get_surface_count():
+			var base := mesh_inst.get_active_material(s)
+			var mat: StandardMaterial3D
+			if base is StandardMaterial3D:
+				mat = (base as StandardMaterial3D).duplicate() as StandardMaterial3D
+			else:
+				mat = StandardMaterial3D.new()
+			mat.albedo_texture = tex
+			mesh_inst.set_surface_override_material(s, mat)
 
 func set_anim(anim_name: String, speed: float) -> void:
 	if _anim_player == null or anim_name == "":

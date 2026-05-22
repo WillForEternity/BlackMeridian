@@ -88,7 +88,16 @@ func _ready() -> void:
 	_position_tip_marker(rig_tpv, tip_tpv)
 	_position_tip_marker(rig_fpv, tip_fpv)
 
+# Multiplier on the raw animation speed of every swing. 3.0 makes each slash
+# play 3× as fast; all per-swing time values (tween intervals, anim lock,
+# strike windows, hit-scan delay, cooldown) divide by this so the second click
+# can fire the instant the visual swing wraps up, with no extra cooldown gap.
+const SWING_SPEED_MULT: float = 3.0
+
 func cooldown() -> float:
+	# Return value is set per-swing in _swing() based on the actual combo
+	# duration / SWING_SPEED_MULT so chaining feels gapless. Default for any
+	# external callers still falls back to the data resource.
 	return data.cooldown if data else 0.42
 
 # Sheath system removed — the katana is always out. Kept so player.gd's
@@ -415,8 +424,8 @@ func tick(delta: float) -> void:
 			_trail_im.clear_surfaces()
 
 func _swing() -> void:
-	attack_cd = cooldown()
 	_hits_this_swing.clear()
+	var ts: float = 1.0 / SWING_SPEED_MULT
 
 	# Combo system disabled — every click plays strike 0 (rising-left).
 	#var elapsed: float = COMBO_WINDOW - _combo_window_left
@@ -432,19 +441,23 @@ func _swing() -> void:
 	# Drive the character body's sword swing animation in parallel with the
 	# weapon-rig tween. Lock is roughly the combo's total duration so the
 	# locomotion picker doesn't stomp the swing mid-strike.
+	var total: float = 0.0
+	for kf in data.keyframes:
+		total += float(kf.dur)
+	# Gate the next swing only by the actual animation length (scaled by the
+	# speed multiplier) — no extra gap. The first frame after the swing ends,
+	# on_attack_pressed sees attack_cd == 0 and can fire immediately.
+	attack_cd = total * ts
 	if player and player.has_method("play_anim_locked"):
-		var total: float = 0.0
-		for kf in data.keyframes:
-			total += float(kf.dur)
-		player.play_anim_locked("Sword_Attack", total * 0.85, 1.1)
+		player.play_anim_locked("Sword_Attack", total * 0.85 * ts, 1.1 * SWING_SPEED_MULT)
 	# Both rigs run the full position+rotation animation so the swing reads
 	# the same in third- and first-person. FPVPivot is already scaled down in
 	# the scene, so the offsets shrink appropriately for the closer camera.
 	# Skip the TPV rig when the body's bone animation already drives it,
 	# otherwise the two animations stack and the swing looks doubled.
 	if not _tpv_rig_follows_bone:
-		_tween_keyframes(rig_tpv, data.keyframes, _rest_rot_tpv, _rest_pos_tpv, true)
-	_tween_keyframes(rig_fpv, data.keyframes, _rest_rot_fpv, _rest_pos_fpv, true)
+		_tween_keyframes(rig_tpv, data.keyframes, _rest_rot_tpv, _rest_pos_tpv, true, ts)
+	_tween_keyframes(rig_fpv, data.keyframes, _rest_rot_fpv, _rest_pos_fpv, true, ts)
 
 	var marker: Marker3D = tip_fpv if is_fpv() else tip_tpv
 	var base_tint: Color = data.tint
@@ -464,7 +477,7 @@ func _swing() -> void:
 	if _active_swing_tween and _active_swing_tween.is_valid():
 		_active_swing_tween.kill()
 	_active_swing_tween = create_tween()
-	_active_swing_tween.tween_interval(trail_start)
+	_active_swing_tween.tween_interval(trail_start * ts)
 	_active_swing_tween.tween_callback(func():
 		_trail_sampling = true
 		_begin_trail(base_tint)
@@ -473,7 +486,7 @@ func _swing() -> void:
 	# attack's position+facing to the moment the swing was committed so
 	# moving sideways during the HIT_SCAN_DELAY doesn't redirect the slash.
 	var anchor_pos := {"pos": Vector3.ZERO, "basis": Basis()}
-	_active_swing_tween.tween_interval(maxf(strike_start - trail_start, 0.0))
+	_active_swing_tween.tween_interval(maxf((strike_start - trail_start) * ts, 0.0))
 	_active_swing_tween.tween_callback(func():
 		anchor_pos["pos"] = player.global_position
 		anchor_pos["basis"] = player.global_transform.basis
@@ -484,15 +497,15 @@ func _swing() -> void:
 			_trail_tint = CRIT_TINT
 	)
 	# Delay damage to match the visual: the body's Sword_Attack clip takes
-	# ~0.5s after strike_start before the blade visibly meets the target,
-	# so the hit-scan fires at that moment instead of strike_start.
-	_active_swing_tween.tween_interval(HIT_SCAN_DELAY)
+	# ~0.5s after strike_start (at 1× speed) before the blade visibly meets
+	# the target. Scaled by ts so the timing still matches at 3× speed.
+	_active_swing_tween.tween_interval(HIT_SCAN_DELAY * ts)
 	_active_swing_tween.tween_callback(func():
 		_perform_swing_hit_scan(anchor_pos["pos"], anchor_pos["basis"])
 	)
-	_active_swing_tween.tween_interval(maxf(strike_end - strike_start - HIT_SCAN_DELAY, 0.0))
+	_active_swing_tween.tween_interval(maxf((strike_end - strike_start) * ts - HIT_SCAN_DELAY * ts, 0.0))
 	_active_swing_tween.tween_callback(func(): pass)
-	_active_swing_tween.tween_interval(maxf(trail_end - strike_end, 0.0))
+	_active_swing_tween.tween_interval(maxf((trail_end - strike_end) * ts, 0.0))
 	_active_swing_tween.tween_callback(func():
 		_trail_sampling = false
 		_trail_t_left = 0.18
@@ -672,7 +685,7 @@ func _aim_edge(base_rot: Vector3, cut_dir_parent: Vector3) -> Vector3:
 	var roll := Basis(blade_axis, angle)
 	return (roll * base_basis).get_euler()
 
-func _tween_keyframes(rig: Node3D, kfs: Array, rest_rot: Vector3, rest_pos: Vector3, animate_pos: bool) -> void:
+func _tween_keyframes(rig: Node3D, kfs: Array, rest_rot: Vector3, rest_pos: Vector3, animate_pos: bool, time_scale: float = 1.0) -> void:
 	var tr := create_tween()
 	var tp: Tween = create_tween() if animate_pos else null
 	# Edge-aiming uses motion between keyframes as the cut direction. The
@@ -683,7 +696,7 @@ func _tween_keyframes(rig: Node3D, kfs: Array, rest_rot: Vector3, rest_pos: Vect
 	var last_idx: int = kfs.size() - 1
 	for i in kfs.size():
 		var kf = kfs[i]
-		var dur: float = kf.dur
+		var dur: float = float(kf.dur) * time_scale
 		var trans: int = kf.trans
 		var ease: int = kf.ease
 		var target_pos: Vector3 = rest_pos + kf.pos
@@ -706,8 +719,10 @@ func _tween_keyframes(rig: Node3D, kfs: Array, rest_rot: Vector3, rest_pos: Vect
 # generic melee hit volume. Replaces the blade-following Area3D — modern action
 # games hit anything inside a swing cone in front of the character regardless of
 # whether the blade mesh literally intersects it, which feels far more reliable.
-const HIT_BOX_SIZE: Vector3 = Vector3(1.2, 1.8, 2.6)
-const HIT_BOX_FORWARD: float = 1.3
+# Sword reach matches SWORD_SLICE_DISTANCE (1.45m from player.gd). Width
+# matches length so the slash covers a square footprint in front of the player.
+const HIT_BOX_SIZE: Vector3 = Vector3(1.45, 1.8, 1.45)
+const HIT_BOX_FORWARD: float = 0.725
 const HIT_BOX_HEIGHT: float = 1.0
 const HIT_SCAN_DELAY: float = 0.3
 
