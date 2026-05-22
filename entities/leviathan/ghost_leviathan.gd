@@ -64,10 +64,10 @@ const PASSIVE_MISSILE_UP_BIAS: float = 0.55
 const PASSIVE_MISSILE_RADIAL_BIAS: float = 0.35
 const PASSIVE_MISSILE_FORWARD_BIAS: float = 0.95
 const PASSIVE_MISSILE_RING_RADIUS: float = 1.5
-# Speed multiplier on the passive pair. 2/3 the salvo missile's tuned speed,
-# so passive missiles are visibly slower in the air — easier to spot and
-# dodge than the burst-tier missiles fired during a scripted volley.
-const PASSIVE_MISSILE_SPEED_SCALE: float = 2.0 / 3.0
+# Main-attack missiles join this group on spawn so _tick_passive_fire can
+# hold its volley until the previous scripted salvo has fully resolved —
+# passive trickle should never overlap a burst.
+const MAIN_MISSILE_GROUP: StringName = &"main_attack_missile"
 const VOLLEY_SHOT_MIN_GAP: float = 0.04     # minimum gap between successive volley shots
 const VOLLEY_SHOT_MAX_GAP: float = 0.18     # maximum gap — randomized so it reads as sporadic
 const VOLLEY_SPRAY_RADIUS: float = 1.0      # 1 m spread radius at target distance
@@ -432,12 +432,19 @@ func _tick_chaser(delta: float) -> void:
 
 # Passive background fire: ticks independently of the attack-state machine
 # so the boss always has trickle pressure on the player. Skips on respawn
-# frames where _target hasn't been resolved yet.
+# frames where _target hasn't been resolved yet, and holds firing while any
+# main-attack salvo missile is still in the air so the passive pair never
+# overlaps the burst.
 func _tick_passive_fire(delta: float) -> void:
 	if _target == null:
 		return
 	_passive_fire_cd -= delta
 	if _passive_fire_cd > 0.0:
+		return
+	# Cooldown elapsed but a main salvo is still resolving — hold the shot
+	# (cooldown stays at/under 0 so the moment the group clears, the next
+	# tick fires immediately and the interval resets from there).
+	if not get_tree().get_nodes_in_group(MAIN_MISSILE_GROUP).is_empty():
 		return
 	_passive_fire_cd = PASSIVE_FIRE_INTERVAL
 	_fire_passive_missile_pair()
@@ -470,7 +477,7 @@ func _fire_passive_missile_pair() -> void:
 		var ctype: int = randi() % 3
 		var m = MissileScene.new()
 		get_tree().current_scene.add_child(m)
-		m.setup(at, dir, self, _target, phase, spin, ctype, PASSIVE_MISSILE_SPEED_SCALE)
+		m.setup(at, dir, self, _target, phase, spin, ctype)
 
 func _find_closest_player() -> Node3D:
 	var scene: Node = get_tree().current_scene
@@ -527,6 +534,7 @@ func _tick_attacks(delta: float) -> void:
 				var m = MissileScene.new()
 				get_tree().current_scene.add_child(m)
 				m.setup(d["at"], d["dir"], self, _target, d["phase"], d["spin"], int(d.get("type", 0)))
+				m.add_to_group(MAIN_MISSILE_GROUP)
 			if _attack_state_timer <= 0.0:
 				_end_attack()
 		AttackState.FISH_PROJECTILE:
