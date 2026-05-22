@@ -210,8 +210,8 @@ const CRYSTAL_SPIN_JITTER: float = 0.25      # ±25 % per-missile spread on CRYS
 # per-missile crystal type (_boost_color / _cruise_color), not from constants.
 const TRAIL_SAMPLES: int = 100
 const TRAIL_SAMPLE_INTERVAL: float = 0.024
-const TRAIL_WIDTH_CRUISE: float = 0.09           # narrow streak — reads as a sharp ribbon, not a smear
-const TRAIL_WIDTH_BOOST: float = 0.15            # slightly fatter during boost ignition
+const TRAIL_WIDTH_CRUISE: float = 0.05           # narrow streak — reads as a sharp ribbon, not a smear
+const TRAIL_WIDTH_BOOST: float = 0.08            # slightly fatter during boost ignition
 
 # Launch flash: a single bright pulse at spawn that decays in FLASH_DURATION.
 # Tuned LOWER than the original so the gem itself reads as a crystal lit by a

@@ -19,20 +19,21 @@ extends CharacterBody3D
 const BeamScene := preload("res://entities/leviathan/leviathan_beam.gd")
 const LongBeamScene := preload("res://entities/leviathan/leviathan_long_beam.gd")
 const MissileScene := preload("res://entities/leviathan/leviathan_missile.gd")
+const FishProjectileScene := preload("res://entities/leviathan/leviathan_fish_projectile.gd")
 const LockIndicatorScene := preload("res://entities/leviathan/leviathan_lock_indicator.gd")
 const MODEL_PATH := "res://assets/models/ghost_leviathan.glb"
 
 # Health bar (billboarded above the boss, like the remote-puppet bars).
 const HP_BAR_WIDTH: float = 4.0
 const HP_BAR_HEIGHT: float = 0.45
-const HP_BAR_Y_OFFSET: float = 18.0
+const HP_BAR_Y_OFFSET: float = 36.0
 const SWIM_ANIM_SUBSTRING := "swimF"
 
-const ALTITUDE_OVER_TARGET: float = 18.0
-const TARGET_LENGTH: float = 42.0
+const ALTITUDE_OVER_TARGET: float = 27.0
+const TARGET_LENGTH: float = 84.0
 const FOLLOW_SPEED: float = 9.33
 # Don't get too close to the target — beams need flight time to read as dodgeable.
-const MIN_DISTANCE: float = 28.0
+const MIN_DISTANCE: float = 42.0
 
 const MAX_HEALTH: float = 500.0
 var _health: float = MAX_HEALTH
@@ -75,7 +76,26 @@ const MISSILE_UP_BIAS: float = 1.10             # dominant vertical component �
 const MISSILE_RADIAL_BIAS: float = 0.45         # mild sideways fan around the ring
 const MISSILE_FORWARD_BIAS: float = 0.20        # mild forward lean toward player
 
-enum AttackState { IDLE, LONG_BEAM, VOLLEY, MISSILE_VOLLEY }
+# Fish-projectile attack: same VLS-fountain structure as the missile volley
+# but only TWO projectiles, fired from opposite sides of the head. The fish
+# are destroyable (HP), much larger, and faster — the intent is for the
+# player to choose between shooting them down or out-maneuvering.
+# Cadence: one fish-projectile volley after every MISSILE_VOLLEYS_BEFORE_FISH
+# missile volleys (so missile → missile → fish → missile → missile → fish …).
+const FISH_COUNT: int = 2
+const FISH_VOLLEY_DURATION: float = 7.5
+const FISH_LOCK_DURATION: float = 1.4
+const FISH_LAUNCH_STAGGER: float = 0.18
+const FISH_RING_RADIUS: float = 4.0
+# Heavy FORWARD bias (low UP) so the fish leaves the boss on a near-horizontal
+# vector and skims toward the player at low altitude instead of climbing
+# into a missile-style fountain first.
+const FISH_UP_BIAS: float = 0.15
+const FISH_RADIAL_BIAS: float = 0.50
+const FISH_FORWARD_BIAS: float = 1.10
+const MISSILE_VOLLEYS_BEFORE_FISH: int = 2
+
+enum AttackState { IDLE, LONG_BEAM, VOLLEY, MISSILE_VOLLEY, FISH_PROJECTILE }
 
 # Long beam is the most punishing pattern, so it should feel like a rare
 # special — between long beams the boss alternates VOLLEY ↔ MISSILE_VOLLEY.
@@ -106,6 +126,9 @@ var _volley_shot_cd: float = 0.0
 # instance so we can clean it up on respawn/death.
 var _missile_queue: Array = []
 var _missile_queue_time: float = 0.0
+# Counts missile volleys fired since the last fish-projectile volley so we
+# can trigger the fish attack every MISSILE_VOLLEYS_BEFORE_FISH volleys.
+var _missile_volleys_since_fish: int = 0
 var _lock_indicator: Node = null
 var _target: Node3D
 var _hp_root: Node3D
@@ -142,7 +165,7 @@ func _ready() -> void:
 	# Wrap-around collision capsule sized to the leviathan's visual.
 	var shape := CollisionShape3D.new()
 	var cap := CapsuleShape3D.new()
-	cap.radius = 2.5
+	cap.radius = 5.0
 	cap.height = TARGET_LENGTH * 0.7
 	shape.shape = cap
 	# Rotate capsule so its long axis matches the model's body (local +Z).
@@ -439,6 +462,17 @@ func _tick_attacks(delta: float) -> void:
 				m.setup(d["at"], d["dir"], self, _target, d["phase"], d["spin"], int(d.get("type", 0)))
 			if _attack_state_timer <= 0.0:
 				_end_attack()
+		AttackState.FISH_PROJECTILE:
+			# Reuse the missile-volley queue/launch scaffolding — queue entries
+			# omit "type" and we spawn FishProjectileScene instead.
+			_missile_queue_time += delta
+			while not _missile_queue.is_empty() and float(_missile_queue[0].get("t", 0.0)) <= _missile_queue_time:
+				var d: Dictionary = _missile_queue.pop_front()
+				var f = FishProjectileScene.new()
+				get_tree().current_scene.add_child(f)
+				f.setup(d["at"], d["dir"], self, _target, d["phase"], d["spin"])
+			if _attack_state_timer <= 0.0:
+				_end_attack()
 
 func _begin_attack(which: int) -> void:
 	_attack_state = which
@@ -448,18 +482,28 @@ func _begin_attack(which: int) -> void:
 	elif which == AttackState.VOLLEY:
 		_attack_state_timer = VOLLEY_DURATION
 		_volley_shot_cd = 0.0
+	elif which == AttackState.FISH_PROJECTILE:
+		_queue_fish_projectile_volley()
+		_attack_state_timer = FISH_VOLLEY_DURATION
+		_missile_volleys_since_fish = 0
 	else:
 		_queue_missile_volley()
 		_attack_state_timer = MISSILE_VOLLEY_DURATION
+		_missile_volleys_since_fish += 1
 	_next_attack = _pick_next_attack()
 
-# Picks the next attack. TEMPORARILY locked to MISSILE_VOLLEY while the
-# missile system is being tuned — leaves the VOLLEY / LONG_BEAM machinery in
-# place so the rotation can be reinstated by restoring the original body.
-# Original rotation:
+# Picks the next attack. While the broader attack rotation is paused, the boss
+# alternates between MISSILE_VOLLEY and FISH_PROJECTILE on a fixed cadence:
+# after every MISSILE_VOLLEYS_BEFORE_FISH missile volleys, fire one fish-
+# projectile volley. The fish pattern reads as a deliberate threat the
+# player has to decide whether to shoot down or evade, which gives the
+# missile cadence more texture without re-introducing the long beam yet.
+# Original rotation (reinstate by restoring the older body):
 #   - LONG_BEAM every LONG_BEAM_FREQUENCY attacks
 #   - the rest alternate VOLLEY ↔ MISSILE_VOLLEY
 func _pick_next_attack() -> int:
+	if _missile_volleys_since_fish >= MISSILE_VOLLEYS_BEFORE_FISH:
+		return AttackState.FISH_PROJECTILE
 	return AttackState.MISSILE_VOLLEY
 
 func _end_attack() -> void:
@@ -585,6 +629,43 @@ func _queue_missile_volley() -> void:
 			"type": ctype,
 		})
 
+# Fish-projectile volley: same lock-then-stagger pattern as the missile volley,
+# but only FISH_COUNT (=2) projectiles fired from opposing points around the
+# head. Reuses _missile_queue/_missile_queue_time/_lock_indicator so the
+# FISH_PROJECTILE tick handler can share the missile-volley scaffolding.
+func _queue_fish_projectile_volley() -> void:
+	_missile_queue.clear()
+	_missile_queue_time = 0.0
+	if _target == null:
+		return
+	_spawn_lock_indicator(_target)
+	var spawn_pos: Vector3 = _head_position()
+	var to_target: Vector3 = _target.global_position - spawn_pos
+	if to_target.length_squared() < 1e-4:
+		return
+	var forward: Vector3 = to_target.normalized()
+	var up_ref: Vector3 = Vector3.UP
+	if absf(forward.dot(Vector3.UP)) > 0.95:
+		up_ref = Vector3.FORWARD
+	var right: Vector3 = forward.cross(up_ref).normalized()
+	var up: Vector3 = right.cross(forward).normalized()
+	for i in range(FISH_COUNT):
+		# Two fish → opposing radial directions (0, π) for a symmetric pair.
+		var ring_angle: float = TAU * float(i) / float(FISH_COUNT)
+		var radial: Vector3 = right * cos(ring_angle) + up * sin(ring_angle)
+		var dir: Vector3 = (Vector3.UP * FISH_UP_BIAS + radial * FISH_RADIAL_BIAS + forward * FISH_FORWARD_BIAS).normalized()
+		var at: Vector3 = spawn_pos + radial * FISH_RING_RADIUS * 0.5
+		var phase: float = ring_angle
+		var spin: float = 1.0 if (i % 2 == 0) else -1.0
+		var t_launch: float = FISH_LOCK_DURATION + float(i) * FISH_LAUNCH_STAGGER
+		_missile_queue.append({
+			"t": t_launch,
+			"at": at,
+			"dir": dir,
+			"phase": phase,
+			"spin": spin,
+		})
+
 func _spawn_lock_indicator(tgt: Node3D) -> void:
 	if _lock_indicator != null and is_instance_valid(_lock_indicator):
 		_lock_indicator.queue_free()
@@ -657,9 +738,17 @@ func _respawn() -> void:
 	# into the next attack cycle.
 	_missile_queue.clear()
 	_missile_queue_time = 0.0
+	_missile_volleys_since_fish = 0
 	if _lock_indicator != null and is_instance_valid(_lock_indicator):
 		_lock_indicator.queue_free()
 	_lock_indicator = null
+	# Clear every persistent fish explosion left in the world. Each one
+	# adds itself to the "leviathan_explosion" group on _ready, so a
+	# tree-wide group sweep catches them regardless of which scene root
+	# they were parented to.
+	for ex in get_tree().get_nodes_in_group(&"leviathan_explosion"):
+		if is_instance_valid(ex):
+			ex.queue_free()
 	_chaser_seeded = false
 	_target = null
 	_last_facing = Vector3.FORWARD
