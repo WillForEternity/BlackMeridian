@@ -63,22 +63,12 @@ func _ready() -> void:
 	var packed: PackedScene = load(RANGER_PATH) as PackedScene
 	if packed != null:
 		_body = packed.instantiate() as Node3D
-	if _body == null:
-		# Fallback to a capsule if the model fails to load (kept so a missing
-		# asset doesn't leave the puppet invisible).
-		var capsule := CapsuleMesh.new()
-		capsule.radius = BODY_RADIUS
-		capsule.height = BODY_HEIGHT
-		var mi := MeshInstance3D.new()
-		mi.mesh = capsule
-		_body = mi
-		_body.position = Vector3(0, BODY_HEIGHT * 0.5, 0)
-	else:
+	if _body != null:
 		# Ranger's pivot is at the feet; place it at puppet origin so the
 		# capsule collision (feet at y=0, head at y=BODY_HEIGHT) lines up.
 		_body.position = Vector3.ZERO
-	add_child(_body)
-	_reskin_puppet()
+		add_child(_body)
+		_reskin_puppet()
 	# Same UAL clip library the local player uses, so anim names broadcast in
 	# the pose RPC ("Jog_Fwd", "Sword_Attack", etc.) resolve correctly on the
 	# puppet's skeleton.
