@@ -46,7 +46,7 @@ var _health: float = MAX_HEALTH
 # chaotic / unfair.
 const LONG_BEAM_DURATION: float = 5.0       # matches LIFETIME in leviathan_long_beam.gd
 const VOLLEY_DURATION: float = 6.0          # total length of a volley salvo
-const ATTACK_BREAK: float = 13.0            # quiet pause between consecutive attacks — combined with the ~6–7 s attack durations this gives a cycle of roughly 20 s per scripted attack (missile salvo / fish-projectile / long beam)
+const ATTACK_BREAK: float = 23.0            # quiet pause between consecutive attacks — combined with the ~6–7 s attack durations this gives a cycle of roughly 30 s per scripted attack (missile salvo / fish-projectile / long beam)
 
 # Passive background fire: independent of the attack-state cycle, the boss
 # spits PASSIVE_MISSILE_COUNT gem missiles at the target every
