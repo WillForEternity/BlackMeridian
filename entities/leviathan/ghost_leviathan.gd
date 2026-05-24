@@ -57,9 +57,6 @@ const ATTACK_BREAK: float = 23.0            # quiet pause between consecutive at
 # spawned in pairs at a slow cadence instead of as a 12+ ring volley.
 const PASSIVE_FIRE_INTERVAL: float = 4.0
 const PASSIVE_MISSILE_COUNT: int = 2
-# Launch direction biases for passive missiles. Less UP than the main volley
-# fountain (we don't need a tall VLS arc for a constant drip), more FORWARD
-# so the pair lances straight toward the player and starts homing quickly.
 const PASSIVE_MISSILE_UP_BIAS: float = 0.55
 const PASSIVE_MISSILE_RADIAL_BIAS: float = 0.35
 const PASSIVE_MISSILE_FORWARD_BIAS: float = 0.95
@@ -83,7 +80,7 @@ const VOLLEY_SPRAY_RADIUS: float = 1.0      # 1 m spread radius at target distan
 #   t = MISSILE_LOCK_DURATION + (i-1)·MISSILE_LAUNCH_STAGGER
 #                             missile i launches (VLS hot-launch cadence)
 #   t = MISSILE_VOLLEY_DURATION  state ends, ATTACK_BREAK begins
-const MISSILE_VOLLEY_COUNT: int = 18            # ring petal count — keep even so spin-sign alternation is symmetric (~1.5x the previous 12)
+const MISSILE_VOLLEY_COUNT: int = 8             # ring petal count — keep even so spin-sign alternation is symmetric
 const MISSILE_VOLLEY_DURATION: float = 6.0      # full window: lock + launch sequence + flight resolution
 const MISSILE_LOCK_DURATION: float = 1.2        # pre-launch warning — gives the player time to spot the lock and reposition
 const MISSILE_LAUNCH_STAGGER: float = 0.08      # per-missile launch gap; reads as VLS firing cadence rather than a single salvo
@@ -186,15 +183,6 @@ func _ready() -> void:
 	# touch terrain or other physics — we manually fly via _process.
 	collision_layer = 1 | 4
 	collision_mask = 0
-	# Wrap-around collision capsule sized to the leviathan's visual.
-	var shape := CollisionShape3D.new()
-	var cap := CapsuleShape3D.new()
-	cap.radius = 5.0
-	cap.height = TARGET_LENGTH * 0.7
-	shape.shape = cap
-	# Rotate capsule so its long axis matches the model's body (local +Z).
-	shape.rotation = Vector3(PI / 2.0, 0.0, 0.0)
-	add_child(shape)
 
 	var packed: PackedScene = load(MODEL_PATH) as PackedScene
 	if packed == null:
@@ -205,6 +193,13 @@ func _ready() -> void:
 		return
 	add_child(_model)
 	_normalize_size(_model)
+	# Bone-driven hurtbox: capsules anchored to spine/tail bones via
+	# BoneAttachment3D, so the hitbox tracks the swim animation instead of
+	# sitting frozen in a T-pose-shaped tube. Must run after _model is added
+	# (so the Skeleton3D exists) and after _normalize_size (so the model's
+	# scale is baked into bone world transforms before we measure segment
+	# lengths for capsule sizing).
+	_build_bone_hitboxes()
 	_anim_player = _model.find_child("AnimationPlayer", true, false) as AnimationPlayer
 	if _anim_player != null:
 		var pick: String = _find_anim_containing(_anim_player, SWIM_ANIM_SUBSTRING)
@@ -371,6 +366,210 @@ func _gather_visuals(n: Node) -> Array:
 	for c in n.get_children():
 		out.append_array(_gather_visuals(c))
 	return out
+
+# Bone-chain hitbox definitions. Each chain is a head-to-tip ordering of
+# named bones; consecutive entries get a capsule between them. Radii are in
+# the model's UNSCALED frame — the model is scaled at runtime by
+# _normalize_size (currently ~1.7x), and that scale propagates through the
+# Skeleton3D transform onto every capsule, so 1.0 unit here ≈ 1.7m in world.
+#
+# pivot_idx in each chain is the entry that's the skeleton-parent of
+# everything else. For pair (i, i+1) we anchor the BoneAttachment3D on
+# whichever side is closer to the pivot, so the capsule rotates with the
+# correct parent bone when an animation bends the chain.
+
+# Spine: head → … → root_03 (pivot) → … → tail tip.
+const _SPINE_CHAIN: Array[String] = [
+	"head_020",
+	"neck3_019",
+	"neck2_018",
+	"neck1_017",
+	"root_03",
+	"tail_1_030",
+	"tail_2_046",
+	"tail_3_062",
+	"tail_4_064",
+	"tail_5_066",
+	"tail_6_068",
+	"tail_7_070",
+	"tail_8_072",
+	"tail_9_074",
+]
+const _SPINE_PIVOT: int = 4
+const _SPINE_RADIUS: Array[float] = [
+	1.5, 1.2, 1.2, 1.5, 2.0, 1.8, 1.5, 1.2,
+	1.0, 0.8, 0.6, 0.4, 0.3, 0.2,
+]
+
+# Head fins and jaws — short single- or two-segment chains rooted at head_020
+# (head_finOutrEnd is a child of head_finOutrBase, hence the longer chain for
+# that one). Without these the head/face has no coverage so the leviathan can
+# be walked through nose-first.
+const _HEAD_FIN_CHAINS: Array = [
+	["head_finInnrBase_021", "head_finInnrBase_end_089"],
+	["head_finInnrEnd_022",  "head_finInnrEnd_end_090"],
+	["head_finMidlEnd_023",  "head_finMidlEnd_end_091"],
+	["head_finOutrBase_024", "head_finOutrEnd_025", "head_finOutrEnd_end_092"],
+	["JawC_026", "JawC_end_093"],
+	["JawL_027", "JawL_end_094"],
+	["JawR_028", "JawR_end_095"],
+]
+const _HEAD_FIN_RADII: Array[float] = [0.5, 0.35, 0.2]
+
+# Editor-editable hitbox scene. When present it's the source of truth for
+# the leviathan's hurtboxes — open it in the Godot editor and drag capsules
+# around with gizmos. Code-gen below is the fresh-checkout fallback.
+const HITBOX_SCENE_PATH: String = "res://entities/leviathan/leviathan_hitboxes.tscn"
+
+func _build_bone_hitboxes() -> void:
+	var skel: Skeleton3D = _model.find_child("Skeleton3D", true, false) as Skeleton3D
+	if skel == null:
+		push_warning("[GhostLeviathan] no Skeleton3D in model — hitbox falls back to a single capsule")
+		_fallback_capsule()
+		return
+	var used_scene := false
+	if ResourceLoader.exists(HITBOX_SCENE_PATH):
+		used_scene = _load_hitboxes_from_scene(skel)
+	if not used_scene:
+		_generate_hitboxes(skel)
+
+func _generate_hitboxes(skel: Skeleton3D) -> void:
+	_attach_chain_capsules(skel, _SPINE_CHAIN, _SPINE_RADIUS, _SPINE_PIVOT)
+	for fin in _HEAD_FIN_CHAINS:
+		# Truncate the shared _HEAD_FIN_RADII profile to match each chain's
+		# length so a 2-bone fin uses [0]+[1] and a 3-bone fin uses [0]+[1]+[2].
+		var radii: Array[float] = _HEAD_FIN_RADII.slice(0, fin.size())
+		_attach_chain_capsules(skel, fin, radii, 0)
+
+# Instantiate the saved hitbox scene and reparent each BoneAttachment3D under
+# the live skeleton so it actually tracks bone motion. The BoneAttachment3D's
+# saved transform is purely for editor layout (rest pose) — it's overridden
+# by bone tracking at runtime, so we wipe it to identity to be safe.
+# Returns true if at least one hitbox was successfully attached. The caller
+# uses this to decide whether to fall back to code-gen + JSON overrides.
+func _load_hitboxes_from_scene(skel: Skeleton3D) -> bool:
+	var packed: PackedScene = load(HITBOX_SCENE_PATH) as PackedScene
+	if packed == null:
+		push_warning("[GhostLeviathan] failed to load %s" % HITBOX_SCENE_PATH)
+		return false
+	var inst: Node = packed.instantiate()
+	# Bake stores each hitbox anchor as a plain Node3D carrying a "bone_name"
+	# metadata. Here we collect them, turn each into a real BoneAttachment3D
+	# parented to the live skeleton, transfer the CollisionShape3D children
+	# across, and free the marker. The legacy collector (raw BoneAttachment3D)
+	# still runs so older .tscn files keep working.
+	var marker_nodes: Array = []
+	var legacy_ba: Array = []
+	_collect_hitbox_markers(inst, marker_nodes, legacy_ba)
+	var attached: int = 0
+	var missing: int = 0
+	for marker in marker_nodes:
+		var bone_name_str: String = String(marker.get_meta(&"bone_name"))
+		var bi: int = skel.find_bone(bone_name_str)
+		if bi < 0:
+			push_warning("[GhostLeviathan] hitbox refers to unknown bone '%s'" % bone_name_str)
+			missing += 1
+			continue
+		var ba := BoneAttachment3D.new()
+		ba.bone_name = bone_name_str
+		ba.bone_idx = bi
+		skel.add_child(ba)
+		# Move every CollisionShape3D from the marker to the new BA. Clearing
+		# owner first prevents "owner inconsistent" warnings when the CS hops
+		# out of the saved-scene tree into the live runtime tree.
+		for c in marker.get_children().duplicate():
+			if not (c is CollisionShape3D):
+				continue
+			c.owner = null
+			marker.remove_child(c)
+			ba.add_child(c)
+		attached += 1
+	for ba in legacy_ba:
+		var bi2: int = skel.find_bone(ba.bone_name)
+		if bi2 < 0:
+			push_warning("[GhostLeviathan] hitbox refers to unknown bone '%s'" % ba.bone_name)
+			missing += 1
+			continue
+		var parent: Node = ba.get_parent()
+		if parent != null:
+			parent.remove_child(ba)
+		ba.bone_idx = bi2
+		ba.transform = Transform3D.IDENTITY
+		skel.add_child(ba)
+		attached += 1
+	inst.queue_free()
+	print("[GhostLeviathan] loaded %d hitboxes from %s (%d missing bones)" % [attached, HITBOX_SCENE_PATH, missing])
+	return attached > 0
+
+# Walks the loaded scene collecting two flavours of hitbox anchor:
+#   markers: Node3D with a "bone_name" meta — the current bake format.
+#   legacy:  raw BoneAttachment3D nodes — older bakes from before the meta
+#            change. Kept for one transition so existing .tscn files still load.
+func _collect_hitbox_markers(node: Node, markers: Array, legacy: Array) -> void:
+	for c in node.get_children():
+		if c is Node3D and c.has_meta(&"bone_name"):
+			markers.append(c)
+		elif c is BoneAttachment3D:
+			legacy.append(c)
+		else:
+			_collect_hitbox_markers(c, markers, legacy)
+
+func _attach_chain_capsules(skel: Skeleton3D, chain: Array, radii: Array, pivot_idx: int) -> void:
+	for i in chain.size() - 1:
+		# Anchor on whichever side of the pair is closer to the pivot. For
+		# pivot=0 (limbs) this always picks i. For pivot in the middle (spine)
+		# it flips at the pivot.
+		var anchor_in_chain: int = i if i >= pivot_idx else i + 1
+		var other_in_chain: int = i + 1 if anchor_in_chain == i else i
+		var anchor_name: String = chain[anchor_in_chain]
+		var other_name: String = chain[other_in_chain]
+		var anchor_idx: int = skel.find_bone(anchor_name)
+		var other_idx: int = skel.find_bone(other_name)
+		if anchor_idx < 0 or other_idx < 0:
+			continue
+		var anchor_rest: Transform3D = skel.get_bone_global_rest(anchor_idx)
+		var other_rest: Transform3D = skel.get_bone_global_rest(other_idx)
+		# Position of the other bone's origin in the anchor bone's local frame.
+		var other_local: Vector3 = anchor_rest.affine_inverse() * other_rest.origin
+		var length: float = other_local.length()
+		if length < 0.001:
+			continue
+		var radius: float = minf(radii[anchor_in_chain], radii[other_in_chain])
+		var basis: Basis = _basis_with_y(other_local / length)
+		var attach := BoneAttachment3D.new()
+		attach.bone_name = anchor_name
+		attach.bone_idx = anchor_idx
+		skel.add_child(attach)
+		var cs := CollisionShape3D.new()
+		var cap := CapsuleShape3D.new()
+		cap.radius = radius
+		# CapsuleShape3D.height is total length incl. the two hemispheres,
+		# which must be ≥ 2 * radius for a valid shape.
+		cap.height = maxf(length, radius * 2.0 + 0.001)
+		cs.shape = cap
+		cs.transform = Transform3D(basis, other_local * 0.5)
+		attach.add_child(cs)
+
+# Construct a right-handed basis whose +Y column is `y`. The other two axes
+# are arbitrary — only +Y matters for capsule orientation, since a capsule is
+# rotationally symmetric around its height axis.
+func _basis_with_y(y: Vector3) -> Basis:
+	var ref: Vector3 = Vector3.RIGHT if absf(y.dot(Vector3.UP)) > 0.95 else Vector3.UP
+	var z: Vector3 = y.cross(ref).normalized()
+	var x: Vector3 = z.cross(y).normalized()
+	return Basis(x, y, z)
+
+# Sole purpose: keep the leviathan damageable if the model loads without a
+# skeleton (corrupted GLB, asset swap, etc.). Without this the boss would
+# become invincible because the only hurtboxes are the bone-anchored ones.
+func _fallback_capsule() -> void:
+	var cs := CollisionShape3D.new()
+	var cap := CapsuleShape3D.new()
+	cap.radius = 5.0
+	cap.height = TARGET_LENGTH * 0.7
+	cs.shape = cap
+	cs.rotation = Vector3(PI / 2.0, 0.0, 0.0)
+	add_child(cs)
 
 # Each frame: re-pick the closest player, fly toward a point above them, and
 # tick attack cooldowns.
@@ -764,7 +963,10 @@ func _on_killed_locally() -> void:
 			"type": "leviathan_killed",
 			"peer_id": killer_id,
 		})
-	_respawn()
+	if Network.is_in_room():
+		_respawn()
+	else:
+		queue_free()
 
 # Called by training_cave.gd when a "leviathan_killed" message arrives from
 # another peer. Just bumps the scoreboard — does NOT respawn the local

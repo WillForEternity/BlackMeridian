@@ -107,6 +107,17 @@ const PATCH_SUPER_CORE_SIZE: float = 14.0
 const PATCH_SUPER_CORE_GRID: int = 275       # 275²/14² ≈ 386 blades/m² — dense but not saturated
 const PATCH_SUPER_CORE_FADE_INNER: float = 5.0
 const PATCH_SUPER_CORE_FADE_OUTER: float = 7.0
+# Rolling heightmap texture for patch grass. Covers PATCH_HMAP_WORLD × PATCH_HMAP_WORLD
+# meters centered on the camera. Rebuilt incrementally (PATCH_HMAP_ROW_BUDGET rows/frame)
+# when the camera drifts PATCH_HMAP_REBUILD_DIST from the current texture center.
+# At 2 m/pixel and 512 m coverage the texture always contains the full 220 m patch
+# with 146 m of margin before any blade samples outside the valid region.
+const PATCH_HMAP_SIZE: int = 256
+const PATCH_HMAP_WORLD: float = 512.0
+const PATCH_HMAP_CELL: float = 2.0          # m/pixel (PATCH_HMAP_WORLD / PATCH_HMAP_SIZE)
+const PATCH_HMAP_REBUILD_DIST: float = 64.0
+const PATCH_HMAP_ROW_BUDGET: int = 4
+
 const PATCH_SNAP: float = 1.0              # snap follow to whole meters (no shimmer)
 
 # --- Near-grass duck. In third-person, tilting the look way up swings the
@@ -358,13 +369,29 @@ var _last_offset_core: Vector2 = Vector2(INF, INF)
 var _last_offset_super: Vector2 = Vector2(INF, INF)
 var _sun_light: DirectionalLight3D
 var _height_tex: ImageTexture
+var _patch_height_tex: ImageTexture        # rolling-window heightmap for patch grass
+var _patch_height_data: PackedFloat32Array # CPU buffer rebuilt incrementally
+var _patch_hmap_center: Vector2 = Vector2.ZERO
+var _patch_hmap_next_center: Vector2 = Vector2.ZERO
+var _patch_hmap_rebuild_row: int = -1      # -1 = idle, 0..PATCH_HMAP_SIZE-1 = rebuilding
 var _centerline_z_tex: ImageTexture
 var _grass_patch_mmis: Array = []   # [short MMI, tall MMI]
 # Each tree variant is Array of {"mesh": Mesh, "xform": Transform3D} — parts of a multi-mesh GLB.
 var _tree_variants: Array = []
 var _heights: PackedFloat32Array
+# Noise instances shared by _generate_heights() and _height_at_world() so both
+# evaluate the same stack without re-constructing FastNoiseLite objects.
+var _noise_base: FastNoiseLite
+var _noise_placement: FastNoiseLite
+var _noise_ridge: FastNoiseLite
+var _noise_detail: FastNoiseLite
+var _noise_warp: FastNoiseLite
+# Height offset applied when flatten_origin is true: raw noise at world (0,0)
+# subtracted from every sample so terrain is level at the spawn point.
+var _height_flatten_offset: float = 0.0
 # Terrain chunk streaming: Vector2i(cx,cz) -> MeshInstance3D.
 var _chunk_tiles: Dictionary = {}
+var _chunk_colliders: Dictionary = {}   # Vector2i -> StaticBody3D, outer chunks only
 var _chunk_spawn_queue: Array = []
 var _last_chunk_stream_pos: Vector3 = Vector3.INF
 var _ground_material: Material
@@ -441,6 +468,9 @@ func _ready() -> void:
 	# tagged block prints its cost so the bottleneck is obvious next launch.
 	var _t0: int = Time.get_ticks_msec()
 	var _tt: int = _t0
+	# Initialise shared noise instances first — both the bake and the infinite
+	# terrain extension (_height_at_world) need them.
+	_init_noise()
 	# Heightmap generation + carving costs ~1 s. Cache the final post-carve
 	# heights to disk so subsequent launches load in tens of ms. Pass
 	# --bake-heights to force regeneration (after changing noise_seed,
@@ -468,6 +498,7 @@ func _ready() -> void:
 	_attach_collision(_heights)
 	print("[startup] attach_collision: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
 	_build_height_texture()
+	_init_patch_height_tex()
 	print("[startup] build_height_texture: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
 	_init_foliage_resources()
 	print("[startup] init_foliage: %d ms" % (Time.get_ticks_msec() - _tt)); _tt = Time.get_ticks_msec()
@@ -874,6 +905,14 @@ func _process(_dt: float) -> void:
 				Vector3(phalf, 400.0, phalf)
 			)
 		_update_occluder_mask(center)
+	# Rolling patch heightmap: trigger an incremental rebuild when the camera
+	# drifts beyond PATCH_HMAP_REBUILD_DIST from the current texture center.
+	if _patch_height_tex != null:
+		var cam_xz := Vector2(pos.x, pos.z)
+		if _patch_hmap_rebuild_row < 0 and _patch_hmap_center.distance_to(cam_xz) > PATCH_HMAP_REBUILD_DIST:
+			_patch_hmap_next_center = cam_xz
+			_patch_hmap_rebuild_row = 0
+		_tick_patch_height_rebuild()
 	# Tile streaming: only re-survey when the camera has moved enough, and
 	# never build more than GRASS_TILE_SPAWN_BUDGET tiles per frame.
 	if _last_chunk_stream_pos.x == INF or pos.distance_to(_last_chunk_stream_pos) >= CHUNK_REBUILD_THRESHOLD:
@@ -1038,44 +1077,82 @@ func _carve_lake_bowl(heights: PackedFloat32Array, cx: int, cz: int) -> void:
 			var idx: int = gz * GRID + gx
 			heights[idx] = minf(heights[idx], target)
 
+func _init_noise() -> void:
+	_noise_base = FastNoiseLite.new()
+	_noise_base.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_noise_base.seed = noise_seed
+	_noise_base.frequency = BASE_FREQ
+	_noise_base.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_noise_base.fractal_octaves = 4
+	_noise_base.fractal_lacunarity = 2.1
+	_noise_base.fractal_gain = 0.5
+
+	_noise_placement = FastNoiseLite.new()
+	_noise_placement.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_noise_placement.seed = noise_seed + 5
+	_noise_placement.frequency = PLACEMENT_FREQ
+	_noise_placement.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_noise_placement.fractal_octaves = 3
+
+	_noise_ridge = FastNoiseLite.new()
+	_noise_ridge.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_noise_ridge.seed = noise_seed + 11
+	_noise_ridge.frequency = RIDGE_FREQ
+	_noise_ridge.fractal_type = FastNoiseLite.FRACTAL_RIDGED
+	_noise_ridge.fractal_octaves = 5
+	_noise_ridge.fractal_lacunarity = 2.0
+	_noise_ridge.fractal_gain = 0.5
+
+	_noise_detail = FastNoiseLite.new()
+	_noise_detail.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_noise_detail.seed = noise_seed + 23
+	_noise_detail.frequency = DETAIL_FREQ
+	_noise_detail.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_noise_detail.fractal_octaves = 3
+
+	_noise_warp = FastNoiseLite.new()
+	_noise_warp.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_noise_warp.seed = noise_seed + 37
+	_noise_warp.frequency = WARP_FREQ
+
+	# Flatten offset: raw noise at world origin, subtracted from every out-of-bake
+	# sample so the terrain is continuous at y=0 around the spawn point.
+	if flatten_origin:
+		_height_flatten_offset = _eval_raw_noise(0.0, 0.0)
+
+# Evaluate the noise stack at any world XZ without indexing into _heights.
+# No edge bias — that was only applied to the baked region to push mountains
+# toward the map edge. Outside the baked region terrain is unbounded.
+func _eval_raw_noise(wx: float, wz: float) -> float:
+	var sx: float = wx + _noise_warp.get_noise_2d(wx, wz) * WARP_AMP
+	var sz: float = wz + _noise_warp.get_noise_2d(wx + 999.0, wz + 999.0) * WARP_AMP
+	var b: float = _noise_base.get_noise_2d(sx, sz)
+	var p01: float = (_noise_placement.get_noise_2d(sx, sz) + 1.0) * 0.5
+	var mask: float = smoothstep(PLACEMENT_THRESHOLD, PLACEMENT_THRESHOLD + PLACEMENT_FADE, p01)
+	var r: float = _noise_ridge.get_noise_2d(sx, sz)
+	var d: float = _noise_detail.get_noise_2d(sx, sz)
+	return b * BASE_AMP + mask * r * RIDGE_AMP + d * DETAIL_AMP
+
+# Height at any world XZ. Within the baked ±(SIZE/2) region uses the carved
+# heightmap (preserving rivers, lakes, flattened origin). Outside falls back to
+# direct noise evaluation with the same flatten offset applied.
+func _height_at_world(wx: float, wz: float) -> float:
+	var half: float = SIZE * 0.5
+	if not _heights.is_empty() and wx >= -half and wx <= half and wz >= -half and wz <= half:
+		return _sample_height(_heights, wx, wz)
+	var h: float = _eval_raw_noise(wx, wz) - _height_flatten_offset
+	if h < 0.0:
+		h *= 0.5
+	return h
+
+# Surface normal at any world XZ via central differences on _height_at_world.
+func _normal_at_world(wx: float, wz: float) -> Vector3:
+	var dx: float = (_height_at_world(wx + CELL, wz) - _height_at_world(wx - CELL, wz)) / (2.0 * CELL)
+	var dz: float = (_height_at_world(wx, wz + CELL) - _height_at_world(wx, wz - CELL)) / (2.0 * CELL)
+	return Vector3(-dx, 1.0, -dz).normalized()
+
 func _generate_heights() -> PackedFloat32Array:
-	var base := FastNoiseLite.new()
-	base.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
-	base.seed = noise_seed
-	base.frequency = BASE_FREQ
-	base.fractal_type = FastNoiseLite.FRACTAL_FBM
-	base.fractal_octaves = 4
-	base.fractal_lacunarity = 2.1
-	base.fractal_gain = 0.5
-
-	var placement := FastNoiseLite.new()
-	placement.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
-	placement.seed = noise_seed + 5
-	placement.frequency = PLACEMENT_FREQ
-	placement.fractal_type = FastNoiseLite.FRACTAL_FBM
-	placement.fractal_octaves = 3
-
-	var ridge := FastNoiseLite.new()
-	ridge.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	ridge.seed = noise_seed + 11
-	ridge.frequency = RIDGE_FREQ
-	ridge.fractal_type = FastNoiseLite.FRACTAL_RIDGED
-	ridge.fractal_octaves = 5
-	ridge.fractal_lacunarity = 2.0
-	ridge.fractal_gain = 0.5
-
-	var detail := FastNoiseLite.new()
-	detail.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	detail.seed = noise_seed + 23
-	detail.frequency = DETAIL_FREQ
-	detail.fractal_type = FastNoiseLite.FRACTAL_FBM
-	detail.fractal_octaves = 3
-
-	var warp := FastNoiseLite.new()
-	warp.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	warp.seed = noise_seed + 37
-	warp.frequency = WARP_FREQ
-
+	# _init_noise() must have been called already.
 	var heights := PackedFloat32Array()
 	heights.resize(GRID * GRID)
 	var half: float = SIZE * 0.5
@@ -1083,15 +1160,13 @@ func _generate_heights() -> PackedFloat32Array:
 		for x in GRID:
 			var wx: float = float(x) * CELL - half
 			var wz: float = float(z) * CELL - half
-			var sx: float = wx + warp.get_noise_2d(wx, wz) * WARP_AMP
-			var sz: float = wz + warp.get_noise_2d(wx + 999.0, wz + 999.0) * WARP_AMP
-			var b: float = base.get_noise_2d(sx, sz)
-			var p01: float = (placement.get_noise_2d(sx, sz) + 1.0) * 0.5
-			var dist_norm: float = clampf(Vector2(wx, wz).length() / (SIZE * 0.5), 0.0, 1.0)
-			p01 += dist_norm * dist_norm * EDGE_BIAS_STRENGTH
+			var sx: float = wx + _noise_warp.get_noise_2d(wx, wz) * WARP_AMP
+			var sz: float = wz + _noise_warp.get_noise_2d(wx + 999.0, wz + 999.0) * WARP_AMP
+			var b: float = _noise_base.get_noise_2d(sx, sz)
+			var p01: float = (_noise_placement.get_noise_2d(sx, sz) + 1.0) * 0.5
 			var mask: float = smoothstep(PLACEMENT_THRESHOLD, PLACEMENT_THRESHOLD + PLACEMENT_FADE, p01)
-			var r: float = ridge.get_noise_2d(sx, sz)
-			var d: float = detail.get_noise_2d(sx, sz)
+			var r: float = _noise_ridge.get_noise_2d(sx, sz)
+			var d: float = _noise_detail.get_noise_2d(sx, sz)
 			heights[z * GRID + x] = b * BASE_AMP + mask * r * RIDGE_AMP + d * DETAIL_AMP
 	return heights
 
@@ -1112,8 +1187,7 @@ func _stream_chunks(pos: Vector3) -> void:
 		for dx in range(-chunk_radius, chunk_radius + 1):
 			var cx: int = center_cx + dx
 			var cz: int = center_cz + dz
-			if cx < 0 or cz < 0 or cx >= CHUNKS_PER_SIDE or cz >= CHUNKS_PER_SIDE:
-				continue
+			# No bounds clamp — chunks tile all of ℤ² for infinite terrain.
 			var wcx: float = (float(cx) + 0.5) * CHUNK_SIZE_M - half
 			var wcz: float = (float(cz) + 0.5) * CHUNK_SIZE_M - half
 			var ddx: float = wcx - pos.x
@@ -1134,6 +1208,11 @@ func _stream_chunks(pos: Vector3) -> void:
 		if is_instance_valid(mi):
 			mi.queue_free()
 		_chunk_tiles.erase(key)
+		if _chunk_colliders.has(key):
+			var body = _chunk_colliders[key]
+			if is_instance_valid(body):
+				(body as Node).queue_free()
+			_chunk_colliders.erase(key)
 
 	var pruned: Array = []
 	for entry in _chunk_spawn_queue:
@@ -1148,13 +1227,19 @@ func _flush_chunk_queue() -> void:
 		if _chunk_tiles.has(entry.key):
 			continue
 		var mi := MeshInstance3D.new()
-		mi.mesh = _build_chunk_mesh(_heights, entry.cx, entry.cz)
+		mi.mesh = _build_chunk_mesh(entry.cx, entry.cz)
 		mi.material_override = _ground_material
 		add_child(mi)
 		_chunk_tiles[entry.key] = mi
+		# Inner chunks (original 8×8 grid) are covered by the global HeightMapShape3D.
+		# Outer chunks need their own per-chunk collision.
+		var is_outer: bool = entry.cx < 0 or entry.cx >= CHUNKS_PER_SIDE or \
+			entry.cz < 0 or entry.cz >= CHUNKS_PER_SIDE
+		if is_outer:
+			_spawn_chunk_collider(entry.cx, entry.cz, entry.key)
 		budget -= 1
 
-func _build_chunk_mesh(heights: PackedFloat32Array, cx: int, cz: int) -> ArrayMesh:
+func _build_chunk_mesh(cx: int, cz: int) -> ArrayMesh:
 	var n_verts: int = CHUNK_VERTS * CHUNK_VERTS
 	var verts := PackedVector3Array()
 	var normals := PackedVector3Array()
@@ -1165,18 +1250,16 @@ func _build_chunk_mesh(heights: PackedFloat32Array, cx: int, cz: int) -> ArrayMe
 	uvs.resize(n_verts)
 
 	var half: float = SIZE * 0.5
-	var x_base: int = cx * CHUNK_CELLS
-	var z_base: int = cz * CHUNK_CELLS
+	var x_base_world: float = float(cx) * CHUNK_SIZE_M - half
+	var z_base_world: float = float(cz) * CHUNK_SIZE_M - half
 	for z in CHUNK_VERTS:
 		for x in CHUNK_VERTS:
-			var gx: int = x_base + x
-			var gz: int = z_base + z
-			var wx: float = float(gx) * CELL - half
-			var wz: float = float(gz) * CELL - half
+			var wx: float = x_base_world + float(x) * CELL
+			var wz: float = z_base_world + float(z) * CELL
 			var i: int = z * CHUNK_VERTS + x
-			verts[i] = Vector3(wx, heights[gz * GRID + gx], wz)
+			verts[i] = Vector3(wx, _height_at_world(wx, wz), wz)
 			uvs[i] = Vector2(wx, wz) / SIZE
-			normals[i] = _heightmap_normal(heights, gx, gz)
+			normals[i] = _normal_at_world(wx, wz)
 
 	for z in CHUNK_CELLS:
 		for x in CHUNK_CELLS:
@@ -1196,6 +1279,35 @@ func _build_chunk_mesh(heights: PackedFloat32Array, cx: int, cz: int) -> ArrayMe
 	var arr := ArrayMesh.new()
 	arr.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	return arr
+
+# Spawn a physics body for a chunk that lies outside the original 8×8 baked grid.
+# HeightMapShape3D is centered at its CollisionShape3D's world position, extending
+# ±CHUNK_SIZE_M/2 in X and Z (128 cells × CELL = 128 m on each axis).
+func _spawn_chunk_collider(cx: int, cz: int, key: Vector2i) -> void:
+	var half: float = SIZE * 0.5
+	var center_x: float = (float(cx) + 0.5) * CHUNK_SIZE_M - half
+	var center_z: float = (float(cz) + 0.5) * CHUNK_SIZE_M - half
+	var data := PackedFloat32Array()
+	data.resize(CHUNK_VERTS * CHUNK_VERTS)
+	var x_base: float = float(cx) * CHUNK_SIZE_M - half
+	var z_base: float = float(cz) * CHUNK_SIZE_M - half
+	for z in CHUNK_VERTS:
+		for x in CHUNK_VERTS:
+			data[z * CHUNK_VERTS + x] = _height_at_world(x_base + float(x) * CELL, z_base + float(z) * CELL)
+	var shape := HeightMapShape3D.new()
+	shape.map_width = CHUNK_VERTS
+	shape.map_depth = CHUNK_VERTS
+	shape.map_data = data
+	var col := CollisionShape3D.new()
+	col.shape = shape
+	col.scale = Vector3(CELL, 1.0, CELL)
+	col.position = Vector3(center_x, 0.0, center_z)
+	var body := StaticBody3D.new()
+	body.collision_layer = 1
+	body.collision_mask = 0
+	body.add_child(col)
+	add_child(body)
+	_chunk_colliders[key] = body
 
 # Analytical heightmap normal via central differences in X and Z. Sampled
 # from the global heightmap so cross-chunk normals match exactly.
@@ -1311,6 +1423,50 @@ func _build_height_texture() -> void:
 		cz_data[gx] = _centerline_z(wx) if STREAM_ENABLED else 1.0e9
 	var cz_img := Image.create_from_data(GRID, 1, false, Image.FORMAT_RF, cz_data.to_byte_array())
 	_centerline_z_tex = ImageTexture.create_from_image(cz_img)
+
+# Build the initial rolling-window heightmap texture centered on world origin.
+# Called once after _build_height_texture(); patch materials reference this texture.
+func _init_patch_height_tex() -> void:
+	_patch_height_data.resize(PATCH_HMAP_SIZE * PATCH_HMAP_SIZE)
+	var half: float = PATCH_HMAP_WORLD * 0.5
+	for gz in PATCH_HMAP_SIZE:
+		var wz: float = float(gz) * PATCH_HMAP_CELL - half
+		for gx in PATCH_HMAP_SIZE:
+			_patch_height_data[gz * PATCH_HMAP_SIZE + gx] = _height_at_world(
+				float(gx) * PATCH_HMAP_CELL - half, wz)
+	var img := Image.create_from_data(PATCH_HMAP_SIZE, PATCH_HMAP_SIZE, false,
+		Image.FORMAT_RF, _patch_height_data.to_byte_array())
+	_patch_height_tex = ImageTexture.create_from_image(img)
+	_patch_hmap_center = Vector2.ZERO
+	_patch_hmap_next_center = Vector2.ZERO
+	_patch_hmap_rebuild_row = -1
+
+# Advance the in-progress rolling heightmap rebuild by PATCH_HMAP_ROW_BUDGET rows.
+# Uploads the completed texture and updates all patch material uniforms when done.
+func _tick_patch_height_rebuild() -> void:
+	if _patch_hmap_rebuild_row < 0:
+		return
+	var half: float = PATCH_HMAP_WORLD * 0.5
+	var end_row: int = mini(_patch_hmap_rebuild_row + PATCH_HMAP_ROW_BUDGET, PATCH_HMAP_SIZE)
+	for gz in range(_patch_hmap_rebuild_row, end_row):
+		var wz: float = _patch_hmap_next_center.y + float(gz) * PATCH_HMAP_CELL - half
+		for gx in PATCH_HMAP_SIZE:
+			_patch_height_data[gz * PATCH_HMAP_SIZE + gx] = _height_at_world(
+				_patch_hmap_next_center.x + float(gx) * PATCH_HMAP_CELL - half, wz)
+	_patch_hmap_rebuild_row = end_row
+	if _patch_hmap_rebuild_row >= PATCH_HMAP_SIZE:
+		var img := Image.create_from_data(PATCH_HMAP_SIZE, PATCH_HMAP_SIZE, false,
+			Image.FORMAT_RF, _patch_height_data.to_byte_array())
+		_patch_height_tex.update(img)
+		_patch_hmap_center = _patch_hmap_next_center
+		_patch_hmap_rebuild_row = -1
+		_update_patch_hmap_uniforms()
+
+func _update_patch_hmap_uniforms() -> void:
+	for m in [_grass_material_patch_short, _grass_material_patch_tall,
+			_grass_material_patch_core, _grass_material_patch_super_core]:
+		if m:
+			(m as ShaderMaterial).set_shader_parameter("patch_hmap_center", _patch_hmap_center)
 
 func _build_grass_patch() -> void:
 	# Each layer is now split into 4 quadrant MMIs (see _make_patch_layer
@@ -2587,9 +2743,6 @@ func _spawn_tile(key: Vector2i, tx: int, tz: int) -> void:
 func _build_grass_tile(tx: int, tz: int) -> Array:
 	var x0: float = float(tx) * GRASS_TILE_SIZE
 	var z0: float = float(tz) * GRASS_TILE_SIZE
-	var half: float = SIZE * 0.5
-	if x0 + GRASS_TILE_SIZE < -half or x0 > half or z0 + GRASS_TILE_SIZE < -half or z0 > half:
-		return []
 	var rng := RandomNumberGenerator.new()
 	rng.seed = noise_seed * 7919 + tz * 100003 + tx
 	var n_side: int = int(GRASS_TILE_SIZE / GRASS_SPACING)
@@ -2603,18 +2756,15 @@ func _build_grass_tile(tx: int, tz: int) -> Array:
 		for ix in n_side:
 			var wx: float = x0 + (float(ix) + rng.randf()) * GRASS_SPACING
 			var wz: float = z0 + (float(iz) + rng.randf()) * GRASS_SPACING
-			if wx < -half or wx > half or wz < -half or wz > half:
-				continue
-			# Keep grass out of the river/sand band so the sandy bank is visible
-			# and water doesn't appear to float over hidden blades.
+			# Keep grass out of the river/sand band (baked region only).
 			if STREAM_ENABLED and absf(wz - _centerline_z(wx)) < GRASS_BANK_EXCLUSION:
 				continue
 			if _in_lake_keepout(wx, wz, -1.0):
 				continue
-			var n: Vector3 = _sample_normal(_heights, wx, wz)
+			var n: Vector3 = _normal_at_world(wx, wz)
 			if n.y < GRASS_MIN_NORMAL_Y:
 				continue
-			var h: float = _sample_height(_heights, wx, wz)
+			var h: float = _height_at_world(wx, wz)
 			var elev_fade: float = 1.0 - clampf((h - GRASS_MAX_ELEV) / GRASS_ELEV_FADE, 0.0, 1.0)
 			if elev_fade <= 0.0 or rng.randf() > elev_fade:
 				continue
@@ -2734,9 +2884,6 @@ func _flush_tree_queue() -> void:
 func _build_tree_tile(tx: int, tz: int) -> Array:
 	var x0: float = float(tx) * TREE_TILE_SIZE
 	var z0: float = float(tz) * TREE_TILE_SIZE
-	var half: float = SIZE * 0.5
-	if x0 + TREE_TILE_SIZE < -half or x0 > half or z0 + TREE_TILE_SIZE < -half or z0 > half:
-		return []
 	if _tree_variants.is_empty():
 		return []
 	var rng := RandomNumberGenerator.new()
@@ -2749,8 +2896,6 @@ func _build_tree_tile(tx: int, tz: int) -> Array:
 		for ix in n_side:
 			var wx: float = x0 + (float(ix) + rng.randf()) * TREE_SPACING
 			var wz: float = z0 + (float(iz) + rng.randf()) * TREE_SPACING
-			if wx < -half or wx > half or wz < -half or wz > half:
-				continue
 			var p: float = (_tree_placement_noise.get_noise_2d(wx, wz) + 1.0) * 0.5
 			var bank_boost: float = 0.0
 			if STREAM_ENABLED:
@@ -2764,10 +2909,10 @@ func _build_tree_tile(tx: int, tz: int) -> Array:
 					bank_boost = TREE_BANK_BOOST * (1.0 - clampf(falloff_t, 0.0, 1.0))
 			if p < TREE_PLACEMENT_THRESHOLD - bank_boost:
 				continue
-			var n: Vector3 = _sample_normal(_heights, wx, wz)
+			var n: Vector3 = _normal_at_world(wx, wz)
 			if n.y < TREE_MIN_NORMAL_Y:
 				continue
-			var h: float = _sample_height(_heights, wx, wz)
+			var h: float = _height_at_world(wx, wz)
 			if h < TREE_MIN_ELEV or h > TREE_MAX_ELEV:
 				continue
 			var variant: int = rng.randi() % _tree_variants.size()
@@ -3016,6 +3161,8 @@ uniform float water_mask_active = 0.0;
 uniform float occluder_extent = 220.0;  // world extent (m) covered by the mask
 uniform float terrain_size = 1024.0;
 uniform float terrain_cell = 1.0;
+uniform vec2  patch_hmap_center = vec2(0.0);  // world XZ center of rolling heightmap texture
+uniform float patch_hmap_world  = 512.0;      // world meters covered by rolling texture
 uniform float bank_exclusion = 0.0;   // 0 disables river-band discard
 uniform vec2  patch_center = vec2(0.0);
 uniform float fade_inner   = 5.5;
@@ -3080,7 +3227,8 @@ uniform float wind_strength  = 0.55;
 uniform vec2  wind_dir       = vec2(0.7, 0.7);
 
 float sample_h(vec2 wxz) {
-	vec2 uv = (wxz + vec2(terrain_size * 0.5)) / terrain_size;
+	vec2 uv = (wxz - patch_hmap_center + vec2(patch_hmap_world * 0.5)) / patch_hmap_world;
+	uv = clamp(uv, vec2(0.0), vec2(1.0));
 	return texture(heightmap, uv).r;
 }
 
@@ -3291,7 +3439,9 @@ void fragment() {
 	sh.code = sh.code.replace("\tWIND_BLOCK", wind_block)
 	var mat := ShaderMaterial.new()
 	mat.shader = sh
-	mat.set_shader_parameter("heightmap", _height_tex)
+	mat.set_shader_parameter("heightmap", _patch_height_tex)
+	mat.set_shader_parameter("patch_hmap_center", _patch_hmap_center)
+	mat.set_shader_parameter("patch_hmap_world", PATCH_HMAP_WORLD)
 	mat.set_shader_parameter("centerline_z_tex", _centerline_z_tex)
 	mat.set_shader_parameter("bank_exclusion", GRASS_BANK_EXCLUSION if STREAM_ENABLED else 0.0)
 	mat.set_shader_parameter("terrain_size", SIZE)
@@ -3471,35 +3621,78 @@ func _scan_tree_dir(path: String, out: Array, depth_left: int) -> void:
 			out.append(full)
 		fname = dir.get_next()
 
-# Returns an Array of {"mesh": Mesh, "xform": Transform3D} for every
-# MeshInstance3D in the GLB, with xforms baked relative to the scene root so
-# they can be re-applied per-instance in a MultiMesh.
+# Returns Array[Array[{mesh, xform}]] — one parts list per top-level scene
+# root in the GLB.
+#
+# Multi-root GLBs from Polyhaven (pine_sapling_small bundles _a/_b/_c saplings;
+# othonna_cerarioides packs seven different saplings into one file;
+# rock_moss_set_01 bundles six rocks; dandelion_01 packs five LOD-0 species)
+# previously came back as ONE merged parts list, so the placement code would
+# instance the whole bouquet at every spawn point — and felling one tree
+# rotated the whole bouquet together. By returning one parts list per scene
+# root, each sub-asset becomes its own variant; placement picks among them
+# independently and felling one no longer drags the others.
+# Single-root GLBs still come back as a one-element outer array, so
+# downstream code paths don't have to special-case them.
+# Path-based dispatch: trees get green-leaf tint + matte; flowers only get
+# matte (keep natural petal color); stones get nothing.
+func _tint_part_mesh(m: Mesh, path: String) -> void:
+	if path.contains("/trees/"):
+		_tint_leaf_materials(m)
+	elif path.contains("/flowers/"):
+		_matte_flower_materials(m)
+
 func _load_tree_parts(path: String) -> Array:
 	var scene: PackedScene = load(path) as PackedScene
 	if scene == null:
 		return []
 	var root: Node = scene.instantiate()
-	var parts: Array = []
-	var stack: Array = [{"node": root, "xform": Transform3D.IDENTITY}]
-	while not stack.is_empty():
-		var entry: Dictionary = stack.pop_back()
-		var node: Node = entry.node
-		var x: Transform3D = entry.xform
-		if node is Node3D:
-			x = x * (node as Node3D).transform
-		if node is MeshInstance3D and (node as MeshInstance3D).mesh != null:
-			var m: Mesh = (node as MeshInstance3D).mesh
-			# Path-based dispatch: trees get green-leaf tint + matte; flowers
-			# only get matte (keep natural petal color); stones get nothing.
-			if path.contains("/trees/"):
-				_tint_leaf_materials(m)
-			elif path.contains("/flowers/"):
-				_matte_flower_materials(m)
-			parts.append({"mesh": m, "xform": x})
-		for c in node.get_children():
-			stack.append({"node": c, "xform": x})
+	# Godot wraps imported GLB scene-roots under a single Node3D ("RootNode").
+	# Its direct children are exactly the top-level scene nodes from the GLB —
+	# the per-asset groupings we want to split on.
+	#
+	# Multi-asset GLBs lay their roots out in a row in the source file (e.g.
+	# pine_sapling_small_b is translated to (1, 0, 0), _c to (2, 0, 0)).
+	# We treat each top_child as its own variant whose origin sits AT the
+	# top_child's pivot, so we descend into its children with an IDENTITY
+	# starting transform — top_child's own translation/rotation is dropped.
+	# Without this each split variant would carry the GLB's authoring offset
+	# and the collider built around local (0,0,0) would sit meters away from
+	# the visual mesh.
+	var groups: Array = []
+	for top_child in root.get_children():
+		var parts: Array = []
+		# Edge case: top_child itself is a MeshInstance3D. Append it with
+		# IDENTITY xform so its translation/rotation isn't baked in (and
+		# DON'T re-enter it through the stack — that would double-apply).
+		if top_child is MeshInstance3D and (top_child as MeshInstance3D).mesh != null:
+			var top_mesh: Mesh = (top_child as MeshInstance3D).mesh
+			_tint_part_mesh(top_mesh, path)
+			parts.append({"mesh": top_mesh, "xform": Transform3D.IDENTITY})
+		# Descend into top_child's children with IDENTITY as the base xform,
+		# so each part's recorded xform is RELATIVE to top_child (not to the
+		# GLB root). Each variant's coordinates therefore center on its own
+		# pivot, and the collider built around local (0,0,0) lines up with
+		# the visual mesh.
+		var stack: Array = []
+		for c in top_child.get_children():
+			stack.append({"node": c, "xform": Transform3D.IDENTITY})
+		while not stack.is_empty():
+			var entry: Dictionary = stack.pop_back()
+			var node: Node = entry.node
+			var x: Transform3D = entry.xform
+			if node is Node3D:
+				x = x * (node as Node3D).transform
+			if node is MeshInstance3D and (node as MeshInstance3D).mesh != null:
+				var m: Mesh = (node as MeshInstance3D).mesh
+				_tint_part_mesh(m, path)
+				parts.append({"mesh": m, "xform": x})
+			for c in node.get_children():
+				stack.append({"node": c, "xform": x})
+		if not parts.is_empty():
+			groups.append(parts)
 	root.free()
-	return parts
+	return groups
 
 # --- River network: D8 flow accumulation (NEW) -------------------------------
 # Replaces the old monotonic gradient-descent tracer with a real hydrology
@@ -4764,7 +4957,7 @@ var _user_alg_big_lake_cells: Dictionary = {}
 const HEIGHTS_BAKE_PATH := "res://baked/heights.bin"
 # Bumped when the on-disk format changes incompatibly so stale caches are
 # rejected rather than silently producing a broken terrain.
-const HEIGHTS_BAKE_VERSION: int = 1
+const HEIGHTS_BAKE_VERSION: int = 2
 
 # Returns true if the post-carve heightmap was loaded from cache (fast path),
 # false if it had to be regenerated. Pass --bake-heights to force regen.
@@ -5391,6 +5584,8 @@ func _carve_river_channel_into_heights() -> void:
 	# Rebuild the cached state derived from _heights.
 	_attach_collision(_heights)
 	_build_height_texture()
+	_init_patch_height_tex()
+	_update_patch_hmap_uniforms()
 	# Force visible chunks to rebuild. _chunk_tiles maps key→MeshInstance3D;
 	# queue_free + clear, and _stream_chunks rebuilds the visible ones next
 	# frame using the carved heights.
@@ -5779,36 +5974,40 @@ func _load_glb_variants(paths: Array) -> Array:
 	for p in paths:
 		if not ResourceLoader.exists(p):
 			continue
-		var parts: Array = _load_tree_parts(p)
-		if parts.is_empty():
-			continue
-		# Pass 1: find min_y across the union.
-		var min_y: float = INF
-		for part in parts:
-			var aabb: AABB = (part.mesh as Mesh).get_aabb()
-			var xf: Transform3D = part.xform
-			for i in 8:
-				var c: Vector3 = xf * aabb.get_endpoint(i)
-				if c.y < min_y:
-					min_y = c.y
-		# Pass 2: shift parts so union bottom is at y=0; compute the shifted
-		# union AABB (used by destructible bodies to size their collider).
-		var shifted: Array = []
-		var union_aabb: AABB
-		var first := true
-		for part in parts:
-			var xf: Transform3D = part.xform
-			var new_xf := Transform3D(xf.basis, xf.origin - Vector3(0, min_y, 0))
-			shifted.append({"mesh": part.mesh, "xform": new_xf})
-			var aabb: AABB = (part.mesh as Mesh).get_aabb()
-			for i in 8:
-				var c: Vector3 = new_xf * aabb.get_endpoint(i)
-				if first:
-					union_aabb = AABB(c, Vector3.ZERO)
-					first = false
-				else:
-					union_aabb = union_aabb.expand(c)
-		out.append({"parts": shifted, "aabb": union_aabb})
+		# _load_tree_parts returns one parts list per top-level scene root, so
+		# multi-asset GLBs (Polyhaven sapling/rock packs) produce one variant
+		# per packaged asset. Single-asset GLBs come back as a one-element list.
+		var groups: Array = _load_tree_parts(p)
+		for parts in groups:
+			if parts.is_empty():
+				continue
+			# Pass 1: find min_y across the union.
+			var min_y: float = INF
+			for part in parts:
+				var aabb: AABB = (part.mesh as Mesh).get_aabb()
+				var xf: Transform3D = part.xform
+				for i in 8:
+					var c: Vector3 = xf * aabb.get_endpoint(i)
+					if c.y < min_y:
+						min_y = c.y
+			# Pass 2: shift parts so union bottom is at y=0; compute the shifted
+			# union AABB (used by destructible bodies to size their collider).
+			var shifted: Array = []
+			var union_aabb: AABB
+			var first := true
+			for part in parts:
+				var xf: Transform3D = part.xform
+				var new_xf := Transform3D(xf.basis, xf.origin - Vector3(0, min_y, 0))
+				shifted.append({"mesh": part.mesh, "xform": new_xf})
+				var aabb: AABB = (part.mesh as Mesh).get_aabb()
+				for i in 8:
+					var c: Vector3 = new_xf * aabb.get_endpoint(i)
+					if first:
+						union_aabb = AABB(c, Vector3.ZERO)
+						first = false
+					else:
+						union_aabb = union_aabb.expand(c)
+			out.append({"parts": shifted, "aabb": union_aabb})
 	return out
 
 # --- Land stones: streamed disk of tiles, deterministic per (seed,tx,tz) ------
@@ -5870,9 +6069,6 @@ func _flush_stone_queue() -> void:
 func _build_stone_tile(tx: int, tz: int) -> Array:
 	var x0: float = float(tx) * STONE_TILE_SIZE
 	var z0: float = float(tz) * STONE_TILE_SIZE
-	var half: float = SIZE * 0.5
-	if x0 + STONE_TILE_SIZE < -half or x0 > half or z0 + STONE_TILE_SIZE < -half or z0 > half:
-		return []
 	var rng := RandomNumberGenerator.new()
 	rng.seed = noise_seed * 13331 + tz * 100193 + tx
 	var stone_script: GDScript = preload("res://entities/stone/stone.gd")
@@ -5885,8 +6081,6 @@ func _build_stone_tile(tx: int, tz: int) -> Array:
 			for ix in ln_side:
 				var wx: float = x0 + (float(ix) + rng.randf()) * STONE_LARGE_SPACING
 				var wz: float = z0 + (float(iz) + rng.randf()) * STONE_LARGE_SPACING
-				if wx < -half or wx > half or wz < -half or wz > half:
-					continue
 				if not _stone_placement_ok(wx, wz, rng, STONE_LARGE_THRESHOLD):
 					continue
 				var v: int = rng.randi() % _stone_large_variants.size()
@@ -5905,8 +6099,6 @@ func _build_stone_tile(tx: int, tz: int) -> Array:
 			for ix in mn_side:
 				var wx2: float = x0 + (float(ix) + rng.randf()) * STONE_MEDIUM_SPACING
 				var wz2: float = z0 + (float(iz) + rng.randf()) * STONE_MEDIUM_SPACING
-				if wx2 < -half or wx2 > half or wz2 < -half or wz2 > half:
-					continue
 				if not _stone_placement_ok(wx2, wz2, rng, STONE_MEDIUM_THRESHOLD):
 					continue
 				var v2: int = rng.randi() % _stone_medium_variants.size()
@@ -5944,10 +6136,10 @@ func _stone_placement_ok(wx: float, wz: float, rng: RandomNumberGenerator, thres
 	p += (rng.randf() - 0.5) * 0.18
 	if p < threshold:
 		return false
-	var n: Vector3 = _sample_normal(_heights, wx, wz)
+	var n: Vector3 = _normal_at_world(wx, wz)
 	if n.y < STONE_MIN_NORMAL_Y:
 		return false
-	var h: float = _sample_height(_heights, wx, wz)
+	var h: float = _height_at_world(wx, wz)
 	if h < STONE_MIN_ELEV or h > STONE_MAX_ELEV:
 		return false
 	return true
@@ -5956,7 +6148,7 @@ func _stone_transform(
 	wx: float, wz: float, rng: RandomNumberGenerator,
 	scale_base: float, scale_jitter: float, sink: float
 ) -> Transform3D:
-	var n: Vector3 = _sample_normal(_heights, wx, wz)
+	var n: Vector3 = _normal_at_world(wx, wz)
 	var up: Vector3 = n.lerp(Vector3.UP, 0.35).normalized()
 	var align := Basis(Quaternion(Vector3.UP, up))
 	var yaw := Basis(Vector3.UP, rng.randf() * TAU)
@@ -5966,7 +6158,7 @@ func _stone_transform(
 	var scale_basis := Basis().scaled(Vector3(sxz, sy, sxz))
 	# Parts are pre-shifted in _load_glb_variants so mesh-local y=0 is the
 	# bottom — placement origin is just ground level minus sink.
-	var h: float = _sample_height(_heights, wx, wz)
+	var h: float = _height_at_world(wx, wz)
 	return Transform3D(align * yaw * scale_basis, Vector3(wx, h - sink, wz))
 
 # Bundle a per-variant transform list into one MultiMesh per sub-mesh part —
@@ -6094,7 +6286,7 @@ func _build_brook_tile(tx: int, tz: int) -> Array:
 			var sx: float = wx + perp.x * lateral * side + tang.x * (rng.randf() - 0.5) * BROOK_STEP * 0.5
 			var sz: float = cz + perp.y * lateral * side + tang.y * (rng.randf() - 0.5) * BROOK_STEP * 0.5
 			var use_med: bool = (rng.randf() < BROOK_MED_CHANCE) and not _brook_medium_variants.is_empty()
-			var ground_h: float = _sample_height(_heights, sx, sz)
+			var ground_h: float = _height_at_world(sx, sz)
 			var scale_base: float = BROOK_MED_SCALE if use_med else BROOK_SMALL_SCALE
 			var variant_pool: Array = _brook_medium_variants if use_med else _brook_small_variants
 			if variant_pool.is_empty():
@@ -6124,7 +6316,7 @@ func _brook_stone_transform(
 	wx: float, wz: float, h: float, rng: RandomNumberGenerator,
 	scale_base: float, sink: float
 ) -> Transform3D:
-	var n: Vector3 = _sample_normal(_heights, wx, wz)
+	var n: Vector3 = _normal_at_world(wx, wz)
 	var up: Vector3 = n.lerp(Vector3.UP, 0.45).normalized()
 	var align := Basis(Quaternion(Vector3.UP, up))
 	var yaw := Basis(Vector3.UP, rng.randf() * TAU)
@@ -6216,9 +6408,6 @@ func _flush_flower_queue() -> void:
 func _build_flower_tile(tx: int, tz: int) -> Array:
 	var x0: float = float(tx) * FLOWER_TILE_SIZE
 	var z0: float = float(tz) * FLOWER_TILE_SIZE
-	var half: float = SIZE * 0.5
-	if x0 + FLOWER_TILE_SIZE < -half or x0 > half or z0 + FLOWER_TILE_SIZE < -half or z0 > half:
-		return []
 
 	var rng := RandomNumberGenerator.new()
 	rng.seed = noise_seed * 86413 + tz * 100069 + tx
@@ -6244,8 +6433,6 @@ func _build_flower_tile(tx: int, tz: int) -> Array:
 		for ix in n_side:
 			var wx: float = x0 + (float(ix) + rng.randf()) * FLOWER_DENSITY_SPACING
 			var wz: float = z0 + (float(iz) + rng.randf()) * FLOWER_DENSITY_SPACING
-			if wx < -half or wx > half or wz < -half or wz > half:
-				continue
 			var bank_boost: float = 0.0
 			if STREAM_ENABLED:
 				if _in_lake_keepout(wx, wz, 0.0):
@@ -6259,10 +6446,10 @@ func _build_flower_tile(tx: int, tz: int) -> Array:
 			var p: float = (_flower_patch_noise.get_noise_2d(wx, wz) + 1.0) * 0.5
 			if p < tile_threshold - bank_boost:
 				continue
-			var n: Vector3 = _sample_normal(_heights, wx, wz)
+			var n: Vector3 = _normal_at_world(wx, wz)
 			if n.y < FLOWER_MIN_NORMAL_Y:
 				continue
-			var h: float = _sample_height(_heights, wx, wz)
+			var h: float = _height_at_world(wx, wz)
 			if h < FLOWER_MIN_ELEV or h > FLOWER_MAX_ELEV:
 				continue
 			var variant: int

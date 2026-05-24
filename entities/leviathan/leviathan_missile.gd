@@ -61,7 +61,7 @@ extends Area3D
 # sync. Forced off in TERMINAL so the run-in stays clean.
 
 const BOOST_SPEED: float = 24.0              # launch speed; visibly building toward cruise
-const CRUISE_SPEED: float = 42.0             # ~3.2× player base; faster than before but trim turn authority below
+const CRUISE_SPEED: float = 28.0             # slowed for dodgeability
 const N_NAV: float = 4.0                     # navigation constant; PN textbooks use 3–5
 # Lateral cap intentionally LOW relative to speed so missiles are juke-dodgeable.
 # Minimum turn radius = CRUISE_SPEED² / MAX_LATERAL_ACCEL = 42² / 220 ≈ 8 m.
@@ -70,7 +70,7 @@ const N_NAV: float = 4.0                     # navigation constant; PN textbooks
 # rate is MAX_LATERAL_ACCEL / CRUISE_SPEED ≈ 5.2 rad/s ≈ 300 °/s — agile
 # enough to track normal movement, sluggish enough that a sharp direction
 # change at the right moment is a guaranteed miss.
-const MAX_LATERAL_ACCEL: float = 220.0       # airframe lateral cap (~22 g) — tuned for dodgeable
+const MAX_LATERAL_ACCEL: float = 100.0       # looser homing — wider turn radius, easier to juke
 const BOOST_DURATION: float = 0.55           # open-loop launch — gives the salvo its visible fan and a taller fountain
 const LIFETIME: float = 12.0
 const MISSILE_DAMAGE: int = 3

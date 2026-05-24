@@ -1,0 +1,209 @@
+[gd_scene format=3 uid="uid://c4ufamqxbb37t"]
+
+[ext_resource type="PackedScene" uid="uid://cnhf4lmks4b4r" path="res://assets/models/ghost_leviathan.glb" id="1_5d8d1"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_5d8d1"]
+radius = 1.71
+height = 16.871
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_p4xe3"]
+radius = 2.155
+height = 4.3111
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_58jyn"]
+radius = 1.2
+height = 2.401
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_206tx"]
+radius = 2.2162
+height = 4.4334
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_gk4dr"]
+radius = 1.9845
+height = 3.97
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_q3fed"]
+radius = 2.2162
+height = 4.4334
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_0e2xk"]
+radius = 2.0524
+height = 6.4044
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_g3i1i"]
+radius = 1.7103
+height = 7.4175
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_x35u7"]
+radius = 1.5085
+height = 5.812
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_myu1l"]
+radius = 1.2474
+height = 7.0617
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_7dub0"]
+radius = 0.9168
+height = 7.0639
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_aq8u5"]
+radius = 0.7581
+height = 4.8038
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_ahjoi"]
+radius = 0.5851
+height = 4.0059
+
+[node name="LeviathanHitboxes" type="Node3D" unique_id=1266587129]
+
+[node name="_PreviewModel" parent="." unique_id=2140550244 instance=ExtResource("1_5d8d1")]
+transform = Transform3D(85.622215, 0, 0, 0, 85.622215, 0, 0, 0, 85.622215, 0, 0, 0)
+
+[node name="neck3_019_attach" type="Node3D" parent="." unique_id=1408440596]
+transform = Transform3D(-0.0576391, 0.046542957, -1.710841, 0.8544622, 1.4839898, 0.011584243, 1.482915, -0.8532716, -0.07317321, -0.94563633, -1.427232, 3.8510976)
+metadata/bone_name = "neck3_019"
+
+[node name="neck3_019__head_020" type="CollisionShape3D" parent="neck3_019_attach" unique_id=1417060010]
+transform = Transform3D(-0.99999976, 1.1175871e-08, -8.940697e-08, 1.1920929e-07, 4.284084e-08, -0.99999976, 3.7252903e-09, 0.9999999, 4.8428774e-08, 1.683268, 0.32957292, -0.027320564)
+shape = SubResource("CapsuleShape3D_5d8d1")
+metadata/hitbox_id = "neck3_019->head_020"
+
+[node name="neck2_018_attach" type="Node3D" parent="." unique_id=1670175682]
+transform = Transform3D(-0.06917986, -0.0064422223, -1.7110345, -0.22668168, 1.6973721, 0.0027742924, 1.6959634, 0.22660726, -0.06942382, -0.8626206, -1.1552144, 1.8159411)
+metadata/bone_name = "neck2_018"
+
+[node name="neck2_018__neck3_019" type="CollisionShape3D" parent="neck2_018_attach" unique_id=1925182049]
+transform = Transform3D(-2.9802322e-07, 1.0000001, 4.8428774e-08, 1, 2.9802322e-07, -4.656613e-10, 0, -5.2154064e-08, 1.0000001, 0.5348011, 0.48820478, 0.0007979572)
+shape = SubResource("CapsuleShape3D_p4xe3")
+metadata/hitbox_id = "neck2_018->neck3_019"
+
+[node name="neck1_017_attach" type="Node3D" parent="." unique_id=1970736652]
+transform = Transform3D(-0.05459716, -0.047100276, -1.7109255, -0.9972695, 1.3920754, -0.006498891, 1.3910199, 0.996178, -0.07181262, -0.79710424, 0.04150994, 0.14671713)
+metadata/bone_name = "neck1_017"
+
+[node name="neck1_017__neck2_018" type="CollisionShape3D" parent="neck1_017_attach" unique_id=1729458413]
+transform = Transform3D(2.7318782e-07, 1, 1.1951968e-07, 1, -2.7318782e-07, 0, -3.265132e-14, -1.1951968e-07, 1, 0.60000026, -1.6391277e-07, -7.171184e-08)
+shape = SubResource("CapsuleShape3D_58jyn")
+metadata/hitbox_id = "neck1_017->neck2_018"
+
+[node name="root_03_attach" type="Node3D" parent="." unique_id=1911172446]
+transform = Transform3D(0.07788362, -0.054817818, 1.7097938, 0.06495119, 1.710425, 0.05187947, -1.7094388, 0.062491115, 0.079870984, -0.77935404, -0.107051626, -0.17271858)
+metadata/bone_name = "root_03"
+
+[node name="root_03__neck1_017" type="CollisionShape3D" parent="root_03_attach" unique_id=129305587]
+transform = Transform3D(0.45532066, -0.89031154, -0.0053398204, 0.89032423, 0.45532715, 0, -0.0024313652, 0.0047541717, -0.99998575, -0.09169571, 0.046895437, 0.00048964564)
+shape = SubResource("CapsuleShape3D_206tx")
+metadata/hitbox_id = "root_03->neck1_017"
+
+[node name="@Node3D@2874" type="Node3D" parent="." unique_id=788342812]
+transform = Transform3D(0.07788362, -0.054817818, 1.7097938, 0.06495119, 1.710425, 0.05187947, -1.7094388, 0.062491115, 0.079870984, -0.77935404, -0.107051626, -0.17271858)
+metadata/bone_name = "root_03"
+
+[node name="root_03__tail_1_030" type="CollisionShape3D" parent="@Node3D@2874" unique_id=1737772337]
+transform = Transform3D(-0.0106863715, 0.99775803, 0.06606659, 0.9999427, 0.01070977, 0, 0.000707558, -0.06606281, 0.99781525, 1.0019436, 0.010754697, -0.06633994)
+shape = SubResource("CapsuleShape3D_gk4dr")
+metadata/hitbox_id = "root_03->tail_1_030"
+
+[node name="tail_1_030_attach" type="Node3D" parent="." unique_id=255636248]
+transform = Transform3D(0.1028392, -0.11793276, 1.7052802, 0.082499936, 1.7067147, 0.11305671, -1.7073615, 0.07536528, 0.10817676, -0.85131836, 0.053010046, -3.607494)
+metadata/bone_name = "tail_1_030"
+
+[node name="tail_1_030__tail_2_046" type="CollisionShape3D" parent="tail_1_030_attach" unique_id=22325507]
+transform = Transform3D(-0.00021349668, 0.9999318, -0.011671789, 1, 0.00021351122, 0, -2.492058e-06, 0.011671788, 0.9999319, 1.0020607, 0.00021396577, 0.011696637)
+shape = SubResource("CapsuleShape3D_q3fed")
+metadata/hitbox_id = "tail_1_030->tail_2_046"
+
+[node name="tail_2_046_attach" type="Node3D" parent="." unique_id=1753467569]
+transform = Transform3D(0.058262777, -0.17107683, 1.7028812, 0.08006597, 1.7022735, 0.16827653, -1.7095786, 0.07389354, 0.06591555, -0.6053745, 0.22172505, -7.0266905)
+metadata/bone_name = "tail_2_046"
+
+[node name="tail_2_046__tail_3_062" type="CollisionShape3D" parent="tail_2_046_attach" unique_id=1602700119]
+transform = Transform3D(0.004280137, 0.99998975, 0.0014552826, 0.9999909, -0.004280141, 0, -6.228815e-06, -0.0014552692, 0.9999989, 2.9044502, -0.012431584, -0.0042268)
+shape = SubResource("CapsuleShape3D_0e2xk")
+metadata/hitbox_id = "tail_2_046->tail_3_062"
+
+[node name="tail_3_062_attach" type="Node3D" parent="." unique_id=1187287768]
+transform = Transform3D(-0.03166699, -0.26372114, 1.6917195, 0.04089351, 1.6914084, 0.26443833, -1.7116624, 0.045288652, -0.024980243, -0.2770737, 0.64307386, -16.959858)
+metadata/bone_name = "tail_3_062"
+
+[node name="tail_3_062__tail_4_064" type="CollisionShape3D" parent="tail_3_062_attach" unique_id=714157279]
+transform = Transform3D(0.029996125, 0.99923813, 0.024967756, 0.99954975, -0.03000548, 0, -0.0007491695, -0.024956515, 0.99968827, 2.9036913, -0.08719308, -0.07252127)
+shape = SubResource("CapsuleShape3D_g3i1i")
+metadata/hitbox_id = "tail_3_062->tail_4_064"
+
+[node name="tail_4_064_attach" type="Node3D" parent="." unique_id=817538523]
+transform = Transform3D(-0.060678963, -0.41338262, 1.6606925, -0.07916963, 1.6606339, 0.41047543, -1.7095367, -0.06223221, -0.07795454, -0.6603581, 0.5472452, -26.904411)
+metadata/bone_name = "tail_4_064"
+
+[node name="tail_4_064__tail_5_066" type="CollisionShape3D" parent="tail_4_064_attach" unique_id=1478744609]
+transform = Transform3D(0.01898746, 0.9995399, -0.023655113, 0.99981964, -0.018992774, 0, 0.0004492762, 0.023650847, 0.99972016, 2.9046507, -0.05519277, 0.06872907)
+shape = SubResource("CapsuleShape3D_x35u7")
+metadata/hitbox_id = "tail_4_064->tail_5_066"
+
+[node name="tail_5_066_attach" type="Node3D" parent="." unique_id=202311429]
+transform = Transform3D(0.055739608, -0.562124, 1.6165942, -0.09704523, 1.6138097, 0.56450224, -1.708783, -0.10998776, 0.020673243, -0.73895335, -0.039561853, -36.839474)
+metadata/bone_name = "tail_5_066"
+
+[node name="tail_5_066__tail_6_068" type="CollisionShape3D" parent="tail_5_066_attach" unique_id=944827687]
+transform = Transform3D(-0.01629452, 0.9996563, -0.020533806, 0.9998672, 0.016297955, 0, -0.00033465907, 0.020531077, 0.9997892, 2.903842, 0.047342956, 0.0596395)
+shape = SubResource("CapsuleShape3D_myu1l")
+metadata/hitbox_id = "tail_5_066->tail_6_068"
+
+[node name="tail_6_068_attach" type="Node3D" parent="." unique_id=1089783690]
+transform = Transform3D(0.09043745, -0.6785925, 1.5696497, -0.0020842364, 1.5717969, 0.6796413, -1.7100532, -0.03780359, 0.08218372, -0.27563486, -0.38303143, -46.771496)
+metadata/bone_name = "tail_6_068"
+
+[node name="tail_6_068__tail_7_070" type="CollisionShape3D" parent="tail_6_068_attach" unique_id=1575429355]
+transform = Transform3D(-0.037282873, 0.9992571, 0.009756288, 0.9993047, 0.037284646, 0, 0.00036375975, -0.009749504, 0.9999524, 2.903572, 0.108339146, -0.028329432)
+shape = SubResource("CapsuleShape3D_7dub0")
+metadata/hitbox_id = "tail_6_068->tail_7_070"
+
+[node name="tail_7_070_attach" type="Node3D" parent="." unique_id=150199819]
+transform = Transform3D(-0.014215937, -0.82410014, 1.5010406, 0.08646606, 1.4988303, 0.82370615, -1.7102007, 0.082629785, 0.029168531, 0.0135777, -0.093068376, -56.71487)
+metadata/bone_name = "tail_7_070"
+
+[node name="tail_7_070__tail_8_072" type="CollisionShape3D" parent="tail_7_070_attach" unique_id=1381170852]
+transform = Transform3D(0.004654782, 0.9995316, 0.030245876, 0.99998915, -0.0046569128, 0, -0.00014085241, -0.030245548, 0.9995425, 2.1775913, -0.010145605, -0.06589331)
+shape = SubResource("CapsuleShape3D_aq8u5")
+metadata/hitbox_id = "tail_7_070->tail_8_072"
+
+[node name="tail_8_072_attach" type="Node3D" parent="." unique_id=581369614]
+transform = Transform3D(-0.12628463, -0.9163962, 1.4410886, -0.019535141, 1.4457021, 0.9176189, -1.7076696, 0.051230468, -0.117067724, -0.22943044, 0.14454085, -64.16863)
+metadata/bone_name = "tail_8_072"
+
+[node name="tail_8_072__tail_9_074" type="CollisionShape3D" parent="tail_8_072_attach" unique_id=1103633950]
+transform = Transform3D(0.018224446, 0.99889016, 0.043432485, 0.99983364, -0.01824166, 0, -0.00079228065, -0.04342526, 0.99905634, 2.000742, -0.03653741, -0.08697927)
+shape = SubResource("CapsuleShape3D_ahjoi")
+metadata/hitbox_id = "tail_8_072->tail_9_074"
+
+[node name="head_finInnrBase_021_attach" type="Node3D" parent="." unique_id=61688217]
+transform = Transform3D(0.076670006, 0.10096015, 1.707599, 0.35671237, 1.6312271, -0.117193885, -1.6731234, 0.3524069, 0.05326388, -1.0183223, 2.0109174, 6.168325)
+metadata/bone_name = "head_finInnrBase_021"
+
+[node name="head_finInnrEnd_022_attach" type="Node3D" parent="." unique_id=1638941348]
+transform = Transform3D(0.07578074, 0.122737244, 1.7061727, 0.06873758, 1.6714865, -0.12834762, -1.7093849, 0.0726553, 0.0704772, -0.88305485, 2.2781398, 3.1454468)
+metadata/bone_name = "head_finInnrEnd_022"
+
+[node name="head_finMidlEnd_023_attach" type="Node3D" parent="." unique_id=863833799]
+transform = Transform3D(0.08799485, 0.09777064, 1.7073847, 0.29296678, 1.6835086, -0.11150223, -1.6849006, 0.29783133, 0.06978129, -0.86240405, 3.1135867, 4.2107596)
+metadata/bone_name = "head_finMidlEnd_023"
+
+[node name="head_finOutrBase_024_attach" type="Node3D" parent="." unique_id=2021371677]
+transform = Transform3D(0.11495345, -0.03627552, 1.7081962, 1.0758216, 1.3315868, -0.044119865, -1.3273487, 1.0761149, 0.112176865, -1.1479962, 1.135096, 8.937196)
+metadata/bone_name = "head_finOutrBase_024"
+
+[node name="head_finOutrEnd_025_attach" type="Node3D" parent="." unique_id=412795466]
+transform = Transform3D(0.11719622, -0.015606116, 1.7083572, 0.83083683, 1.4967617, -0.043323632, -1.492795, 0.83181953, 0.11000711, -0.8804499, 3.756833, 5.867742)
+metadata/bone_name = "head_finOutrEnd_025"
+
+[node name="JawC_026_attach" type="Node3D" parent="." unique_id=223500864]
+transform = Transform3D(-0.07647912, -0.0055488567, -1.7107265, -0.44997892, 1.6522002, 0.014757554, 1.6504947, 0.45018715, -0.07524668, -0.9910201, -1.6174196, 4.83601)
+metadata/bone_name = "JawC_026"
+
+[node name="JawL_027_attach" type="Node3D" parent="." unique_id=744551137]
+transform = Transform3D(-0.8964576, -1.458215, 0.0493783, -0.5868015, 0.30727068, -1.5791489, 1.3358485, -0.8435985, -0.66054046, 1.8792173, -0.6918589, 4.9458385)
+metadata/bone_name = "JawL_027"
+
+[node name="JawR_028_attach" type="Node3D" parent="." unique_id=1044043998]
+transform = Transform3D(-0.7635651, -1.5326408, 0.021139555, 0.60296005, -0.27862594, 1.5783756, -1.4092091, 0.7112285, 0.66388774, -3.8434472, -0.6424925, 4.694126)
+metadata/bone_name = "JawR_028"

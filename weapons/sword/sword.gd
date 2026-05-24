@@ -80,6 +80,13 @@ func _ready() -> void:
 	super()
 	hit_area.monitoring = false
 	hit_area.body_entered.connect(_on_body_entered)
+	# Vestigial: the HitArea was the original blade-following hit volume,
+	# replaced by the code-driven swing-cone in _perform_swing_hit_scan.
+	# Disable its CollisionShape3D children too so the debug visualizer
+	# doesn't draw stale boxes around the blade mesh.
+	for c in hit_area.get_children():
+		if c is CollisionShape3D:
+			(c as CollisionShape3D).disabled = true
 	_setup_trail()
 	# Capture the editor-set rig pose as the rest pose. Combat tweens read
 	# these vars instead of the REST_* constants, so editor tuning is honored.
